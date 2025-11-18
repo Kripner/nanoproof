@@ -12,6 +12,7 @@ dependencies = [
     "regex>=2025.9.1",
     "setuptools>=80.9.0",
     "tiktoken>=0.11.0",
+    "tqdm>=4.66.0",
     "tokenizers>=0.22.0",
     "torch>=2.8.0",
     "wandb>=0.21.3",

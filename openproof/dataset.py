@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 from huggingface_hub import get_token
+from tqdm import tqdm
 
 from common import get_base_dir
 
@@ -56,9 +57,10 @@ def parquets_iter_batched(split, start=0, step=1):
     assert split in ["train", "val"], "split must be 'train' or 'val'"
     parquet_paths = list_parquet_files()
     parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
-    for filepath in parquet_paths:
+    for filepath in tqdm(parquet_paths, desc=f"Processing {split} parquet files"):
         pf = pq.ParquetFile(filepath)
-        for rg_idx in range(start, pf.num_row_groups, step):
+        row_group_indices = list(range(start, pf.num_row_groups, step))
+        for rg_idx in tqdm(row_group_indices, desc=f"Row groups in {os.path.basename(filepath)}", leave=False):
             rg = pf.read_row_group(rg_idx)
             texts = rg.column('text').to_pylist()
             yield texts
@@ -93,10 +95,13 @@ def download_single_file(index):
             # Write to temporary file first
             temp_path = filepath + f".tmp"
             Path(temp_path).parent.mkdir(parents=True, exist_ok=True)
+            total_size = int(response.headers.get('content-length', 0))
             with open(temp_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):  # 1MB chunks
-                    if chunk:
-                        f.write(chunk)
+                with tqdm(total=total_size, unit='B', unit_scale=True, unit_divisor=1024, desc=os.path.basename(filename), leave=False) as pbar:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):  # 1MB chunks
+                        if chunk:
+                            f.write(chunk)
+                            pbar.update(len(chunk))
             # Move temp file to final location
             os.rename(temp_path, filepath)
             print(f"Successfully downloaded {filename}")
@@ -137,7 +142,11 @@ if __name__ == "__main__":
     print(f"Target directory: {DATA_DIR}")
     print()
     with Pool(processes=args.num_workers) as pool:
-        results = pool.map(download_single_file, ids_to_download)
+        results = list(tqdm(
+            pool.imap(download_single_file, ids_to_download),
+            total=len(ids_to_download),
+            desc="Downloading shards"
+        ))
 
     successful = sum(1 for success in results if success)
     print(f"Done! Downloaded: {successful}/{len(ids_to_download)} shards to {DATA_DIR}")

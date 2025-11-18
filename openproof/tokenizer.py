@@ -137,7 +137,9 @@ class HuggingFaceTokenizer:
         print(f"Saved tokenizer to {tokenizer_path}")
 
 def get_tokenizer():
-    from common import get_base_dir
-    base_dir = get_base_dir()
-    tokenizer_dir = os.path.join(base_dir, "tokenizer")
-    return HuggingFaceTokenizer.from_directory(tokenizer_dir)
+    # TODO: pretrain our own tokenizer
+    return HuggingFaceTokenizer.from_pretrained("gpt2")
+    # from common import get_base_dir
+    # base_dir = get_base_dir()
+    # tokenizer_dir = os.path.join(base_dir, "tokenizer")
+    # return HuggingFaceTokenizer.from_directory(tokenizer_dir)
