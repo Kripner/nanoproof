@@ -49,12 +49,12 @@ logger = logging.getLogger(__name__)
 
 def get_base_dir():
     # co-locate nanochat intermediates with other cached data in ~/.cache (by default)
-    if os.environ.get("NANOCHAT_BASE_DIR"):
-        nanochat_dir = os.environ.get("NANOCHAT_BASE_DIR")
+    if os.environ.get("OPENPROOF_BASE_DIR"):
+        nanochat_dir = os.environ.get("OPENPROOF_BASE_DIR")
     else:
         home_dir = os.path.expanduser("~")
         cache_dir = os.path.join(home_dir, ".cache")
-        nanochat_dir = os.path.join(cache_dir, "nanochat")
+        nanochat_dir = os.path.join(cache_dir, "openproof")
     os.makedirs(nanochat_dir, exist_ok=True)
     return nanochat_dir
 

@@ -7,6 +7,7 @@ requires-python = ">=3.10"
 dependencies = [
     "datasets>=4.0.0",
     "fastapi>=0.117.1",
+    "huggingface_hub>=0.20.0",
     "psutil>=7.1.0",
     "regex>=2025.9.1",
     "setuptools>=80.9.0",
