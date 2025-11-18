@@ -1,2 +1,3 @@
 torch
 tiktoken
+tokenizers
