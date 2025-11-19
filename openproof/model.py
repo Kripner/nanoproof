@@ -19,9 +19,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from common import get_dist_info, print0
-from muon import Muon, DistMuon
-from adamw import DistAdamW
+from openproof.common import get_dist_info, print0
+from openproof.muon import Muon, DistMuon
+from openproof.adamw import DistAdamW
 
 @dataclass
 class NetworkConfig:
@@ -285,19 +285,18 @@ class Network(nn.Module):
         num_flops_per_token = 6 * (nparams - nparams_embedding) + 12 * l * h * q * t
         return num_flops_per_token
 
-    def setup_optimizers(self, unembedding_lr=0.004, embedding_lr=0.2, matrix_lr=0.02, weight_decay=0.0):
+    def setup_optimizers(self, unembedding_lr=0.004, embedding_lr=0.2, value_head_lr=0.004, matrix_lr=0.02, weight_decay=0.0):
         model_dim = self.config.n_embd
         ddp, rank, local_rank, world_size = get_dist_info()
         # Separate out all parameters into 3 groups (matrix, embedding, lm_head)
-        matrix_params = list(self.transformer.transformer.h.parameters()) + list(self.value_head.parameters())
+        matrix_params = list(self.transformer.transformer.h.parameters())
         embedding_params = list(self.transformer.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
+        value_head_params = list(self.value_head.parameters())
         
         # Verify we have all parameters
         all_params_len = len(list(self.parameters()))
-        grouped_params_len = len(matrix_params) + len(embedding_params) + len(lm_head_params)
-        # Note: This assertion might fail if I missed some params (e.g. value head params need to be in matrix_params or similar)
-        # Added value_head params to matrix_params for now as they are linear layers mostly.
+        grouped_params_len = len(matrix_params) + len(embedding_params) + len(lm_head_params) + len(value_head_params)
         assert all_params_len == grouped_params_len, f"Parameters count mismatch: {all_params_len} != {grouped_params_len}"
 
         # Create the AdamW optimizer for the embedding and lm_head
@@ -307,6 +306,7 @@ class Network(nn.Module):
             print(f"Scaling the LR for the AdamW parameters ∝1/√({model_dim}/768) = {dmodel_lr_scale:.6f}")
         adam_groups = [
             dict(params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale),
+            dict(params=value_head_params, lr=value_head_lr * dmodel_lr_scale),
             dict(params=embedding_params, lr=embedding_lr * dmodel_lr_scale),
         ]
         adamw_kwargs = dict(betas=(0.8, 0.95), eps=1e-10, weight_decay=weight_decay)
