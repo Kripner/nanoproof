@@ -25,6 +25,7 @@ from openproof.common import compute_init, compute_cleanup, print0, DummyWandb, 
 from openproof.tokenizer import get_tokenizer, get_token_bytes
 from openproof.checkpoints import save_checkpoint, load_checkpoint
 from openproof.engine import Engine
+from openproof.loss_eval import evaluate_bpb
 print_banner()
 
 # -----------------------------------------------------------------------------
