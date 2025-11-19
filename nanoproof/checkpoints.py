@@ -8,9 +8,9 @@ import json
 import logging
 import torch
 
-from openproof.model import Network, NetworkConfig
-from openproof.tokenizer import get_tokenizer
-from openproof.common import get_base_dir, setup_default_logging
+from nanoproof.model import Network, NetworkConfig
+from nanoproof.tokenizer import get_tokenizer
+from nanoproof.common import get_base_dir, setup_default_logging
 
 # Set up logging
 setup_default_logging()

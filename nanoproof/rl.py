@@ -3,8 +3,8 @@ import random
 from dataclasses import dataclass
 from typing import Callable
 
-from core import Observation, Theorem, Action
-from model import Network
+from nanoproof.core import Observation, Theorem, Action
+from nanoproof.model import Network
 
 
 class Player(enum.Enum):

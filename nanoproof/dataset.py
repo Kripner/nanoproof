@@ -21,7 +21,7 @@ import pyarrow.parquet as pq
 from huggingface_hub import get_token
 from tqdm import tqdm
 
-from common import get_base_dir
+from nanoproof.common import get_base_dir
 
 # -----------------------------------------------------------------------------
 # The specifics of the current pretraining dataset

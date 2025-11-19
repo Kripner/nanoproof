@@ -1,5 +1,5 @@
 [project]
-name = "openproof"
+name = "nanoproof"
 version = "0.1.0"
 description = "inspired by AlphaProof, but minimal and open"
 readme = "README.md"

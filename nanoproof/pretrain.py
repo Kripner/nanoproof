@@ -19,13 +19,13 @@ from contextlib import nullcontext
 import wandb
 import torch
 
-from openproof.model import Network, NetworkConfig
-from openproof.dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
-from openproof.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
-from openproof.tokenizer import get_tokenizer, get_token_bytes
-from openproof.checkpoints import save_checkpoint, load_checkpoint
-from openproof.engine import Engine
-from openproof.loss_eval import evaluate_bpb
+from nanoproof.model import Network, NetworkConfig
+from nanoproof.dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
+from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
+from nanoproof.tokenizer import get_tokenizer, get_token_bytes
+from nanoproof.checkpoints import save_checkpoint, load_checkpoint
+from nanoproof.engine import Engine
+from nanoproof.loss_eval import evaluate_bpb
 print_banner()
 
 # -----------------------------------------------------------------------------

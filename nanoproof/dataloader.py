@@ -5,9 +5,9 @@ from collections import deque
 import torch
 import pyarrow.parquet as pq
 
-from common import get_dist_info
-from dataset import list_parquet_files
-from tokenizer import get_tokenizer
+from nanoproof.common import get_dist_info
+from nanoproof.dataset import list_parquet_files
+from nanoproof.tokenizer import get_tokenizer
 
 def tokenizing_distributed_data_loader_with_state(B, str_T, tgt_T, split, tokenizer_threads=4, tokenizer_batch_size=128, device="cuda", resume_state_dict=None):
     """

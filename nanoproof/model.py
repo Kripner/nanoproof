@@ -19,9 +19,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from openproof.common import get_dist_info, print0
-from openproof.muon import Muon, DistMuon
-from openproof.adamw import DistAdamW
+from nanoproof.common import get_dist_info, print0
+from nanoproof.muon import Muon, DistMuon
+from nanoproof.adamw import DistAdamW
 
 @dataclass
 class NetworkConfig:
