@@ -12,6 +12,7 @@ import os
 SPECIAL_TOKENS = [
     # every document begins with the Beginning of Sequence (BOS) token that delimits documents
     "<|bos|>",
+    "<|eos|>",
 ]
 
 # NOTE: this split pattern deviates from GPT-4 in that we use \p{N}{1,2} instead of \p{N}{1,3}
@@ -114,6 +115,10 @@ class HuggingFaceTokenizer:
     def get_bos_token_id(self):
         bos = self.encode_special("<|bos|>")
         return bos
+
+    def get_eos_token_id(self):
+        eos = self.encode_special("<|eos|>")
+        return eos
 
     def encode(self, text, *args, **kwargs):
         if isinstance(text, str):

@@ -106,7 +106,6 @@ class RowState:
         self.completed = False # Whether this row has completed generation
 
 class Engine:
-
     def __init__(self, model, tokenizer):
         self.model = model
         self.tokenizer = tokenizer # needed for tool use
@@ -119,14 +118,8 @@ class Engine:
         rng = torch.Generator(device=device)
         rng.manual_seed(seed)
 
-        # Get the special tokens we need to coordinate the tool use state machine
-        get_special = lambda s: self.tokenizer.encode_special(s)
-        python_start = get_special("<|python_start|>")
-        python_end = get_special("<|python_end|>")
-        output_start = get_special("<|output_start|>")
-        output_end = get_special("<|output_end|>")
-        assistant_end = get_special("<|assistant_end|>") # if sampled, ends row
-        bos = self.tokenizer.get_bos_token_id() # if sampled, ends row
+        eos = self.tokenizer.get_eos_token_id()
+        bos = self.tokenizer.get_bos_token_id()
 
         # 1) Run a batch 1 prefill of the prompt tokens
         m = self.model.config
@@ -190,8 +183,8 @@ class Engine:
                 token_column.append(next_token)
                 # Update the state of this row to include the next token
                 state.current_tokens.append(next_token)
-                # On <|assistant_end|> or <|bos|>, mark the row as completed
-                if next_token == assistant_end or next_token == bos:
+                # On eos or bos, mark the row as completed
+                if next_token == eos or next_token == bos:
                     state.completed = True
 
             # Yield the token column
@@ -204,9 +197,9 @@ class Engine:
         """
         Non-streaming batch generation that just returns the final token sequences.
         Returns a list of token sequences (list of lists of ints).
-        Terminal tokens (assistant_end, bos) are not included in the results.
+        Terminal tokens (eos, bos) are not included in the results.
         """
-        assistant_end = self.tokenizer.encode_special("<|assistant_end|>")
+        eos = self.tokenizer.get_eos_token_id()
         bos = self.tokenizer.get_bos_token_id()
         results = [tokens.copy() for _ in range(num_samples)]
         masks = [[0] * len(tokens) for _ in range(num_samples)]
@@ -214,7 +207,7 @@ class Engine:
         for token_column, token_masks in self.generate(tokens, num_samples, **kwargs):
             for i, (token, mask) in enumerate(zip(token_column, token_masks)):
                 if not completed[i]:
-                    if token == assistant_end or token == bos:
+                    if token == eos or token == bos:
                         completed[i] = True
                     else:
                         results[i].append(token)
