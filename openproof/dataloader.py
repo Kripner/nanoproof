@@ -9,7 +9,7 @@ from common import get_dist_info
 from dataset import list_parquet_files
 from tokenizer import get_tokenizer
 
-def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device="cuda", resume_state_dict=None):
+def tokenizing_distributed_data_loader_with_state(B, str_T, tgt_T, split, tokenizer_threads=4, tokenizer_batch_size=128, device="cuda", resume_state_dict=None):
     """
     Stream pretraining text from parquet files, tokenize, yield training batches.
 
@@ -28,6 +28,7 @@ def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     def document_batches():
         parquet_paths = list_parquet_files()
+        assert len(parquet_paths) > 0, "No parquet files found."
         parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
         resume_pq_idx = resume_state_dict["pq_idx"] if resume_state_dict is not None else 0
         resume_rg_idx = resume_state_dict["rg_idx"] if resume_state_dict is not None else None
@@ -66,7 +67,8 @@ def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads
         # Accumulate enough tokens for one iteration before yielding.
         while len(token_buffer) < needed_tokens:
             doc_batch, (pq_idx, rg_idx) = next(batches)
-            token_lists = tokenizer.encode(doc_batch, prepend=bos_token, num_threads=tokenizer_threads)
+            # token_lists = tokenizer.encode(doc_batch, prepend=bos_token, num_threads=tokenizer_threads)
+            token_lists = tokenizer.encode(doc_batch, prepend=bos_token)
             for tokens in token_lists:
                 token_buffer.extend(tokens)
         # Move tokens from the deque into the scratch buffer
@@ -101,4 +103,5 @@ if __name__ == "__main__":
     for i, (inputs, targets, state_dict) in enumerate(dataloader):
         if i >= max_batches:
             break
-        print(inputs.shape, targets.shape, flush=True)
+        print(f"Batch {i}: {inputs.shape}, {targets.shape}", flush=True)
+    print("Done.")

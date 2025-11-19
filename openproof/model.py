@@ -1,40 +1,202 @@
-from collections import defaultdict
+"""
+GPT model (rewrite, a lot simpler)
+Notable features:
+- rotary embeddings (and no positional embeddings)
+- QK norm
+- untied weights for token embedding and lm_head
+- relu^2 activation in MLP
+- norm after token embedding
+- no learnable params in rmsnorm
+- no bias in linear layers
+- Group-Query Attention (GQA) support for more efficient inference
+"""
+
 import math
+from functools import partial
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from core import Action
-
+from common import get_dist_info, print0
+from muon import Muon, DistMuon
+from adamw import DistAdamW
 
 @dataclass
-class ModelConfig:
-    n_embd: int = 2048  # n_head * head_size = 16 * 128
-    n_head: int = 16
-    n_layer: int = 6
-    n_encoder_layers: int = 18
-    n_decoder_layers: int = 24
-    head_size: int = 128
-    ff_widening_factor: int = 6
-    max_seq_len: int = 2048
-    dropout: float = 0.1
-    layer_norm_eps: float = 1e-5
+class NetworkConfig:
+    sequence_len: int = 1024
+    vocab_size: int = 50304
+    n_layer: int = 12
+    n_head: int = 6 # number of query heads
+    n_kv_head: int = 6 # number of key/value heads (GQA)
+    n_embd: int = 768
 
     # value head
     num_value_bins: int = 64
-    value_weight: float = 1e-3
-
-    # TODO: sync with tokenizer
-    vocab_size: int = 32000
-    bos_token_id: int = 0
-    eos_token_id: int = 1
+    min_value: float = 0.0
+    max_value: float = 1.0
 
     # sampling
     policy_num_tactics: int = 6
     max_tactic_len: int = 32
+
+
+def norm(x):
+    # Purely functional rmsnorm with no learnable params
+    return F.rms_norm(x, (x.size(-1),))
+
+
+def apply_rotary_emb(x, cos, sin):
+    assert x.ndim == 4  # multihead attention
+    d = x.shape[3] // 2
+    x1, x2 = x[..., :d], x[..., d:] # split up last time into two halves
+    y1 = x1 * cos + x2 * sin # rotate pairs of dims
+    y2 = x1 * (-sin) + x2 * cos
+    out = torch.cat([y1, y2], 3) # re-assemble
+    out = out.to(x.dtype) # ensure input/output dtypes match
+    return out
+
+class CausalSelfAttention(nn.Module):
+    def __init__(self, config, layer_idx):
+        super().__init__()
+        self.layer_idx = layer_idx
+        self.n_head = config.n_head
+        self.n_kv_head = config.n_kv_head
+        self.n_embd = config.n_embd
+        self.head_dim = self.n_embd // self.n_head
+        assert self.n_embd % self.n_head == 0
+        assert self.n_kv_head <= self.n_head and self.n_head % self.n_kv_head == 0
+        self.c_q = nn.Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
+        self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
+        self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
+        self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+
+    def forward(self, x, cos_sin, kv_cache):
+        B, T, C = x.size()
+
+        # Project the input to get queries, keys, and values
+        q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
+        k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
+        v = self.c_v(x).view(B, T, self.n_kv_head, self.head_dim)
+
+        # Apply Rotary Embeddings to queries and keys to get relative positional encoding
+        cos, sin = cos_sin
+        q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin) # QK rotary embedding
+        q, k = norm(q), norm(k) # QK norm
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2) # make head be batch dim, i.e. (B, T, H, D) -> (B, H, T, D)
+
+        # Apply KV cache: insert current k,v into cache, get the full view so far
+        if kv_cache is not None:
+            k, v = kv_cache.insert_kv(self.layer_idx, k, v)
+        Tq = q.size(2) # number of queries in this forward pass
+        Tk = k.size(2) # number of keys/values in total (in the cache + current forward pass)
+
+        # Attention: queries attend to keys/values autoregressively. A few cases to handle:
+        enable_gqa = self.n_head != self.n_kv_head # Group Query Attention (GQA): duplicate key/value heads to match query heads if desired
+        if kv_cache is None or Tq == Tk:
+            # During training (no KV cache), attend as usual with causal attention
+            # And even if there is KV cache, we can still use this simple version when Tq == Tk
+            y = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=enable_gqa)
+        elif Tq == 1:
+            # During inference but with a single query in this forward pass:
+            # The query has to attend to all the keys/values in the cache
+            y = F.scaled_dot_product_attention(q, k, v, is_causal=False, enable_gqa=enable_gqa)
+        else:
+            # During inference AND we have a chunk of queries in this forward pass:
+            # First, each query attends to all the cached keys/values (i.e. full prefix)
+            attn_mask = torch.zeros((Tq, Tk), dtype=torch.bool, device=q.device) # True = keep, False = mask
+            prefix_len = Tk - Tq
+            if prefix_len > 0: # can't be negative but could be zero
+                attn_mask[:, :prefix_len] = True
+            # Then, causal attention within this chunk
+            attn_mask[:, prefix_len:] = torch.tril(torch.ones((Tq, Tq), dtype=torch.bool, device=q.device))
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, enable_gqa=enable_gqa)
+
+        # Re-assemble the heads side by side and project back to residual stream
+        y = y.transpose(1, 2).contiguous().view(B, T, -1)
+        y = self.c_proj(y)
+        return y
+
+
+class MLP(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
+
+    def forward(self, x):
+        x = self.c_fc(x)
+        x = F.relu(x).square()
+        x = self.c_proj(x)
+        return x
+
+
+class Block(nn.Module):
+    def __init__(self, config, layer_idx):
+        super().__init__()
+        self.attn = CausalSelfAttention(config, layer_idx)
+        self.mlp = MLP(config)
+
+    def forward(self, x, cos_sin, kv_cache):
+        x = x + self.attn(norm(x), cos_sin, kv_cache)
+        x = x + self.mlp(norm(x))
+        return x
+
+
+class Transformer(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.transformer = nn.ModuleDict({
+            "wte": nn.Embedding(config.vocab_size, config.n_embd),
+            "h": nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_layer)]),
+        })
+        # To support meta device initialization, we init the rotary embeddings here, but it's fake
+        # As for rotary_seq_len, these rotary embeddings are pretty small/cheap in memory,
+        # so let's just over-compute them, but assert fail if we ever reach that amount.
+        # In the future we can dynamically grow the cache, for now it's fine.
+        self.rotary_seq_len = config.sequence_len * 10 # 10X over-compute should be enough, TODO make nicer?
+        head_dim = config.n_embd // config.n_head
+        cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
+        self.register_buffer("cos", cos, persistent=False) # persistent=False means it's not saved to the checkpoint
+        self.register_buffer("sin", sin, persistent=False)
+
+    # TODO: bump base theta more, e.g. 100K is more common more recently
+    def _precompute_rotary_embeddings(self, seq_len, head_dim, base=10000, device=None):
+        # autodetect the device from model embeddings
+        if device is None:
+            device = self.transformer.wte.weight.device
+        # stride the channels
+        channel_range = torch.arange(0, head_dim, 2, dtype=torch.float32, device=device)
+        inv_freq = 1.0 / (base ** (channel_range / head_dim))
+        # stride the time steps
+        t = torch.arange(seq_len, dtype=torch.float32, device=device)
+        # calculate the rotation frequencies at each (time, channel) pair
+        freqs = torch.outer(t, inv_freq)
+        cos, sin = freqs.cos(), freqs.sin()
+        cos, sin = cos.bfloat16(), sin.bfloat16() # keep them in bfloat16
+        cos, sin = cos[None, :, None, :], sin[None, :, None, :] # add batch and head dims for later broadcasting
+        return cos, sin
+
+    def forward(self, idx, kv_cache=None):
+        B, T = idx.size()
+
+        # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
+        assert T <= self.cos.size(1), f"Sequence length grew beyond the rotary embeddings cache: {T} > {self.cos.size(1)}"
+        assert idx.device == self.cos.device, f"Rotary embeddings and idx are on different devices: {idx.device} != {self.cos.device}"
+        assert self.cos.dtype == torch.bfloat16, "Rotary embeddings must be in bfloat16"
+        # if kv cache exists, we need to offset the rotary embeddings to the current position in the cache
+        T0 = 0 if kv_cache is None else kv_cache.get_pos()
+        cos_sin = self.cos[:, T0:T0+T], self.sin[:, T0:T0+T] # truncate cache to current sequence length
+
+        # Forward the trunk of the Transformer
+        x = self.transformer.wte(idx)
+        x = norm(x)
+        for block in self.transformer.h:
+            x = block(x, cos_sin, kv_cache)
+        x = norm(x)
+        return x
 
 
 @dataclass
@@ -51,11 +213,19 @@ class NetworkSamplingOutput:
     value: float
 
 
-class MLP(nn.Module):
+class ValueHead(nn.Module):
+    """Predicts of a state value as a categorical distribution."""
     def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, config.ff_widening_factor * config.n_embd, bias=False)
-        self.c_proj = nn.Linear(config.ff_widening_factor * config.n_embd, config.n_embd, bias=False)
+        self.config = config
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
+        self.c_proj = nn.Linear(4 * config.n_embd, config.num_value_bins, bias=False)
+        self.min_value = config.min_value
+        self.max_value = config.max_value
+        self.num_value_bins = config.num_value_bins
+        
+        # Create bucket values for scalar conversion
+        self.register_buffer("values", torch.linspace(self.min_value, self.max_value, self.num_value_bins), persistent=False)
 
     def forward(self, x):
         x = self.c_fc(x)
@@ -63,202 +233,34 @@ class MLP(nn.Module):
         x = self.c_proj(x)
         return x
 
-
-class EncoderBlock(nn.Module):
-    """Encoder block with self-attention and feed-forward layers."""
-
-    def __init__(self, config):
-        super().__init__()
-        self.self_attn = nn.MultiheadAttention(
-            embed_dim=config.n_embd,
-            num_heads=config.n_head,
-            dropout=config.dropout,
-            batch_first=True,
-        )
-        self.ff = MLP(config)
-        self.norm1 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_eps)
-        self.norm2 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_eps)
-        self.dropout1 = nn.Dropout(config.dropout)
-        self.dropout2 = nn.Dropout(config.dropout)
-
-    def forward(self, x, src_mask=None, src_padding_mask=None):
-        attn_out, _ = self.self_attn(
-            x, x, x,
-            attn_mask=src_mask,
-            key_padding_mask=src_padding_mask
-        )
-        x = x + self.dropout1(attn_out)
-        x = self.norm1(x)
-
-        ff_out = self.ff(x)
-        x = x + self.dropout2(ff_out)
-        x = self.norm2(x)
-
-        return x
-
-
-class DecoderBlock(nn.Module):
-    """Decoder block with self-attention, cross-attention, and feed-forward layers."""
-
-    def __init__(self, config):
-        super().__init__()
-        self.self_attn = nn.MultiheadAttention(
-            embed_dim=config.n_embd,
-            num_heads=config.n_head,
-            dropout=config.dropout,
-            batch_first=True
-        )
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=config.n_embd,
-            num_heads=config.n_head,
-            dropout=config.dropout,
-            batch_first=True
-        )
-        self.ff = MLP(config)
-        self.norm1 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_eps)
-        self.norm2 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_eps)
-        self.norm3 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_eps)
-        self.dropout1 = nn.Dropout(config.dropout)
-        self.dropout2 = nn.Dropout(config.dropout)
-        self.dropout3 = nn.Dropout(config.dropout)
-
-    def forward(
-            self,
-            tgt,
-            memory,
-            tgt_mask=None,
-            memory_mask=None,
-            tgt_key_padding_mask=None,
-            memory_key_padding_mask=None,
-    ):
-        # Self-attention with residual connection
-        attn_out, _ = self.self_attn(
-            tgt, tgt, tgt,
-            attn_mask=tgt_mask,
-            key_padding_mask=tgt_key_padding_mask
-        )
-        tgt = tgt + self.dropout1(attn_out)
-        tgt = self.norm1(tgt)
-
-        # Cross-attention with residual connection
-        cross_attn_out, _ = self.cross_attn(
-            tgt, memory, memory,
-            attn_mask=memory_mask,
-            key_padding_mask=memory_key_padding_mask
-        )
-        tgt = tgt + self.dropout2(cross_attn_out)
-        tgt = self.norm2(tgt)
-
-        # Feed-forward with residual connection
-        ff_out = self.ff(tgt)
-        tgt = tgt + self.dropout3(ff_out)
-        tgt = self.norm3(tgt)
-
-        return tgt
-
-
-class TransformerEncoder(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.layers = nn.ModuleList([
-            EncoderBlock(config) for _ in range(config.n_encoder_layers)
-        ])
-
-    def forward(self, x, src_mask=None, src_padding_mask=None):
-        for layer in self.layers:
-            x = layer(x, src_mask=src_mask, src_padding_mask=src_padding_mask)
-        return x
-
-
-class TransformerDecoder(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.layers = nn.ModuleList([
-            DecoderBlock(config) for _ in range(config.n_decoder_layers)
-        ])
-
-    def forward(
-            self,
-            tgt,
-            memory,
-            tgt_mask=None,
-            memory_mask=None,
-            tgt_padding_mask=None,
-            memory_key_padding_mask=None,
-    ):
-        for layer in self.layers:
-            tgt = layer(
-                tgt, memory,
-                tgt_mask=tgt_mask,
-                memory_mask=memory_mask,
-                tgt_padding_mask=tgt_padding_mask,
-                memory_key_padding_mask=memory_key_padding_mask
-            )
-        return tgt
-
-
-class ValueHead(nn.Module):
-    """Predicts of a state value as a categorical distribution."""
-
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.proj = nn.Linear(config.n_embd, config.num_value_bins, bias=False)
-
-    def forward(self, encoded: torch.Tensor, src_key_padding_mask=None) -> torch.Tensor:
-        """
-        Forward pass of the value head.
-        Args:
-            encoded: Encoder output [batch_size, src_len, n_embd]
-            src_key_padding_mask: Padding mask [batch_size, src_len] where True indicates padding
-        """
-        # Mean pooling over sequence length, ignoring padding
-        if src_key_padding_mask is not None:
-            # Invert mask: True for valid tokens, False for padding
-            valid_mask = ~src_key_padding_mask  # [batch_size, src_len]
-            # Sum over sequence, counting only valid tokens
-            valid_counts = valid_mask.sum(dim=1, keepdim=True).float()  # [batch_size, 1]
-            # Mask out padding positions
-            masked_encoded = encoded * valid_mask.unsqueeze(-1).float()  # [batch_size, src_len, n_embd]
-            # Mean pool
-            pooled = masked_encoded.sum(dim=1) / valid_counts.clamp(min=1.0)  # [batch_size, n_embd]
-        else:
-            # Simple mean pooling if no mask
-            pooled = encoded.mean(dim=1)  # [batch_size, n_embd]
-
-        value_logits = self.proj(pooled)  # [batch_size, num_value_bins]
-        return value_logits
+    def to_scalar(self, logits):
+        probs = F.softmax(logits, dim=-1)
+        return torch.sum(probs * self.values, dim=-1)
 
 
 class Network(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config):
         super().__init__()
         self.config = config
-
-        self.token_embedding = nn.Embedding(config.vocab_size, config.n_embd)
-        self.pos_embedding = nn.Embedding(config.max_seq_len, config.n_embd)
-
-        self.encoder = TransformerEncoder(config)
-        self.decoder = TransformerDecoder(config)
-        self.value_head = ValueHead(config)
-
-        # untied weights
+        self.transformer = Transformer(config)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-
-        self.dropout = nn.Dropout(config.dropout)
-
-        self.init_weights()
+        self.value_head = ValueHead(config)
 
     def init_weights(self):
         self.apply(self._init_weights)
         # zero out classifier weights
         torch.nn.init.zeros_(self.lm_head.weight)
-        # zero out c_proj weights in all encoder blocks
-        for block in self.encoder.layers:
-            torch.nn.init.zeros_(block.ff.c_proj.weight)
-        # zero out c_proj weights in all decoder blocks
-        for block in self.decoder.layers:
-            torch.nn.init.zeros_(block.ff.c_proj.weight)
+        # zero out c_proj weights in all blocks
+        for block in self.transformer.transformer.h:
+            torch.nn.init.zeros_(block.mlp.c_proj.weight)
+            torch.nn.init.zeros_(block.attn.c_proj.weight)
+        # init the rotary embeddings
+        head_dim = self.config.n_embd // self.config.n_head
+        cos, sin = self.transformer._precompute_rotary_embeddings(self.transformer.rotary_seq_len, head_dim)
+        self.transformer.cos, self.transformer.sin = cos, sin
+        # Cast the embeddings from fp32 to bf16: optim can tolerate it and it saves memory: both in the model and the activations
+        if self.transformer.transformer.wte.weight.device.type == "cuda":
+            self.transformer.transformer.wte.to(dtype=torch.bfloat16)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -272,154 +274,99 @@ class Network(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=1.0)
 
+    def get_device(self):
+        return self.transformer.transformer.wte.weight.device
+
+    def estimate_flops(self):
+        """ Return the estimated FLOPs per token for the model. Ref: https://arxiv.org/abs/2204.02311 """
+        nparams = sum(p.numel() for p in self.parameters())
+        nparams_embedding = self.transformer.transformer.wte.weight.numel()
+        l, h, q, t = self.config.n_layer, self.config.n_head, self.config.n_embd // self.config.n_head, self.config.sequence_len
+        num_flops_per_token = 6 * (nparams - nparams_embedding) + 12 * l * h * q * t
+        return num_flops_per_token
+
     def setup_optimizers(self, unembedding_lr=0.004, embedding_lr=0.2, matrix_lr=0.02, weight_decay=0.0):
         model_dim = self.config.n_embd
-
-        # Separate parameters into groups
-        matrix_params = []
-        for module in [self.encoder, self.decoder]:
-            matrix_params.extend(list(module.parameters()))
-
-        embedding_params = list(self.token_embedding.parameters()) + list(self.pos_embedding.parameters())
+        ddp, rank, local_rank, world_size = get_dist_info()
+        # Separate out all parameters into 3 groups (matrix, embedding, lm_head)
+        matrix_params = list(self.transformer.transformer.h.parameters()) + list(self.value_head.parameters())
+        embedding_params = list(self.transformer.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
-        value_head_params = list(self.value_head.parameters())
+        
+        # Verify we have all parameters
+        all_params_len = len(list(self.parameters()))
+        grouped_params_len = len(matrix_params) + len(embedding_params) + len(lm_head_params)
+        # Note: This assertion might fail if I missed some params (e.g. value head params need to be in matrix_params or similar)
+        # Added value_head params to matrix_params for now as they are linear layers mostly.
+        assert all_params_len == grouped_params_len, f"Parameters count mismatch: {all_params_len} != {grouped_params_len}"
 
-        # Scale learning rates based on model dimension
+        # Create the AdamW optimizer for the embedding and lm_head
+        # Scale the LR for the AdamW parameters by ∝1/√dmodel (having tuned the LRs for 768 dim model)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
-        print(f"Scaling the LR for the AdamW parameters ∝1/√({model_dim}/768) = {dmodel_lr_scale:.6f}")
-
-        # Create parameter groups with appropriate learning rates
-        param_groups = [
+        if rank == 0:
+            print(f"Scaling the LR for the AdamW parameters ∝1/√({model_dim}/768) = {dmodel_lr_scale:.6f}")
+        adam_groups = [
             dict(params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale),
             dict(params=embedding_params, lr=embedding_lr * dmodel_lr_scale),
-            dict(params=value_head_params, lr=unembedding_lr * dmodel_lr_scale),
-            dict(params=matrix_params, lr=matrix_lr),
         ]
-
-        # Create optimizer
         adamw_kwargs = dict(betas=(0.8, 0.95), eps=1e-10, weight_decay=weight_decay)
-        optimizer = torch.optim.AdamW(param_groups, **adamw_kwargs)
+        AdamWFactory = DistAdamW if ddp else partial(torch.optim.AdamW, fused=True)
+        adamw_optimizer = AdamWFactory(adam_groups, **adamw_kwargs)
+        # Create the Muon optimizer for the linear layers
+        muon_kwargs = dict(lr=matrix_lr, momentum=0.95)
+        MuonFactory = DistMuon if ddp else Muon
+        muon_optimizer = MuonFactory(matrix_params, **muon_kwargs)
+        # Combine them the two optimizers into one list
+        optimizers = [adamw_optimizer, muon_optimizer]
+        for opt in optimizers:
+            for group in opt.param_groups:
+                group["initial_lr"] = group["lr"]
+        return optimizers
 
-        # Set initial learning rates
-        for group in optimizer.param_groups:
-            group["initial_lr"] = group["lr"]
-
-        return [optimizer]
-
-    def forward(
-            self,
-            src_ids,
-            tgt_ids,
-            src_mask=None,
-            tgt_mask=None,
-            src_key_padding_mask=None,
-            tgt_key_padding_mask=None,
-            memory_mask=None,
-            memory_key_padding_mask=None
-    ) -> NetworkTrainingOutput:
-        """
-        Forward pass of the encoder-decoder Transformer.
+    def forward(self, idx, targets=None):
+        x = self.transformer(idx)
+        policy_logits = self.lm_head(x)
+        value_logits = self.value_head(x)
         
-        Args:
-            src_ids: Source token ids [batch_size, src_len]
-            tgt_ids: Target token ids [batch_size, tgt_len]
-            src_mask: Source attention mask [src_len, src_len]
-            tgt_mask: Target attention mask [tgt_len, tgt_len] (causal mask for autoregressive)
-            src_key_padding_mask: Source padding mask [batch_size, src_len]
-            tgt_key_padding_mask: Target padding mask [batch_size, tgt_len]
-            memory_mask: Cross-attention mask [tgt_len, src_len]
-            memory_key_padding_mask: Cross-attention padding mask [batch_size, src_len]
-        """
-        B, src_len = src_ids.shape
-        _, tgt_len = tgt_ids.shape
-
-        src_pos = torch.arange(0, src_len, device=src_ids.device).unsqueeze(0).expand(B, -1)
-        src_emb = self.token_embedding(src_ids) + self.pos_embedding(src_pos)
-        src_emb = self.dropout(src_emb)
-
-        tgt_pos = torch.arange(0, tgt_len, device=tgt_ids.device).unsqueeze(0).expand(B, -1)
-        tgt_emb = self.token_embedding(tgt_ids) + self.pos_embedding(tgt_pos)
-        tgt_emb = self.dropout(tgt_emb)
-
-        encoded = self.encoder(
-            src_emb,
-            src_mask=src_mask,
-            src_key_padding_mask=src_key_padding_mask
-        )
-
-        decoder_out = self.decoder(
-            tgt_emb,
-            encoded,
-            tgt_mask=tgt_mask,
-            memory_mask=memory_mask,
-            tgt_key_padding_mask=tgt_key_padding_mask,
-            memory_key_padding_mask=memory_key_padding_mask
-        )
-
-        policy_logits = self.lm_head(decoder_out)  # [batch_size, tgt_len, vocab_size]
-
-        value_logits = self.value_head(encoded, src_key_padding_mask=src_key_padding_mask)  # [batch_size, num_value_bins]
-
-        return NetworkTrainingOutput(
-            value_logits=value_logits,
-            policy_logits=policy_logits
-        )
+        softcap = 15
+        policy_logits = softcap * torch.tanh(policy_logits / softcap)
+        
+        return NetworkTrainingOutput(value_logits=value_logits, policy_logits=policy_logits)
 
     @torch.inference_mode()
-    def sample(self, observation_ids) -> NetworkSamplingOutput:
+    def generate(self, tokens, max_tokens, temperature=1.0, top_k=None, seed=42):
         """
-        Predict value and sample K tactics from a single observation.
-        Inefficient - just for testing.
+        Naive autoregressive streaming inference.
+        To make it super simple, let's assume:
+        - batch size is 1
+        - ids and the yielded tokens are simple Python lists and ints
         """
-        self.eval()
-        src_len = observation_ids.shape[0]
-        device = observation_ids.device
-        K = self.config.policy_num_tactics
+        assert isinstance(tokens, list)
+        device = self.get_device()
+        rng = None
+        if temperature > 0:
+            rng = torch.Generator(device=device)
+            rng.manual_seed(seed)
+        ids = torch.tensor([tokens], dtype=torch.long, device=device) # add batch dim
+        for _ in range(max_tokens):
+            # Forward pass
+            x = self.transformer(ids)
+            logits = self.lm_head(x) # (B, T, vocab_size)
+            logits = logits[:, -1, :] # (B, vocab_size)
+            
+            # Softcap
+            softcap = 15
+            logits = softcap * torch.tanh(logits / softcap)
 
-        src_pos = torch.arange(0, src_len, device=device).unsqueeze(0)
-        src_emb = self.token_embedding(observation_ids) + self.pos_embedding(src_pos)
-        src_emb = self.dropout(src_emb)
-        encoded = self.encoder(src_emb)  # [1, src_len, n_embd]
-
-        value_logits = self.value_head(encoded)  # [1, num_value_bins]
-        value_probs = F.softmax(value_logits, dim=-1)  # [1, num_value_bins]
-
-        bin_centers = torch.linspace(-1.0, 1.0, self.config.num_value_bins, device=device)
-        value = (value_probs * bin_centers).sum(dim=-1).item()  # scalar
-
-        ids = torch.full((K, 1), self.config.bos_token_id, dtype=torch.long, device=device)  # [K, 1]
-        action_logprobs_list = [0.0] * K
-        active_mask = torch.ones(K, dtype=torch.bool, device=device)
-        lengths = torch.full((K,), self.config.max_tactic_len, dtype=torch.long, device=device)
-
-        for t in range(self.config.max_tactic_len):
-            if not active_mask.any():
-                break
-
-            network_output = self.forward(observation_ids, ids)
-
-            logits = network_output.policy_logits[:, -1, :]  # [K, vocab_size]
-            logprobs = F.log_softmax(logits, dim=-1)  # [K, vocab_size]
-            probs = F.softmax(logits, dim=-1)  # [K, vocab_size]
-
-            next_ids = torch.multinomial(probs, num_samples=1)  # [K, 1]
-            eos_mask = (next_ids == 1).squeeze(-1)  # [K]
-
-            for k in range(K):
-                if active_mask[k]:
-                    action_logprobs_list[k] += logprobs[k, next_ids[k, 0]].item()
-                    if eos_mask[k]:
-                        active_mask[k] = False
-                        lengths[k] = t + 1
-
-            ids = torch.cat([ids, next_ids], dim=1)  # [K, tgt_len+1]
-
-        action_logprobs = {}
-        for k in range(K):
-            token_ids = ids[k, 1:lengths[k]].tolist()  # skip start token
-            action_logprobs[tuple(token_ids)] = action_logprobs_list[k] / lengths[k]
-
-        return NetworkSamplingOutput(
-            action_logprobs=action_logprobs,
-            value=value
-        )
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float('Inf')
+            if temperature > 0:
+                logits = logits / temperature
+                probs = F.softmax(logits, dim=-1)
+                next_ids = torch.multinomial(probs, num_samples=1, generator=rng)
+            else:
+                next_ids = torch.argmax(logits, dim=-1, keepdim=True)
+            ids = torch.cat((ids, next_ids), dim=1)
+            token = next_ids.item()
+            yield token

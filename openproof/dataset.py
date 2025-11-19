@@ -42,10 +42,10 @@ def list_parquet_files(data_dir=None):
     """ Looks into a data dir and returns full paths to all parquet files. """
     data_dir = DATA_DIR if data_dir is None else data_dir
     parquet_files = sorted([
-        f for f in os.listdir(data_dir)
+        f for f in os.listdir(os.path.join(data_dir, "4plus"))
         if f.endswith('.parquet') and not f.endswith('.tmp')
     ])
-    parquet_paths = [os.path.join(data_dir, f) for f in parquet_files]
+    parquet_paths = [os.path.join(data_dir, "4plus", f) for f in parquet_files]
     return parquet_paths
 
 def parquets_iter_batched(split, start=0, step=1):
