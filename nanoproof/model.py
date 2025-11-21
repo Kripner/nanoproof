@@ -323,8 +323,8 @@ class Network(nn.Module):
                 group["initial_lr"] = group["lr"]
         return optimizers
 
-    def forward(self, idx, targets=None):
-        x = self.transformer(idx)
+    def forward(self, idx, targets=None, kv_cache=None, loss_reduction="mean"):
+        x = self.transformer(idx, kv_cache)
         policy_logits = self.lm_head(x)
         value_logits = self.value_head(x)
         

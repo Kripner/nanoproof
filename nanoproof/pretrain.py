@@ -45,6 +45,7 @@ device_batch_size = 32 # per-device batch size (set to not OOM)
 total_batch_size = 524288 # total desired batch size, in #tokens
 embedding_lr = 0.2 # learning rate for the embedding parameters (Adam)
 unembedding_lr = 0.004 # learning rate for the unembedding parameters (Adam)
+value_head_lr = 0.004
 weight_decay = 0.0 # weight decay for the embedding/unembedding parameters (Adam)
 matrix_lr = 0.02 # learning rate for the matrix parameters (Muon)
 grad_clip = 1.0 # gradient clipping value (0.0 = disabled)
@@ -61,7 +62,7 @@ save_every = -1 # every how many steps to save model checkpoints (-1 = disable, 
 model_tag = "" # optionally override the model tag for the output checkpoint directory name
 # now allow CLI to override the settings via the configurator lol
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
-exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from command line or config file
+exec(open(os.path.join('nanoproof', 'configurator.py')).read()) # overrides from command line or config file
 user_config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
 
@@ -154,8 +155,33 @@ print0(f"Total training FLOPs estimate: {num_flops_per_token * total_tokens:e}")
 
 # -----------------------------------------------------------------------------
 # Initialize the Optimizer (Muon for Linear layers, AdamW for embedding and lm_head)
-optimizers = model.setup_optimizers(unembedding_lr=unembedding_lr, embedding_lr=embedding_lr, matrix_lr=matrix_lr, weight_decay=weight_decay)
+optimizers = model.setup_optimizers(unembedding_lr=unembedding_lr, embedding_lr=embedding_lr, value_head_lr=value_head_lr, matrix_lr=matrix_lr, weight_decay=weight_decay)
 adamw_optimizer, muon_optimizer = optimizers
+
+# Calculate memory footprint (parameters are in bfloat16)
+model_memory_gib = num_params * 2 / (1024 ** 3)
+print0(f"Model memory footprint: {model_memory_gib:.2f} GiB")
+
+# Calculate parameter counts from optimizers
+num_params_adamw = sum(p.numel() for group in adamw_optimizer.param_groups for p in group["params"])
+num_params_muon = sum(p.numel() for group in muon_optimizer.param_groups for p in group["params"])
+
+# Estimate GPU memory for training
+params_memory = num_params * 2
+gradients_memory = num_params * 2
+adamw_state_memory = 2 * num_params_adamw * 2 / ddp_world_size  # exp_avg + exp_avg_sq, sharded in DDP
+muon_state_memory = num_params_muon * 2 / ddp_world_size  # momentum_buffer, sharded in DDP
+optimizer_memory = adamw_state_memory + muon_state_memory
+activations_memory = device_batch_size * max_seq_len * model_dim * num_layers * 12 * 2 * 2  # rough estimate, *2 for backward
+batch_data_memory = device_batch_size * max_seq_len * 4
+total_training_memory = params_memory + gradients_memory + optimizer_memory + activations_memory + batch_data_memory
+print0(f"Estimated GPU memory for training: {total_training_memory / (1024 ** 3):.2f} GiB")
+print0(f"Breakdown:")
+print0(f"  - Parameters: {params_memory / (1024 ** 3):.2f} GiB")
+print0(f"  - Gradients: {gradients_memory / (1024 ** 3):.2f} GiB")
+print0(f"  - Optimizer states (per rank): {optimizer_memory / (1024 ** 3):.2f} GiB (AdamW: {adamw_state_memory / (1024 ** 3):.2f} GiB, Muon: {muon_state_memory / (1024 ** 3):.2f} GiB)")
+print0(f"  - Activations (estimated): {activations_memory / (1024 ** 3):.2f} GiB")
+print0(f"  - Batch data: {batch_data_memory / (1024 ** 3):.2f} GiB")
 
 if resuming:
     for opt, dat in zip(optimizers, optimizer_data):
@@ -211,6 +237,24 @@ else:
 while True:
     last_step = step == num_iterations # loop runs num_iterations+1 times so that we can eval/save at the end
     flops_so_far = num_flops_per_token * total_batch_size * step
+    
+    # once in a while: evaluate the val bpb (all ranks participate)
+    if last_step or step % eval_every == 0:
+        model.eval()
+        val_loader = build_val_loader()
+        eval_steps = eval_tokens // (device_batch_size * max_seq_len * ddp_world_size)
+        with autocast_ctx:
+            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+        print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
+        if val_bpb < min_val_bpb:
+            min_val_bpb = val_bpb
+        wandb_run.log({
+            "step": step,
+            "total_training_flops": flops_so_far,
+            "total_training_time": total_training_time,
+            "val/bpb": val_bpb,
+        })
+        model.train()
 
     # once in a while: sample from the model (only on master process)
     # use the original uncompiled model because the inputs keep changing shape
@@ -331,7 +375,7 @@ print0(f"Total training time: {total_training_time/60:.2f}m")
 print0(f"Minimum validation bpb: {min_val_bpb:.4f}")
 
 # Log to report
-from nanochat.report import get_report
+from nanoproof.report import get_report
 get_report().log(section="Base model training", data=[
     user_config, # CLI args
     { # stats about the training setup

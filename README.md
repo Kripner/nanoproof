@@ -11,6 +11,15 @@ cd nanoproof
 uv sync --extra cpu --group dev
 source .venv/bin/activate
 
+hf auth login
+
+python -m nanoproof.dataset
 python -m scripts.tok_train
 python -m nanoproof.pretrain
+```
+
+or
+
+```
+torchrun --nproc_per_node=2 -m nanoproof.pretrain
 ```

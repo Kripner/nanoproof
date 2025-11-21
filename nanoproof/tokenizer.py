@@ -143,7 +143,7 @@ class HuggingFaceTokenizer:
 
 def get_tokenizer():
     # return HuggingFaceTokenizer.from_pretrained("gpt2")
-    from common import get_base_dir
+    from nanoproof.common import get_base_dir
     base_dir = get_base_dir()
     tokenizer_dir = os.path.join(base_dir, "tokenizer")
     return HuggingFaceTokenizer.from_directory(tokenizer_dir)
