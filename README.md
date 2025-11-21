@@ -21,5 +21,8 @@ python -m nanoproof.pretrain
 or
 
 ```
-torchrun --nproc_per_node=2 -m nanoproof.pretrain
+torchrun --standalone --nproc_per_node=2 -m nanoproof.pretrain
 ```
+
+
+NANOPROOF_BASE_DIR=/home/kripner/troja/nanoproof OMP_NUM_THREADS=8 torchrun --standalone --nproc_per_node=2 -m -- nanoproof.pretrain --depth=20 --run="baseline"

@@ -19,7 +19,7 @@ from contextlib import nullcontext
 import wandb
 import torch
 
-from nanoproof.model import Network, NetworkConfig
+from nanoproof.model import Transformer, NetworkConfig
 from nanoproof.dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
 from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
 from nanoproof.tokenizer import get_tokenizer, get_token_bytes
@@ -45,7 +45,6 @@ device_batch_size = 32 # per-device batch size (set to not OOM)
 total_batch_size = 524288 # total desired batch size, in #tokens
 embedding_lr = 0.2 # learning rate for the embedding parameters (Adam)
 unembedding_lr = 0.004 # learning rate for the unembedding parameters (Adam)
-value_head_lr = 0.004
 weight_decay = 0.0 # weight decay for the embedding/unembedding parameters (Adam)
 matrix_lr = 0.02 # learning rate for the matrix parameters (Muon)
 grad_clip = 1.0 # gradient clipping value (0.0 = disabled)
@@ -111,7 +110,7 @@ print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {
 model_config_kwargs = dict(sequence_len=max_seq_len, vocab_size=vocab_size, n_layer=num_layers, n_head=num_heads, n_kv_head=num_kv_heads, n_embd=model_dim)
 with torch.device("meta"):
     model_config = NetworkConfig(**model_config_kwargs)
-    model = Network(model_config)
+    model = Transformer(model_config)
 model.to_empty(device=device)
 model.init_weights()
 
@@ -155,7 +154,7 @@ print0(f"Total training FLOPs estimate: {num_flops_per_token * total_tokens:e}")
 
 # -----------------------------------------------------------------------------
 # Initialize the Optimizer (Muon for Linear layers, AdamW for embedding and lm_head)
-optimizers = model.setup_optimizers(unembedding_lr=unembedding_lr, embedding_lr=embedding_lr, value_head_lr=value_head_lr, matrix_lr=matrix_lr, weight_decay=weight_decay)
+optimizers = model.setup_optimizers(unembedding_lr=unembedding_lr, embedding_lr=embedding_lr, matrix_lr=matrix_lr, weight_decay=weight_decay)
 adamw_optimizer, muon_optimizer = optimizers
 
 # Calculate memory footprint (parameters are in bfloat16)
