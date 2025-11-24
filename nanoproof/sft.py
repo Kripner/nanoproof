@@ -19,22 +19,14 @@ from contextlib import nullcontext
 
 from nanoproof.common import compute_init, compute_cleanup, get_base_dir, print0, DummyWandb, autodetect_device_type
 from nanoproof.checkpoints import load_model
-from nanoproof.checkpoints import save_checkpoint
+from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
-from scripts.chat_eval import run_chat_eval
-
-from tasks.common import TaskMixture
-from tasks.arc import ARC
-from tasks.gsm8k import GSM8K
-from tasks.smoltalk import SmolTalk
-from tasks.customjson import CustomJSON
-from tasks.spellingbee import SimpleSpelling, SpellingBee
 
 # -----------------------------------------------------------------------------
 # SFT Hyperparameters
 run = "dummy" # wandb run name default ("dummy" is special - we won't log to wandb)
 # input model options
-source = "mid" # base|mid , which checkpoint to load the model from (base model or midtrained model)
+source = "base" # base|mid , which checkpoint to load the model from (base model or midtrained model)
 model_tag = None # model tag to load the model from (base model or midtrained model)
 step = None # step to load the model from (base model or midtrained model)
 # compute/precision
@@ -80,7 +72,6 @@ engine = Engine(model, tokenizer) # will be used for inline model evaluation onl
 
 # -----------------------------------------------------------------------------
 # DataLoader
-
 
 examples_per_step = device_batch_size * ddp_world_size
 print0(f"Target examples per step: {target_examples_per_step}")
@@ -207,7 +198,7 @@ if master_process:
     base_dir = get_base_dir()
     depth = model.config.n_layer
     model_tag = f"d{depth}" # base the model tag on the depth of the base model
-    checkpoint_dir = os.path.join(base_dir, "chatsft_checkpoints", model_tag)
+    checkpoint_dir = os.path.join(base_dir, "sft_checkpoints", model_tag)
     model_config_kwargs = model.config.__dict__ # slightly naughty, abusing the simplicity of GPTConfig, TODO nicer
     save_checkpoint(
         checkpoint_dir,

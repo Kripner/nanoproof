@@ -61,6 +61,7 @@ def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads
     # get the tokenizer and the bos token
     tokenizer = get_tokenizer()
     bos_token = tokenizer.get_bos_token_id()
+    assert bos_token is not None
     # scratch buffer holds the tokens for one iteration
     token_buffer = deque() # we stream tokens on the right and pop from the left
     while True:

@@ -16,6 +16,7 @@ dependencies = [
     "tokenizers>=0.22.0",
     "torch>=2.8.0",
     "wandb>=0.21.3",
+    "leantree",
 ]
 
 [build-system]
