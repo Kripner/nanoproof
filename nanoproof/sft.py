@@ -70,7 +70,7 @@ autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if dev
 
 # wandb logging init
 use_dummy_wandb = run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-sft", name=run, config=user_config, save_code=True)
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-sft", name=run, config=user_config, save_code=True)
 
 # Load the model and tokenizer
 model, tokenizer, meta = load_model(source, device, phase="train", model_tag=model_tag, step=step)
@@ -79,53 +79,8 @@ orig_model = model # original, uncompiled model
 engine = Engine(model, tokenizer) # will be used for inline model evaluation only
 
 # -----------------------------------------------------------------------------
-# Task data mixture we'll train on
-identity_conversations_filepath = os.path.join(get_base_dir(), "identity_conversations.jsonl")
-train_ds = TaskMixture([
-    ARC(subset="ARC-Easy", split="train"), # 2.3K rows
-    ARC(subset="ARC-Challenge", split="train"), # 1.1K rows
-    GSM8K(subset="main", split="train"), # 8K rows
-    SmolTalk(split="train", stop=10_000), # 10K rows of smoltalk
-    CustomJSON(filepath=identity_conversations_filepath), # 1K rows of synthetic identity conversations
-    SimpleSpelling(size=300, split="train"), # 300 rows of Simple Spelling (e.g. spell the word 'apple')
-    SpellingBee(size=300, split="train"), # 300 rows of Spelling Bee (e.g. how many 'r' are in 'strawberry'?)
-]) # 2.3K + 1.1K + 8K + 10K + 1K + 0.3K + 0.3K = 23K rows
-val_ds = SmolTalk(split="test") # general conversations, 24K rows (though we don't actually use all of it)
-
-# -----------------------------------------------------------------------------
 # DataLoader
 
-def sft_data_generator(dataset, batch_size):
-    pad_token_id = tokenizer.encode_special("<|assistant_end|>") # use <|assistant_end|> as the pad token is ok, these positions are masked in the loss
-    # prepares a list of tokenized conversations into a batch and yields
-    def collate_and_yield(batch):
-        nrows = len(batch)
-        ncols = max(len(ids) for ids, mask in batch) - 1 # seq of n creates inputs/targets of n-1
-        inputs = torch.full((nrows, ncols), pad_token_id, dtype=torch.long)
-        targets = torch.full((nrows, ncols), -1, dtype=torch.long) # -1 is ignore index
-        for i, (ids, mask) in enumerate(batch):
-            n = len(ids)
-            ids_tensor = torch.tensor(ids, dtype=torch.long)
-            inputs[i, :n-1] = ids_tensor[:-1]
-            # recall -1 is the ignore index, so mask out targets where mask is 0
-            row_targets = ids_tensor[1:]
-            # mask[1:] omits the mask for the BOS token, which is never a target atm so it's ok
-            mask_tensor = torch.tensor(mask[1:], dtype=torch.long)
-            row_targets[mask_tensor == 0] = -1 # mask out targets where mask is 0
-            targets[i, :n-1] = row_targets
-        inputs = inputs.to(device) # move to device
-        targets = targets.to(device)
-        return inputs, targets
-    # iterates over the dataset in epochs, tokenizes
-    batch = []
-    while True:
-        for i in range(ddp_rank, len(dataset), ddp_world_size):
-            doc = dataset[i]
-            ids, mask = tokenizer.render_conversation(doc)
-            batch.append((ids, mask))
-            if len(batch) == batch_size:
-                yield collate_and_yield(batch)
-                batch = []
 
 examples_per_step = device_batch_size * ddp_world_size
 print0(f"Target examples per step: {target_examples_per_step}")

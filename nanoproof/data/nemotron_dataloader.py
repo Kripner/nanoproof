@@ -6,7 +6,7 @@ import torch
 import pyarrow.parquet as pq
 
 from nanoproof.common import get_dist_info
-from nanoproof.data.dataset import list_parquet_files
+from nanoproof.data.nemotron import list_parquet_files
 from nanoproof.tokenizer import get_tokenizer
 
 def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device="cuda", resume_state_dict=None):

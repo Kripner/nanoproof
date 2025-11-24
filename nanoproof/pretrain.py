@@ -20,7 +20,7 @@ import wandb
 import torch
 
 from nanoproof.model import Transformer, NetworkConfig
-from nanoproof.data.dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
+from nanoproof.data.nemotron_dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
 from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
 from nanoproof.tokenizer import get_tokenizer, get_token_bytes
 from nanoproof.checkpoints import save_checkpoint, load_checkpoint
