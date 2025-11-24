@@ -8,7 +8,7 @@ import json
 import logging
 import torch
 
-from nanoproof.model import Network, NetworkConfig
+from nanoproof.model import Transformer, NetworkConfig
 from nanoproof.tokenizer import get_tokenizer
 from nanoproof.common import get_base_dir, setup_default_logging
 
@@ -75,7 +75,7 @@ def build_model(checkpoint_dir, step, device, phase):
     log0(f"Building model with config: {model_config_kwargs}")
     model_config = NetworkConfig(**model_config_kwargs)
     with torch.device("meta"):
-        model = Network(model_config)
+        model = Transformer(model_config)
     # Load the model state
     model.to_empty(device=device)
     model.init_weights() # note: this is dumb, but we need to init the rotary embeddings. TODO: fix model re-init

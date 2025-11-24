@@ -145,14 +145,19 @@ class Block(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, config):
+    # TODO: only turn on pad_vocab_size_to when on CUDA
+    def __init__(self, config, pad_vocab_size_to=64):
         super().__init__()
         self.config = config
+        # See https://huggingface.co/docs/transformers/main_classes/model#transformers.PreTrainedModel.resize_token_embeddings
+        padded_vocab_size = ((config.vocab_size + pad_vocab_size_to - 1) // pad_vocab_size_to) * pad_vocab_size_to
+        if padded_vocab_size != config.vocab_size:
+            print0(f"Padding vocab_size from {config.vocab_size} to {padded_vocab_size} to be divisible by {pad_vocab_size_to}")
         self.transformer = nn.ModuleDict({
-            "wte": nn.Embedding(config.vocab_size, config.n_embd),
+            "wte": nn.Embedding(padded_vocab_size, config.n_embd),
             "h": nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_layer)]),
         })
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, padded_vocab_size, bias=False)
         # To support meta device initialization, we init the rotary embeddings here, but it's fake
         # As for rotary_seq_len, these rotary embeddings are pretty small/cheap in memory,
         # so let's just over-compute them, but assert fail if we ever reach that amount.
@@ -237,8 +242,8 @@ class Transformer(nn.Module):
             dict(params=embedding_params, lr=embedding_lr * dmodel_lr_scale),
         ]
         adamw_kwargs = dict(betas=(0.8, 0.95), eps=1e-10, weight_decay=weight_decay)
-        # AdamWFactory = DistAdamW if ddp else partial(torch.optim.AdamW, fused=True)
-        AdamWFactory = partial(torch.optim.AdamW, fused=True)
+        AdamWFactory = DistAdamW if ddp else partial(torch.optim.AdamW, fused=True)
+        # AdamWFactory = partial(torch.optim.AdamW, fused=True)
         adamw_optimizer = AdamWFactory(adam_groups, **adamw_kwargs)
         # Create the Muon optimizer for the linear layers
         muon_kwargs = dict(lr=matrix_lr, momentum=0.95)
@@ -277,12 +282,16 @@ class Transformer(nn.Module):
             logits = self.lm_head(x)
             logits = softcap * torch.tanh(logits / softcap) # logits softcap
             logits = logits.float() # use tf32/fp32 for logits
+            # Slice to original vocab_size to hide padding from outside
+            logits = logits[..., :self.config.vocab_size]
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
             return loss
         else:
             # inference mode: compute and return the logits
             logits = self.lm_head(x)
             logits = softcap * torch.tanh(logits / softcap) # logits softcap
+            # Slice to original vocab_size to hide padding from outside
+            logits = logits[..., :self.config.vocab_size]
             return logits
 
     @torch.inference_mode()
@@ -374,8 +383,8 @@ class ValueHead(nn.Module):
         value_head_params = list(self.value_head.parameters())
 
         adamw_kwargs = dict(betas=(0.8, 0.95), eps=1e-10, weight_decay=weight_decay)
-        # AdamWFactory = DistAdamW if ddp else partial(torch.optim.AdamW, fused=True)
-        AdamWFactory = partial(torch.optim.AdamW, fused=True)
+        AdamWFactory = DistAdamW if ddp else partial(torch.optim.AdamW, fused=True)
+        # AdamWFactory = partial(torch.optim.AdamW, fused=True)
         optim = AdamWFactory(dict(params=value_head_params, lr=value_head_lr), **adamw_kwargs),
 
         for group in optim.param_groups:

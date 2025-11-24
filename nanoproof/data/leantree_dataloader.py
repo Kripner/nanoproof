@@ -7,15 +7,13 @@ from nanoproof.data.leantree import iter_data
 STATE_MAX_LEN = 1536
 TACTIC_MAX_LEN = 512
 
-def sft_data_generator(batch_size, split, device="cuda"):
+def sft_data_generator(dataset, batch_size, device="cuda"):
     tokenizer = get_tokenizer()
     bos_token = tokenizer.get_bos_token_id()
     assert bos_token is not None
     # TODO: change to <|eos|>
     pad_token_id = tokenizer.encode_special("<|endoftext|>")  # use <|endoftext|> as the pad token is ok, these positions are masked in the loss
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
-
-    dataset = list(iter_data(split=split))
 
     def collate_and_yield(batch):
         nrows = len(batch)

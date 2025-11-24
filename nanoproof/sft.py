@@ -1,12 +1,12 @@
 """
-Finetune a base model to be a chat model.
+Finetune a base model to be a prover model.
 Run on one GPU e.g. for debugging:
 
-python -m scripts.chat_sft
+python -m scripts.sft
 
 Or torchrun for training:
 
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft
+torchrun --standalone --nproc_per_node=8 -m scripts.sft
 """
 
 import os
@@ -21,6 +21,8 @@ from nanoproof.common import compute_init, compute_cleanup, get_base_dir, print0
 from nanoproof.checkpoints import load_model
 from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
+from nanoproof.data.leantree import iter_data
+from nanoproof.data.leantree_dataloader import sft_data_generator
 
 # -----------------------------------------------------------------------------
 # SFT Hyperparameters
@@ -49,7 +51,7 @@ eval_metrics_every = 200
 eval_metrics_max_problems = 1024
 # now allow CLI to override the settings via the configurator lol
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
-exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from command line or config file
+exec(open(os.path.join('nanoproof', 'configurator.py')).read()) # overrides from command line or config file
 user_config = {k: globals()[k] for k in config_keys} # possibly useful for logging
 # -----------------------------------------------------------------------------
 
@@ -80,6 +82,9 @@ print0(f"Examples per step is device_batch_size * ddp_world_size: {examples_per_
 assert target_examples_per_step % examples_per_step == 0, "Target examples per step must be divisible by examples per step"
 grad_accum_steps = target_examples_per_step // examples_per_step
 print0(f"=> Setting grad accum steps: {grad_accum_steps}")
+
+train_ds = list(iter_data(split="train"))
+val_ds = list(iter_data(split="val"))
 
 if num_iterations == -1:
     # derive num_iterations from num_epochs and the size of the dataset
@@ -215,8 +220,8 @@ if master_process:
     print(f"✅ Saved model checkpoint to {checkpoint_dir}")
 
 # Log to report
-from nanochat.report import get_report
-get_report().log(section="Chat SFT", data=[
+from nanoproof.report import get_report
+get_report().log(section="SFT", data=[
     user_config, # CLI args
     {
         "Training rows": len(train_ds),

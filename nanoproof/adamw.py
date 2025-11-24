@@ -29,8 +29,8 @@ class DistAdamW(torch.optim.Optimizer):
             for base_i in range(len(params)):
                 grad = params[base_i].grad
                 rank_size = grad.shape[0] // world_size
+                assert grad.shape[0] % world_size == 0, f"parameter at dimension 0 is not divisible by {world_size=} ({grad.shape=})"
                 grad_slice = torch.empty_like(grad[:rank_size])
-                print(grad_slice.shape, grad.shape)
                 reduce_scatter_futures.append(dist.reduce_scatter_tensor(grad_slice, grad, op=dist.ReduceOp.AVG, async_op=True).get_future())
                 grad_slices.append(grad_slice)
 
