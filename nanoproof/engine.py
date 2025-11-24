@@ -176,10 +176,8 @@ class Engine:
             token_column = [] # contains the next token id along each row
             token_masks = [] # contains the mask (was it sampled (1) or forced (0)?) along each row
             for i, state in enumerate(row_states):
-                # Select the next token in this row
-                is_forced = len(state.forced_tokens) > 0 # are there tokens waiting to be forced in deque?
-                token_masks.append(0 if is_forced else 1) # mask is 0 if forced, 1 if sampled
-                next_token = state.forced_tokens.popleft() if is_forced else sampled_tokens[i]
+                token_masks.append(1) # mask is 0 if forced, 1 if sampled
+                next_token = sampled_tokens[i]
                 token_column.append(next_token)
                 # Update the state of this row to include the next token
                 state.current_tokens.append(next_token)

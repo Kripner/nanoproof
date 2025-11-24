@@ -41,7 +41,7 @@ num_iterations = -1 # explicit number of steps of the optimization (-1 = disable
 target_flops = -1.0 # calculate num_iterations to reach target_flops. Useful for scaling laws experiments (-1 = disable)
 target_param_data_ratio = 20 # calculate num_iterations to maintain fixed data:param ratio (Chinchilla=20) (-1 = disable)
 # Optimization
-device_batch_size = 32 # per-device batch size (set to not OOM)
+device_batch_size = 32 # per-device batch size (set to not OOM on a H100)
 total_batch_size = 524288 # total desired batch size, in #tokens
 embedding_lr = 0.2 # learning rate for the embedding parameters (Adam)
 unembedding_lr = 0.004 # learning rate for the unembedding parameters (Adam)
@@ -56,7 +56,7 @@ resume_from_step = -1 # resume training from this step of the optimization (-1 =
 eval_every = 250 # every how many steps to evaluate the model for val bpb
 eval_tokens = 20*524288 # number of tokens to evaluate val loss on
 sample_every = 2000 # every how many steps to sample from the model
-save_every = -1 # every how many steps to save model checkpoints (-1 = disable, and save only at the end of the run)
+save_every = 5000 # every how many steps to save model checkpoints (-1 = disable, and save only at the end of the run)
 # Output
 model_tag = "" # optionally override the model tag for the output checkpoint directory name
 # now allow CLI to override the settings via the configurator lol
@@ -270,7 +270,9 @@ while True:
         ]
         engine = Engine(orig_model, tokenizer) # use orig_model to avoid recompilation
         for prompt in prompts:
-            tokens = tokenizer(prompt, prepend="<|bos|>")
+            # TODO: revert this!
+            # tokens = tokenizer(prompt, prepend="<|bos|>")
+            tokens = tokenizer(prompt, prepend="<|endoftext|>")
             with autocast_ctx:
                 sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
             print0(tokenizer.decode(sample[0]))
