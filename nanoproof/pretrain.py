@@ -20,7 +20,7 @@ import wandb
 import torch
 
 from nanoproof.model import Transformer, NetworkConfig
-from nanoproof.dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
+from nanoproof.data.dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
 from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
 from nanoproof.tokenizer import get_tokenizer, get_token_bytes
 from nanoproof.checkpoints import save_checkpoint, load_checkpoint
@@ -75,7 +75,7 @@ get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else l
 
 # wandb logging init
 use_dummy_wandb = run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", name=run, config=user_config)
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof", name=run, config=user_config)
 
 # Tokenizer will be useful for evaluation, also we need the vocab size
 tokenizer = get_tokenizer()

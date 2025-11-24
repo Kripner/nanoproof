@@ -8,7 +8,7 @@ import argparse
 import torch
 from nanoproof.tokenizer import HuggingFaceTokenizer
 from nanoproof.common import get_base_dir
-from nanoproof.dataset import parquets_iter_batched
+from nanoproof.data.dataset import parquets_iter_batched
 
 # -----------------------------------------------------------------------------
 # Parse command line arguments
