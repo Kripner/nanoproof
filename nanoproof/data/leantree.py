@@ -3,6 +3,7 @@ import os
 import argparse
 from itertools import islice
 import time
+from pathlib import Path
 
 import numpy as np
 import requests
@@ -22,6 +23,8 @@ HF_URL = "https://huggingface.co/datasets/ufal/leantree/resolve/main/leantree_ma
 def iter_data(split, eval_fraction=0.1):
     assert split in ["train", "val"]
     mathlib_file = os.path.join(DATA_DIR, "leantree_mathlib.jsonl")
+    if not Path(mathlib_file).exists():
+        raise Exception("leantree not downloaded, please run this script with `download` argument")
     with open(mathlib_file, "r") as f:
         lines = f.readlines()
     eval_size = int(len(lines) * eval_fraction)
@@ -36,10 +39,7 @@ def iter_data(split, eval_fraction=0.1):
                 if isinstance(by_block.tree, leantree.StoredError):
                     continue
                 for node in by_block.tree.get_nodes():
-                    yield {
-                        "state": str(node.state),
-                        "tactic": str(node.tactic.tactic)
-                    }
+                    yield str(node.state), str(node.tactic.tactic)
 
 
 def download_dataset():
@@ -92,26 +92,32 @@ def main():
         os.makedirs(DATA_DIR, exist_ok=True)
         download_dataset()
     elif args.action == "show":
-        for d in islice(iter_data(split=args.split), 10):
-            print(d["state"])
+        for state, tactic in islice(iter_data(split=args.split), 10):
+            print(state)
             print("\n->\n")
-            print(d["tactic"])
+            print(tactic)
             print("\n-----------------\n")
     elif args.action == "stats":
         tokenizer = get_tokenizer()
+        bos_token = tokenizer.get_bos_token_id()
+        assert bos_token is not None
+        eos_token = tokenizer.get_eos_token_id()
+        assert eos_token is not None
         for split in ["train", "val"]:
+            print(f"Loading {split=}...")
+            dataset = list(iter_data(split=split))
             print(f"Calculating {split=}...")
             lens = {"state": [], "tactic": []}
             start_time = time.time()
-            for d in iter_data(split=split):
-                state = tokenizer.encode(d["state"])
-                tactic = tokenizer.encode("[TACTIC]" + d["tactic"])
+            for state, tactic in tqdm(dataset):
+                state = tokenizer.encode(state + "\n<|tactic|> ", prepend=bos_token)
+                tactic = tokenizer.encode(tactic, append=eos_token)
                 lens["state"].append(len(state))
                 lens["tactic"].append(len(tactic))
             end_time = time.time()
             print(f"time: {end_time - start_time:.2f}s")
             print(f"total: {len(lens['state'])}")
-            for prop, max_len in [("state", 1536), ("tactic", 512)]:
+            for prop, max_len in [("state", 768), ("tactic", 256)]:
                 print(f"stats for {prop}:")
                 print(f"  min: {np.min(lens[prop])}")
                 print(f"  max: {np.max(lens[prop])}")
@@ -122,8 +128,10 @@ def main():
                 print(f"  p95: {np.percentile(lens[prop], 95):.2f}")
                 print(f"  p99: {np.percentile(lens[prop], 99):.2f}")
                 at_most_max = np.sum(np.array(lens[prop]) <= max_len)
-                print(f"  <= {max_len}: {at_most_max / len(lens[prop]):%}% ({at_most_max}/{len(lens[prop])})")
+                print(f"  <= {max_len}: {at_most_max / len(lens[prop]):%} ({at_most_max}/{len(lens[prop])})")
             print()
+    else:
+        raise f"Unknown action {args.action}"
 
 if __name__ == "__main__":
     main()

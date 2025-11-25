@@ -18,7 +18,6 @@ import torch.distributed as dist
 from contextlib import nullcontext
 
 from nanoproof.common import compute_init, compute_cleanup, get_base_dir, print0, DummyWandb, autodetect_device_type
-from nanoproof.checkpoints import load_model
 from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
 from nanoproof.data.leantree import iter_data
@@ -29,16 +28,16 @@ from nanoproof.data.leantree_dataloader import sft_data_generator
 run = "dummy" # wandb run name default ("dummy" is special - we won't log to wandb)
 # input model options
 source = "base" # base|mid , which checkpoint to load the model from (base model or midtrained model)
-model_tag = None # model tag to load the model from (base model or midtrained model)
+model_tag = "d20" # model tag to load the model from (base model or midtrained model)
 step = None # step to load the model from (base model or midtrained model)
 # compute/precision
 device_type = "" # cuda|cpu|mps (empty => autodetect)
 dtype = "bfloat16"
-device_batch_size = 4 # max to avoid OOM
+device_batch_size = 8 # (maybe) max to avoid OOM (on A100 40GB)
 # optimization
 num_epochs = 1
 num_iterations = -1 # override number of iterations (-1 = disable, use num_epochs to derive it)
-target_examples_per_step = 32
+target_examples_per_step = 512
 unembedding_lr = 0.004
 embedding_lr = 0.2
 matrix_lr = 0.02
@@ -47,7 +46,8 @@ init_lr_frac = 0.02
 # evaluation and logging there of
 eval_every = 100
 eval_steps = 100
-eval_metrics_every = 200
+# eval_metrics_every = 200
+sample_every = 100
 eval_metrics_max_problems = 1024
 # now allow CLI to override the settings via the configurator lol
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
@@ -144,19 +144,55 @@ for step in range(num_iterations):
         model.train()
 
     # evaluate accuracy of the multiple choice tasks (which are quick to run)
-    if last_step or (step > 0 and step % eval_metrics_every == 0):
+    if last_step or (step > 0 and step % sample_every == 0):
         model.eval()
-        metrics = {}
-        with torch.no_grad(), autocast_ctx:
-            # note that because these are inside no_grad, we can usually afford to at least ~2X the batch size
-            metrics["mmlu_acc"] = run_chat_eval("MMLU", model, tokenizer, engine, batch_size=device_batch_size*2, max_problems=eval_metrics_max_problems)
-            metrics["arc_easy_acc"] = run_chat_eval("ARC-Easy", model, tokenizer, engine, batch_size=device_batch_size*2, max_problems=eval_metrics_max_problems)
-        metrics_str = ', '.join(f'{k}: {v:.6f}' for k, v in metrics.items())
-        print0(f"Step {step:05d} | {metrics_str}")
-        wandb_run.log({
-            "step": step,
-            **metrics,
-        })
+        prompts = [
+            "The capital of France is",
+            "If 5*x + 3 = 13, then x is",
+            # gold from mathlib: 'exact LipschitzWith.comp_locallyBoundedVariationOn (A i) h'
+            """case h
+ι : Type u_4
+inst✝ : Fintype ι
+f : ℝ → ι → ℝ
+s : Set ℝ
+h : LocallyBoundedVariationOn f s
+A : ∀ (i : ι), LipschitzWith 1 fun x => x i
+i : ι
+⊢ LocallyBoundedVariationOn (fun x => f x i) s
+<|tactic|> """,
+            # sensible tactic: 'intro h'
+            """p q : Prop
+⊢ p ∧ q → p
+<|tactic|> """,
+            # sensible tactic: 'rfl'
+            """⊢ 2 + 3 = 5
+<|tactic|> """,
+            # sensible tactic: 'exact Or.inl ⟨hp, hq⟩'
+            """case mp.inl
+p q r : Prop
+hp : p
+hq : q
+⊢ p ∧ q ∨ p ∧ r
+<|tactic|> """,
+            # sensible tactic: 'exact Exists.intro x0 hx0'
+            """α : Type
+P : α → Prop
+inst✝ : Inhabited α
+h : ∀ (x : α), P x
+x0 : α := default
+hx0 : P x0
+⊢ ∃ x, P x
+<|tactic|> """,
+
+        ]
+        engine = Engine(orig_model, tokenizer) # use orig_model to avoid recompilation
+        for prompt in prompts:
+            # TODO: revert this!
+            # tokens = tokenizer(prompt, prepend="<|bos|>")
+            tokens = tokenizer(prompt, prepend="<|endoftext|>")
+            with autocast_ctx:
+                sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
+            print0(tokenizer.decode(sample[0]) + "\n---")
         model.train()
 
     if last_step:
@@ -213,7 +249,6 @@ if master_process:
         {
             "step": step,
             "val_loss": val_loss,
-            **metrics,
             "model_config": model_config_kwargs,
         }
     )

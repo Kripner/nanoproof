@@ -10,14 +10,16 @@ TACTIC_MAX_LEN = 512
 def sft_data_generator(dataset, batch_size, device="cuda"):
     tokenizer = get_tokenizer()
     bos_token = tokenizer.get_bos_token_id()
+    eos_token = tokenizer.get_eos_token_id()
     assert bos_token is not None
+    assert eos_token is not None
     # TODO: change to <|eos|>
     pad_token_id = tokenizer.encode_special("<|endoftext|>")  # use <|endoftext|> as the pad token is ok, these positions are masked in the loss
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
 
     def collate_and_yield(batch):
         nrows = len(batch)
-        ncols = max(len(ids) for ids in batch) - 1  # seq of n creates inputs/targets of n-1
+        ncols = max(len(ids) for ids, _ in batch) - 1  # seq of n creates inputs/targets of n-1
         inputs = torch.full((nrows, ncols), pad_token_id, dtype=torch.long)
         targets = torch.full((nrows, ncols), -1, dtype=torch.long)  # -1 is ignore index
         for i, (ids, mask) in enumerate(batch):
@@ -39,11 +41,17 @@ def sft_data_generator(dataset, batch_size, device="cuda"):
     while True:
         for i in range(ddp_rank, len(dataset), ddp_world_size):
             state, tactic = dataset[i]
-            state_tokens = tokenizer.encode(state, prepend=bos_token)
-            tactic_tokens = tokenizer.encode("[TACTIC] " + tactic)
-
+            state_tokens = tokenizer.encode(state + "\n<|tactic|> ", prepend=bos_token)
+            tactic_tokens = tokenizer.encode(tactic, append=eos_token)
             token_lists = state_tokens + tactic_tokens
             mask = [0] * len(state_tokens) + [1] * len(tactic_tokens)
+
+            # these are <0.1% of mathlib and prevent OOM
+            if len(tactic_tokens) > 256:
+                continue
+            if len(tactic_tokens) + len(state_tokens) > 1024:
+                continue
+
             batch.append((token_lists, mask))
             if len(batch) == batch_size:
                 yield collate_and_yield(batch)
