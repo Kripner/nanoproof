@@ -9,6 +9,8 @@ Two implementations are available:
 
 import os
 
+from nanoproof.model import NetworkConfig
+
 SPECIAL_TOKENS = [
     # every document begins with the Beginning of Sequence (BOS) token that delimits documents
     "<|bos|>",
@@ -144,6 +146,18 @@ class HuggingFaceTokenizer:
         tokenizer_path = os.path.join(tokenizer_dir, "tokenizer.json")
         self.tokenizer.save(tokenizer_path)
         print(f"Saved tokenizer to {tokenizer_path}")
+
+# TODO: use special tokens!
+def value_to_token_ids(tokenizer, value: float, cfg: NetworkConfig) -> list[int]:
+    bin = int((value - cfg.min_value) / (cfg.max_value - cfg.min_value) * (cfg.num_value_bins - 1))
+    return tokenizer.encode(str(bin))
+    
+def token_ids_to_value(tokenizer, token_ids: list[int], cfg: NetworkConfig) -> float | None:
+    try:
+        bin = int(tokenizer.decode(token_ids))
+    except ValueError:
+        return None
+    return cfg.min_value + bin * (cfg.max_value - cfg.min_value) / (cfg.num_value_bins - 1)
 
 def get_tokenizer():
     # return HuggingFaceTokenizer.from_pretrained("gpt2")

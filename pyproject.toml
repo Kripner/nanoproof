@@ -17,6 +17,7 @@ dependencies = [
     "torch>=2.8.0",
     "wandb>=0.21.3",
     "leantree",
+    "termplotlib",
 ]
 
 [build-system]

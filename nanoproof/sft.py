@@ -90,8 +90,8 @@ if num_iterations == -1:
     # derive num_iterations from num_epochs and the size of the dataset
     assert num_epochs > 0, "num_epochs must be positive if num_iterations is -1"
     num_iterations = (len(train_ds) // target_examples_per_step) * num_epochs
-train_loader = sft_data_generator(train_ds, batch_size=device_batch_size)
-build_val_loader = lambda: sft_data_generator(val_ds, batch_size=device_batch_size)
+train_loader = sft_data_generator(train_ds, batch_size=device_batch_size, cfg=model.config)
+build_val_loader = lambda: sft_data_generator(val_ds, batch_size=device_batch_size, cfg=model.config)
 
 # -----------------------------------------------------------------------------
 # Initialize the Optimizer
@@ -184,6 +184,17 @@ hx0 : P x0
 ⊢ ∃ x, P x
 <|tactic|> """,
 
+            """p q : Prop
+⊢ p ∧ q → p
+<|value|> """,
+            """α : Type
+P : α → Prop
+inst✝ : Inhabited α
+h : ∀ (x : α), P x
+x0 : α := default
+hx0 : P x0
+⊢ ∃ x, P x
+<|value|> """,
         ]
         engine = Engine(orig_model, tokenizer) # use orig_model to avoid recompilation
         for prompt in prompts:

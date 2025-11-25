@@ -5,10 +5,15 @@ Common utilities for nanochat.
 import os
 import re
 import logging
+import math
 import urllib.request
+import gc
+from collections import Counter
+from filelock import FileLock
+
 import torch
 import torch.distributed as dist
-from filelock import FileLock
+import numpy as np
 
 class ColoredFormatter(logging.Formatter):
     """Custom formatter that adds colors to log messages."""
@@ -191,3 +196,85 @@ class DummyWandb:
         pass
     def finish(self):
         pass
+
+def format_distribution(bins: list[float], hist_height: int = 10, bin_labels: list[str] = None) -> str:
+    bar_char = '❚'  # Heavy vertical bar character.
+
+    num_bins = len(bins)
+    max_bin = max(bins)
+    result = ""
+
+    if max_bin == 0:
+        max_bin = 1  # To avoid division by zero; all bars will be zero height.
+
+    scaled_bins = [(bin_value / max_bin) * hist_height for bin_value in bins]
+    # Round up to ensure visibility of non-zero bins.
+    bar_heights = [math.ceil(height) for height in scaled_bins]
+
+    # Determine y-axis labels (from HIST_HEIGHT down to 1)
+    for row in range(hist_height, 0, -1):
+        label_value = (row / hist_height) * max_bin
+        label = f"{label_value:>3.1f} |"
+        row_str = label
+        for height in bar_heights:
+            if height >= row:
+                row_str += f" {bar_char} "
+            else:
+                row_str += " " * 3
+        result += row_str + "\n"
+
+    x_axis = "    +" + "---" * num_bins
+    result += x_axis + "\n"
+
+    # x-axis labels.
+    if not bin_labels:
+        bin_labels = [f"{i}" for i in range(num_bins)]
+    label_str = "     "
+    for label in bin_labels:
+        assert len(label) <= 2
+        if len(label) == 1:
+            label_str += f" {label} "
+        else:
+            label_str += f"{label} "
+    result += label_str + "\n"
+    return result
+
+def deep_shape(obj, seen=None, level=0, pretty=False):
+    if seen is None:
+        seen = set()
+    if id(obj) in seen:
+        return "<circular reference>"
+    seen.add(id(obj))
+
+    def join_parts(parts):
+        if pretty:
+            return "\n" + "  " * level + (",\n" + "  " * level).join(parts) + "\n" + "  " * (level - 1)
+        return ", ".join(parts)
+
+    if isinstance(obj, tuple):
+        return "(" + join_parts([deep_shape(o, seen, level + 1, pretty) for o in obj]) + ")"
+    if isinstance(obj, list):
+        if all(isinstance(o, (int, float, str, bool, type(None))) for o in obj):
+            type_counts = Counter(type(o).__name__ for o in obj)
+            return f"[{', '.join(f'{k}-{v}' for k, v in type_counts.items())}]"
+        return "[" + join_parts([deep_shape(o, seen, level + 1, pretty) for o in obj]) + "]"
+    if isinstance(obj, dict):
+        return "{" + join_parts([str(k) + ": " + deep_shape(v, seen, level + 1, pretty) for k, v in obj.items()]) + "}"
+    if isinstance(obj, np.ndarray):
+        return "np-" + str(obj.shape)
+    if isinstance(obj, torch.Tensor):
+        return "pt-" + str(tuple(obj.shape))
+    if isinstance(obj, str):
+        return "str-" + str(len(obj))
+    return str(obj)
+
+
+def flush():
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+
+def strict_zip(a: list, b: list):
+    if len(a) != len(b):
+        raise Exception(f"List sizes differ ({len(a)} != {len(b)}).")
+    return zip(a, b)

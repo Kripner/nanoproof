@@ -5,13 +5,14 @@ from itertools import islice
 import time
 from pathlib import Path
 
+import termplotlib as tpl
 import numpy as np
 import requests
 
 from tqdm import tqdm
 import leantree
 
-from nanoproof.common import get_base_dir
+from nanoproof.common import get_base_dir, format_distribution
 from nanoproof.tokenizer import get_tokenizer
 
 base_dir = get_base_dir()
@@ -39,7 +40,7 @@ def iter_data(split, eval_fraction=0.1):
                 if isinstance(by_block.tree, leantree.StoredError):
                     continue
                 for node in by_block.tree.get_nodes():
-                    yield str(node.state), str(node.tactic.tactic)
+                    yield str(node.state), str(node.tactic.tactic), node.proof_depth
 
 
 def download_dataset():
@@ -75,6 +76,57 @@ def download_dataset():
                 os.remove(path)
         raise
 
+def print_stats():
+    tokenizer = get_tokenizer()
+    bos_token = tokenizer.get_bos_token_id()
+    assert bos_token is not None
+    eos_token = tokenizer.get_eos_token_id()
+    assert eos_token is not None
+    for split in ["train", "val"]:
+        print(f"Loading {split=}...")
+        dataset = list(iter_data(split=split))
+        print(f"Calculating {split=}...")
+        lens = {"state": [], "tactic": []}
+        depths = []
+        start_time = time.time()
+        for state, tactic, proof_depth in tqdm(dataset):
+            state = tokenizer.encode(state + "\n<|tactic|> ", prepend=bos_token)
+            tactic = tokenizer.encode(tactic, append=eos_token)
+            lens["state"].append(len(state))
+            lens["tactic"].append(len(tactic))
+            depths.append(proof_depth)
+        end_time = time.time()
+        print(f"time: {end_time - start_time:.2f}s")
+        print(f"total: {len(lens['state'])}")
+        for prop, max_len in [("state", 768), ("tactic", 256)]:
+            print(f"{prop} lengths:")
+            print(f"  min: {np.min(lens[prop])}")
+            print(f"  max: {np.max(lens[prop])}")
+            print(f"  mean: {np.mean(lens[prop]):.2f}")
+            print(f"  median: {np.median(lens[prop])}")
+            print(f"  std: {np.std(lens[prop]):.2f}")
+            print(f"  p90: {np.percentile(lens[prop], 90):.2f}")
+            print(f"  p95: {np.percentile(lens[prop], 95):.2f}")
+            print(f"  p99: {np.percentile(lens[prop], 99):.2f}")
+            at_most_max = np.sum(np.array(lens[prop]) <= max_len)
+            print(f"  <= {max_len}: {at_most_max / len(lens[prop]):%} ({at_most_max}/{len(lens[prop])})")
+        print(f"depths:")
+        print(f"  min: {np.min(depths)}")
+        print(f"  max: {np.max(depths)}")
+        print(f"  mean: {np.mean(depths):.2f}")
+        print(f"  median: {np.median(depths)}")
+        print(f"  p90: {np.percentile(depths, 90):.2f}")
+        print(f"  p95: {np.percentile(depths, 95):.2f}")
+        print(f"  p99: {np.percentile(depths, 99):.2f}")
+
+        fig = tpl.figure()
+        min_depth = int(np.min(depths))
+        max_depth = int(np.max(depths))
+        bin_edges = np.arange(min_depth, max_depth + 2)  # +2 to include max_depth in a bin
+        counts, bin_edges = np.histogram(depths, bins=bin_edges)
+        fig.hist(counts, bin_edges=bin_edges, force_ascii=False, orientation="horizontal")
+        fig.show()
+
 def main():
     parser = argparse.ArgumentParser(description="Download LeanTree dataset from HuggingFace.")
     subparsers = parser.add_subparsers(dest="action")
@@ -98,38 +150,7 @@ def main():
             print(tactic)
             print("\n-----------------\n")
     elif args.action == "stats":
-        tokenizer = get_tokenizer()
-        bos_token = tokenizer.get_bos_token_id()
-        assert bos_token is not None
-        eos_token = tokenizer.get_eos_token_id()
-        assert eos_token is not None
-        for split in ["train", "val"]:
-            print(f"Loading {split=}...")
-            dataset = list(iter_data(split=split))
-            print(f"Calculating {split=}...")
-            lens = {"state": [], "tactic": []}
-            start_time = time.time()
-            for state, tactic in tqdm(dataset):
-                state = tokenizer.encode(state + "\n<|tactic|> ", prepend=bos_token)
-                tactic = tokenizer.encode(tactic, append=eos_token)
-                lens["state"].append(len(state))
-                lens["tactic"].append(len(tactic))
-            end_time = time.time()
-            print(f"time: {end_time - start_time:.2f}s")
-            print(f"total: {len(lens['state'])}")
-            for prop, max_len in [("state", 768), ("tactic", 256)]:
-                print(f"stats for {prop}:")
-                print(f"  min: {np.min(lens[prop])}")
-                print(f"  max: {np.max(lens[prop])}")
-                print(f"  mean: {np.mean(lens[prop]):.2f}")
-                print(f"  median: {np.median(lens[prop])}")
-                print(f"  std: {np.std(lens[prop]):.2f}")
-                print(f"  p90: {np.percentile(lens[prop], 90):.2f}")
-                print(f"  p95: {np.percentile(lens[prop], 95):.2f}")
-                print(f"  p99: {np.percentile(lens[prop], 99):.2f}")
-                at_most_max = np.sum(np.array(lens[prop]) <= max_len)
-                print(f"  <= {max_len}: {at_most_max / len(lens[prop]):%} ({at_most_max}/{len(lens[prop])})")
-            print()
+        print_stats()
     else:
         raise f"Unknown action {args.action}"
 
