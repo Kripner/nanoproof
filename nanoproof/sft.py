@@ -11,6 +11,7 @@ torchrun --standalone --nproc_per_node=8 -m scripts.sft
 
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+import random
 
 import wandb
 import torch
@@ -26,6 +27,7 @@ from nanoproof.data.leantree_dataloader import sft_data_generator
 # -----------------------------------------------------------------------------
 # SFT Hyperparameters
 run = "dummy" # wandb run name default ("dummy" is special - we won't log to wandb)
+seed = 0
 # input model options
 source = "base" # base|mid , which checkpoint to load the model from (base model or midtrained model)
 model_tag = "d20" # model tag to load the model from (base model or midtrained model)
@@ -84,14 +86,15 @@ grad_accum_steps = target_examples_per_step // examples_per_step
 print0(f"=> Setting grad accum steps: {grad_accum_steps}")
 
 train_ds = list(iter_data(split="train"))
+random.Random(seed).shuffle(train_ds)
 val_ds = list(iter_data(split="val"))
 
 if num_iterations == -1:
     # derive num_iterations from num_epochs and the size of the dataset
     assert num_epochs > 0, "num_epochs must be positive if num_iterations is -1"
     num_iterations = (len(train_ds) // target_examples_per_step) * num_epochs
-train_loader = sft_data_generator(train_ds, batch_size=device_batch_size, cfg=model.config)
-build_val_loader = lambda: sft_data_generator(val_ds, batch_size=device_batch_size, cfg=model.config)
+train_loader = sft_data_generator(train_ds, batch_size=device_batch_size)
+build_val_loader = lambda: sft_data_generator(val_ds, batch_size=device_batch_size)
 
 # -----------------------------------------------------------------------------
 # Initialize the Optimizer
@@ -142,6 +145,9 @@ for step in range(num_iterations):
             "val_loss": val_loss,
         })
         model.train()
+
+    # TODO: eval tactic recall
+    # TODO: eval value MSE
 
     # evaluate accuracy of the multiple choice tasks (which are quick to run)
     if last_step or (step > 0 and step % sample_every == 0):

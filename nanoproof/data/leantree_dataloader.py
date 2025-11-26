@@ -8,7 +8,7 @@ from nanoproof.model import NetworkConfig
 STATE_MAX_LEN = 1536
 TACTIC_MAX_LEN = 512
 
-def sft_data_generator(dataset, batch_size, cfg: NetworkConfig, device="cuda"):
+def sft_data_generator(dataset, batch_size, device="cuda"):
     assert batch_size % 2 == 0  # need this because we generate both tactic and value samples for each datapoint
     tokenizer = get_tokenizer()
     bos_token = tokenizer.get_bos_token_id()
@@ -25,9 +25,6 @@ def sft_data_generator(dataset, batch_size, cfg: NetworkConfig, device="cuda"):
         inputs = torch.full((nrows, ncols), pad_token_id, dtype=torch.long)
         targets = torch.full((nrows, ncols), -1, dtype=torch.long)  # -1 is ignore index
         for i, (ids, mask) in enumerate(batch):
-            print(ids)
-            print(tokenizer.decode(ids))
-            print("---")
             n = len(ids)
             ids_tensor = torch.tensor(ids, dtype=torch.long)
             inputs[i, :n - 1] = ids_tensor[:-1]
@@ -53,7 +50,7 @@ def sft_data_generator(dataset, batch_size, cfg: NetworkConfig, device="cuda"):
             tactic_toks = tokenizer.encode(tactic, append=eos_token)
 
             value_delim_toks = tokenizer.encode("\n<|value|> ", prepend=bos_token)
-            value_toks = value_to_token_ids(tokenizer, proof_depth, cfg)
+            value_toks = value_to_token_ids(tokenizer, proof_depth) + [eos_token]
 
             # these are <0.1% of mathlib and prevent OOM
             if len(tactic_toks) > 256:

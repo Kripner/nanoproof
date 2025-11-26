@@ -118,6 +118,9 @@ def print_stats():
         print(f"  p90: {np.percentile(depths, 90):.2f}")
         print(f"  p95: {np.percentile(depths, 95):.2f}")
         print(f"  p99: {np.percentile(depths, 99):.2f}")
+        at_most_32 = np.sum(np.array(depths) <= 32)
+        print(f"  <= 32: {at_most_32 / len(depths):%} ({at_most_32}/{len(depths)})")
+        print()
 
         fig = tpl.figure()
         min_depth = int(np.min(depths))
@@ -126,6 +129,7 @@ def print_stats():
         counts, bin_edges = np.histogram(depths, bins=bin_edges)
         fig.hist(counts, bin_edges=bin_edges, force_ascii=False, orientation="horizontal")
         fig.show()
+        print()
 
 def main():
     parser = argparse.ArgumentParser(description="Download LeanTree dataset from HuggingFace.")

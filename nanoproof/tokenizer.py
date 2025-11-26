@@ -147,17 +147,19 @@ class HuggingFaceTokenizer:
         self.tokenizer.save(tokenizer_path)
         print(f"Saved tokenizer to {tokenizer_path}")
 
+_MIN_VALUE = 1
+_MAX_VALUE = 32  # max value corresponds to "infinity"
 # TODO: use special tokens!
-def value_to_token_ids(tokenizer, value: float, cfg: NetworkConfig) -> list[int]:
-    bin = int((value - cfg.min_value) / (cfg.max_value - cfg.min_value) * (cfg.num_value_bins - 1))
-    return tokenizer.encode(str(bin))
+def value_to_token_ids(tokenizer, value: int) -> list[int]:
+    assert value >= _MIN_VALUE
+    value = min(value, _MAX_VALUE)
+    return tokenizer.encode(str(value))
     
-def token_ids_to_value(tokenizer, token_ids: list[int], cfg: NetworkConfig) -> float | None:
+def token_ids_to_value(tokenizer, token_ids: list[int]) -> float | None:
     try:
-        bin = int(tokenizer.decode(token_ids))
+        return int(tokenizer.decode(token_ids))
     except ValueError:
         return None
-    return cfg.min_value + bin * (cfg.max_value - cfg.min_value) / (cfg.num_value_bins - 1)
 
 def get_tokenizer():
     # return HuggingFaceTokenizer.from_pretrained("gpt2")
