@@ -21,7 +21,10 @@ device = torch.device(device_type)
 project_dir = os.path.join(base_dir, "leantree_project")
 if not os.path.exists(project_dir) or not os.listdir(project_dir):
     # TODO: we need to add this to LeantreeProject.lean:
-    #
+    # """
+    # import FormalConjectures.ForMathlib.Analysis.SpecialFunctions.NthRoot
+    # import FormalConjectures.Util.Answer
+    # """
     formal_conjectures = LeanLibrary(
         name = "formal_conjectures",
         scope = "google-deepmind",
