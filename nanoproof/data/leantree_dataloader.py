@@ -1,4 +1,5 @@
 import torch
+from itertools import islice
 
 from nanoproof.common import get_dist_info
 from nanoproof.tokenizer import get_tokenizer, value_to_token_ids
@@ -43,13 +44,14 @@ def sft_data_generator(dataset, batch_size, device="cuda"):
     while True:
         for i in range(ddp_rank, len(dataset), ddp_world_size):
             state, tactic, proof_depth = dataset[i]
+            assert len(state) != 0 and len(tactic) != 0 and proof_depth >= 1
 
             state_toks = tokenizer.encode(state, prepend=bos_token)
 
-            tactic_delim_toks = tokenizer.encode("\n<|tactic|> ", prepend=bos_token)
+            tactic_delim_toks = tokenizer.encode("\n<|tactic|> ")
             tactic_toks = tokenizer.encode(tactic, append=eos_token)
 
-            value_delim_toks = tokenizer.encode("\n<|value|> ", prepend=bos_token)
+            value_delim_toks = tokenizer.encode("\n<|value|> ")
             value_toks = value_to_token_ids(tokenizer, proof_depth) + [eos_token]
 
             # these are <0.1% of mathlib and prevent OOM
@@ -71,3 +73,23 @@ def sft_data_generator(dataset, batch_size, device="cuda"):
             if len(batch) == batch_size:
                 yield collate_and_yield(batch)
                 batch = []
+
+if __name__ == "__main__":
+    print("Loading dataset...")
+    dataset = list(iter_data(split="train"))
+    tokenizer = get_tokenizer()
+    for inputs, targets in islice(sft_data_generator(dataset, batch_size=4), 10):
+        for i in range(inputs.size(0)):
+            print(f"Input {i}:")
+            print(inputs[i])
+            print(tokenizer.decode(inputs[i].tolist()))
+            print()
+
+            print(f"Target {i}:")
+            print(targets[i])
+            # replace -1 with a different token so that it can be decoded
+            targets[i][targets[i] == -1] = tokenizer.encode("X")[0]
+            print(tokenizer.decode(targets[i].tolist()))
+            print("--")
+
+        print("-" * 100)

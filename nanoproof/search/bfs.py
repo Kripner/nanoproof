@@ -1,4 +1,5 @@
 import os
+from contextlib import nullcontext
 
 import torch
 from leantree import LeanProject, LeanLibrary, LeanLibraries
@@ -16,12 +17,15 @@ leanserver --project-path ~/troja/nanoproof/leantree_project/ --repl-exe ~/repos
 source = "sft" # which checkpoint to load the model from
 model_tag = "d20" # model tag to load the model from
 device_type = "" # cuda|cpu|mps (empty => autodetect)
+dtype = "bfloat16"
 base_dir = get_base_dir()
 server_address = "10.10.24.9"
 server_port = 8000
 
 device_type = autodetect_device_type() if device_type == "" else device_type
 device = torch.device(device_type)
+ptdtype = torch.float32 if dtype == "float32" else torch.bfloat16
+autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
 project_dir = os.path.join(base_dir, "leantree_project")
 if not os.path.exists(project_dir) or not os.listdir(project_dir):
@@ -63,6 +67,38 @@ open scoped Topology
 open scoped Polynomial
 """)
     print("Starting proof...")
-    branch = env.proof_from_sorry(theorem)
-    print(branch.state())
-    # zero, succ = branch.apply_tactic("cases n")
+    init_branch = env.proof_from_sorry(theorem)
+    print(f"Initial state:\n{init_branch.state}")
+    open_branches = [init_branch]
+    proof = []
+    rng = torch.Generator(device=device)
+    rng.manual_seed(0)
+    while open_branches:
+        branch = open_branches.pop(0)
+        state_str = str(branch.state)
+        print("-" * 80)
+        print(f"Solving state:\n{state_str}\n")
+        for retry_idx in range(10):
+            print("Generating ..." + f" (retry {retry_idx})" if retry_idx != 0 else "")
+            # TODO: revert this after re-running the fixed SFT!!!
+            # tokens = tokenizer(state_str + "\n<|tactic|> ", prepend="<|endoftext|>")
+            tokens = tokenizer(state_str.strip() + "<|endoftext|>\n<|tactic|> ", prepend="<|endoftext|>")
+            with autocast_ctx:
+                seed = torch.randint(torch.iinfo(torch.int32).max, (1,), device=device, generator=rng).item()
+                sample_toks, masks = engine.generate_batch(tokens, num_samples=1, min_tokens=1, seed=seed)
+            tactic_toks = [token for token, mask in zip(sample_toks[0], masks[0]) if mask == 1]
+            tactic = tokenizer.decode(tactic_toks)
+            print(f"Trying tactic:\n'{tactic}'")
+            new_branches = branch.try_apply_tactic(tactic)
+            if new_branches.is_success():
+                proof.append(tactic)
+                new_branches = new_branches.value
+                print(f"Got {len(new_branches)} new branch(es)!")
+                open_branches.extend(new_branches)
+                break
+            print(f"Error: '{new_branches.error}'\n")
+        else:
+            print("Could not generate a valid tactic, terminating.")
+            break
+    else:
+        print(f"Proof found!\n--{"\n".join(proof)}\n--")
