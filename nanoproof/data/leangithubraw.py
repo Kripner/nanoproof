@@ -11,8 +11,13 @@ from huggingface_hub import HfApi, create_repo, upload_folder, snapshot_download
 import requests
 import time
 from pathlib import Path
+from collections import deque
+from itertools import islice
+import random
+import torch
 
 from nanoproof.common import get_base_dir
+from nanoproof.tokenizer import get_tokenizer
 
 # Not available anymore:
 # - https://github.com/pthomas505/FOL.git
@@ -178,6 +183,114 @@ def download_dataset(repo_id):
     except Exception as e:
         print(f"Error downloading dataset: {e}")
 
+def show_dataset(split="train", B=4, T=512, num_batches=10):
+    """Show the first N batches from the dataset."""
+    print(f"Loading dataset (split={split})...")
+    tokenizer = get_tokenizer()
+    
+    try:
+        dataloader = iter_data(B=B, T=T, split=split, device="cpu")
+        for batch_idx, (inputs, targets) in enumerate(islice(dataloader, num_batches)):
+            print(f"\nBatch {batch_idx}:")
+            print(f"  Inputs shape: {inputs.shape}")
+            print(f"  Targets shape: {targets.shape}")
+            
+            for i in range(min(2, inputs.size(0))):  # Show first 2 samples per batch
+                print(f"\n  Sample {i}:")
+                print(f"    Input tokens: {inputs[i][:50].tolist()}...")  # First 50 tokens
+                print(f"    Input text (first 200 chars):")
+                decoded = tokenizer.decode(inputs[i].tolist())
+                print(f"      {decoded[:200]}...")
+                
+                print(f"    Target tokens: {targets[i][:50].tolist()}...")  # First 50 tokens
+                print(f"    Target text (first 200 chars):")
+                decoded_target = tokenizer.decode(targets[i].tolist())
+                print(f"      {decoded_target[:200]}...")
+            
+            print("-" * 100)
+    except StopIteration:
+        print("Dataset exhausted before reaching requested number of batches.")
+    except Exception as e:
+        print(f"Error showing dataset: {e}")
+        raise
+
+def iter_data(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device="cuda"):
+    """
+    Create batches for unsupervised training from the leangithubraw parquet file.
+    
+    Args:
+        B: Batch size
+        T: Sequence length (tokens per sample)
+        split: "train" or "val"
+        tokenizer_threads: Number of threads for tokenization (unused, kept for compatibility)
+        tokenizer_batch_size: Batch size for tokenization
+        device: Device to move tensors to ("cuda" or "cpu")
+    
+    Yields:
+        inputs: Tensor of shape (B, T) with input token IDs
+        targets: Tensor of shape (B, T) with target token IDs
+    """
+    assert split in ["train", "val"], "split must be 'train' or 'val'"
+    
+    parquet_path = os.path.join(DATA_DIR, "leangithubraw.parquet")
+    if not os.path.exists(parquet_path):
+        raise FileNotFoundError(f"Parquet file not found at {parquet_path}. Build it or download it first.")
+    
+    pf = pq.ParquetFile(parquet_path)
+    table = pf.read()
+    texts = table.column("text").to_pylist()
+    
+    random.seed(0)
+    random.shuffle(texts)
+    
+    # split into train (first 95%) and val (last 5%)
+    split_idx = int(len(texts) * 0.95)
+    if split == "train":
+        texts = texts[:split_idx]
+    else:
+        texts = texts[split_idx:]
+    
+    tokenizer = get_tokenizer()
+    bos_token = tokenizer.get_bos_token_id()
+    assert bos_token is not None
+    
+    def document_batches():
+        for i in range(0, len(texts), tokenizer_batch_size):
+            batch = texts[i:i+tokenizer_batch_size]
+            yield batch
+    
+    batches = document_batches()
+    
+    needed_tokens = B * T + 1  # +1 because we also need the target at the last token
+    token_buffer = deque()  # we stream tokens on the right and pop from the left
+    
+    while True:
+        # accumulate enough tokens for one iteration before yielding
+        while len(token_buffer) < needed_tokens:
+            try:
+                doc_batch = next(batches)
+            except StopIteration:
+                break
+            token_lists = tokenizer.encode(doc_batch, prepend=bos_token)
+            for tokens in token_lists:
+                token_buffer.extend(tokens)
+        
+        if len(token_buffer) < needed_tokens:
+            break  # drop last
+        
+        tokens = [token_buffer.popleft() for _ in range(needed_tokens)]
+        use_cuda_optimizations = device == "cuda"
+        scratch = torch.tensor(tokens, dtype=torch.long, pin_memory=use_cuda_optimizations)
+        
+        inputs_cpu = scratch[:-1]
+        targets_cpu = scratch[1:]
+        
+        # reshape to 2D and move to device async
+        inputs = inputs_cpu.view(B, T).to(device=device, non_blocking=use_cuda_optimizations)
+        targets = targets_cpu.view(B, T).to(device=device, non_blocking=use_cuda_optimizations)
+        
+        yield inputs, targets
+
 def main():
     parser = argparse.ArgumentParser(description="Manage Lean GitHub Raw Dataset")
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -187,11 +300,18 @@ def main():
     
     # Publish
     publish_parser = subparsers.add_parser("publish", help="Upload dataset to Hugging Face")
-    publish_parser.add_argument("repo_id", default="Kripi/Lean-Github-Raw", help="Hugging Face dataset repository ID (e.g. username/dataset)")
+    publish_parser.add_argument("--repo_id", default="Kripi/Lean-Github-Raw", help="Hugging Face dataset repository ID (e.g. username/dataset)")
     
     # Download
     download_parser = subparsers.add_parser("download", help="Download dataset from Hugging Face")
-    download_parser.add_argument("repo_id", default="Kripi/Lean-Github-Raw", help="Hugging Face dataset repository ID (e.g. username/dataset)")
+    download_parser.add_argument("--repo_id", default="Kripi/Lean-Github-Raw", help="Hugging Face dataset repository ID (e.g. username/dataset)")
+    
+    # Show
+    show_parser = subparsers.add_parser("show", help="Show the first N batches from the dataset")
+    show_parser.add_argument("--split", default="train", choices=["train", "val"], help="Dataset split to show")
+    show_parser.add_argument("--B", type=int, default=4, help="Batch size")
+    show_parser.add_argument("--T", type=int, default=512, help="Sequence length")
+    show_parser.add_argument("--num-batches", type=int, default=10, help="Number of batches to show")
     
     args = parser.parse_args()
     
@@ -201,6 +321,8 @@ def main():
         publish_dataset(args.repo_id)
     elif args.action == "download":
         download_dataset(args.repo_id)
+    elif args.action == "show":
+        show_dataset(split=args.split, B=args.B, T=args.T, num_batches=args.num_batches)
 
 if __name__ == "__main__":
     main()
