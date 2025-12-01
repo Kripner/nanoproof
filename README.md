@@ -16,6 +16,7 @@
 # Ideas
 
 - try training on state_after as well, just to give the model more training signal (it was done in some paper, maybe GPT-f)
+- datasets: LEAN-Github (https://huggingface.co/datasets/internlm/Lean-Github), LeanUniverse (https://github.com/facebookresearch/LeanUniverse), Lean-Workbook, DeepSeek-Prover-V2 dataset
 
 # Setup
 
