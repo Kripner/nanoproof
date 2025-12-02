@@ -48,7 +48,8 @@ text_iter = text_iterator()
 t0 = time.time()
 # TODO: train our own tokenizer
 # tokenizer = RustBPETokenizer.train_from_iterator(text_iter, args.vocab_size)
-tokenizer = HuggingFaceTokenizer.from_pretrained("gpt2")
+# tokenizer = HuggingFaceTokenizer.from_pretrained("gpt2")
+tokenizer = HuggingFaceTokenizer.train_from_iterator(text_iter, args.vocab_size)
 t1 = time.time()
 train_time = t1 - t0
 print(f"Training time: {train_time:.2f}s")

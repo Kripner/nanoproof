@@ -4,6 +4,7 @@ Evaluate compression ratio of the tokenizer.
 
 from nanoproof.tokenizer import get_tokenizer, HuggingFaceTokenizer
 from nanoproof.data.nemotron import parquets_iter_batched
+from nanoproof.data.leangithubraw import iter_texts_batched
 
 # Random text I got from a random website this morning
 news_text = r"""
@@ -277,10 +278,13 @@ exact Exists.intro x0 hx0
 """
 
 # The tokenizer was trained on data from earlier shards, so it has seen this data
-train_docs = next(parquets_iter_batched(split="train"))
-train_text = "\n".join(train_docs)
-val_docs = next(parquets_iter_batched(split="val"))
-val_text = "\n".join(val_docs)
+nemotron_train_docs = next(parquets_iter_batched(split="train"))
+nemotron_train_text = "\n".join(nemotron_train_docs)
+nemotron_val_docs = next(parquets_iter_batched(split="val"))
+nemotron_val_text = "\n".join(nemotron_val_docs)
+
+leangithubraw_train_docs = next(iter_texts_batched())
+leangithubraw_train_text = "\n".join(leangithubraw_train_docs)
 
 all_text = [
     ("news", news_text),
@@ -288,10 +292,11 @@ all_text = [
     ("code", code_text),
     ("math", math_text),
     ("science", science_text),
-    ("nemotron-train", train_text),
+    ("nemotron-train", nemotron_train_text),
+    ("leangithubraw-train", leangithubraw_train_text),
 ]
-if val_text:
-    all_text.append(("nemotron-val", val_text))
+if nemotron_val_text:
+    all_text.append(("nemotron-val", nemotron_val_text))
 
 # Try out current default compared to GPT-2 and GPT-4 tokenizers
 tokenizer_results = {}

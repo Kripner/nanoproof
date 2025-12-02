@@ -292,6 +292,22 @@ def iter_data(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device
         
         yield inputs, targets
 
+def iter_texts_batched():
+    """
+    Iterate through the dataset, in batches of underlying row_groups for efficiency.
+    - split can be "train" or "val". the last parquet file will be val.
+    - start/step are useful for skipping rows in DDP. e.g. start=rank, step=world_size
+    """
+    parquet_path = os.path.join(DATA_DIR, "leangithubraw.parquet")
+    if not os.path.exists(parquet_path):
+        raise FileNotFoundError(f"Parquet file not found at {parquet_path}. Build it or download it first.")
+    
+    pf = pq.ParquetFile(parquet_path)
+    for rg_idx in range(pf.num_row_groups):
+        rg = pf.read_row_group(rg_idx)
+        texts = rg.column("text").to_pylist()
+        yield texts
+
 def dataset_stats():
     parquet_path = os.path.join(DATA_DIR, "leangithubraw.parquet")
     if not os.path.exists(parquet_path):
