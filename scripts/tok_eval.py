@@ -2,8 +2,8 @@
 Evaluate compression ratio of the tokenizer.
 """
 
-from nanoproof.tokenizer import get_tokenizer, RustBPETokenizer
-from nanoproof.data.dataset import parquets_iter_batched
+from nanoproof.tokenizer import get_tokenizer, HuggingFaceTokenizer
+from nanoproof.data.nemotron import parquets_iter_batched
 
 # Random text I got from a random website this morning
 news_text = r"""
@@ -143,6 +143,139 @@ science_text = r"""
 Photosynthesis is a photochemical energy transduction process in which light-harvesting pigment–protein complexes within the thylakoid membranes of oxygenic phototrophs absorb photons and initiate charge separation at the reaction center, driving the linear electron transport chain from water to NADP⁺ via photosystem II, the cytochrome b₆f complex, and photosystem I, concomitantly generating a trans-thylakoid proton motive force utilized by chloroplastic ATP synthase. The light-dependent reactions produce ATP and NADPH, which fuel the Calvin–Benson–Bassham cycle in the stroma, wherein ribulose-1,5-bisphosphate is carboxylated by ribulose-1,5-bisphosphate carboxylase/oxygenase (RuBisCO) to form 3-phosphoglycerate, subsequently reduced and regenerated through a series of enzymatic steps, enabling net assimilation of CO₂ into triose phosphates and ultimately carbohydrates. This process is tightly regulated by photoprotective mechanisms, redox feedback, and metabolite flux, representing a central biochemical pathway coupling solar energy capture to the biosphere’s primary productivity.
 """.strip()
 
+lean_text = r"""
+@[expose] public section
+
+universe u v w u₁ v₁
+
+/-- Defining the homomorphism in the category R-Alg, denoted `A →ₐ[R] B`. -/
+structure AlgHom (R : Type u) (A : Type v) (B : Type w) [CommSemiring R] [Semiring A] [Semiring B]
+  [Algebra R A] [Algebra R B] extends RingHom A B where
+  commutes' : ∀ r : R, toFun (algebraMap R A r) = algebraMap R B r
+
+/-- Reinterpret an `AlgHom` as a `RingHom` -/
+add_decl_doc AlgHom.toRingHom
+
+@[inherit_doc AlgHom]
+infixr:25 " →ₐ " => AlgHom _
+
+@[inherit_doc]
+notation:25 A " →ₐ[" R "] " B => AlgHom R A B
+
+/-- The algebra morphism underlying `algebraMap` -/
+def Algebra.algHom (R A B : Type*)
+    [CommSemiring R] [CommSemiring A] [Semiring B] [Algebra R A] [Algebra R B]
+    [Algebra A B] [IsScalarTower R A B] :
+    A →ₐ[R] B where
+  toRingHom := algebraMap A B
+  commutes' r := by simpa [Algebra.smul_def] using smul_assoc r (1 : A) (1 : B)
+
+/-- `AlgHomClass F R A B` asserts `F` is a type of bundled algebra homomorphisms
+from `A` to `B`. -/
+class AlgHomClass (F : Type*) (R A B : outParam Type*)
+    [CommSemiring R] [Semiring A] [Semiring B] [Algebra R A] [Algebra R B] [FunLike F A B] : Prop
+    extends RingHomClass F A B where
+  commutes : ∀ (f : F) (r : R), f (algebraMap R A r) = algebraMap R B r
+
+-- For now, don't replace `AlgHom.commutes` and `AlgHomClass.commutes` with the more generic lemma.
+-- The file `Mathlib/NumberTheory/NumberField/CanonicalEmbedding/FundamentalCone.lean` slows down by
+-- 15% if we would do so (see benchmark on PR https://github.com/leanprover-community/mathlib4/pull/18040).
+-- attribute [simp] AlgHomClass.commutes
+
+namespace AlgHomClass
+
+variable {R A B F : Type*} [CommSemiring R] [Semiring A] [Semiring B]
+  [Algebra R A] [Algebra R B] [FunLike F A B]
+
+-- see Note [lower instance priority]
+instance (priority := 100) linearMapClass [AlgHomClass F R A B] : LinearMapClass F R A B :=
+  { ‹AlgHomClass F R A B› with
+    map_smulₛₗ := fun f r x => by
+      simp only [Algebra.smul_def, map_mul, commutes, RingHom.id_apply] }
+
+/-- Turn an element of a type `F` satisfying `AlgHomClass F α β` into an actual
+`AlgHom`. This is declared as the default coercion from `F` to `α →+* β`. -/
+@[coe]
+def toAlgHom {F : Type*} [FunLike F A B] [AlgHomClass F R A B] (f : F) : A →ₐ[R] B where
+  __ := (f : A →+* B)
+  toFun := f
+  commutes' := AlgHomClass.commutes f
+
+instance coeTC {F : Type*} [FunLike F A B] [AlgHomClass F R A B] : CoeTC F (A →ₐ[R] B) :=
+  ⟨AlgHomClass.toAlgHom⟩
+
+end AlgHomClass
+
+namespace AlgHom
+
+variable {R : Type u} {A : Type v} {B : Type w} {C : Type u₁} {D : Type v₁}
+
+section Semiring
+
+variable [CommSemiring R] [Semiring A] [Semiring B] [Semiring C] [Semiring D]
+variable [Algebra R A] [Algebra R B] [Algebra R C] [Algebra R D]
+
+instance funLike : FunLike (A →ₐ[R] B) A B where
+  coe f := f.toFun
+  coe_injective' f g h := by
+    rcases f with ⟨⟨⟨⟨_, _⟩, _⟩, _, _⟩, _⟩
+    rcases g with ⟨⟨⟨⟨_, _⟩, _⟩, _, _⟩, _⟩
+    congr
+
+instance algHomClass : AlgHomClass (A →ₐ[R] B) R A B where
+  map_add f := f.map_add'
+  map_zero f := f.map_zero'
+  map_mul f := f.map_mul'
+  map_one f := f.map_one'
+  commutes f := f.commutes'
+"""
+
+lean_search_text = r"""
+x : ℝ
+⊢ x ^ 2 - 2 * x - 24 < 0 ↔ x ∈ Set.Ioo (-4) 6
+	
+exact ⟨fun h ↦ by rw [Set.mem_Ioo]; constructor <;> nlinarith [h], fun h ↦ by rw [Set.mem_Ioo] at h; nlinarith⟩
+
+⊢ ∀ (x : ℝ), 2⁻¹ + cos (2 * (2 * x)) / 2 = (1 + cos (4 * x)) / 2
+	
+ring
+
+case h
+ι : Type u_4
+inst✝ : Fintype ι
+f : ℝ → ι → ℝ
+s : Set ℝ
+h : LocallyBoundedVariationOn f s
+A : ∀ (i : ι), LipschitzWith 1 fun x => x i
+i : ι
+⊢ LocallyBoundedVariationOn (fun x => f x i) s
+
+exact LipschitzWith.comp_locallyBoundedVariationOn (A i) h
+
+p q : Prop
+⊢ p ∧ q → p
+
+intro h
+
+case mp.inl
+p q r : Prop
+hp : p
+hq : q
+⊢ p ∧ q ∨ p ∧ r
+
+exact Or.inl ⟨hp, hq⟩
+
+α : Type
+P : α → Prop
+inst✝ : Inhabited α
+h : ∀ (x : α), P x
+x0 : α := default
+hx0 : P x0
+⊢ ∃ x, P x
+
+exact Exists.intro x0 hx0
+"""
+
 # The tokenizer was trained on data from earlier shards, so it has seen this data
 train_docs = next(parquets_iter_batched(split="train"))
 train_text = "\n".join(train_docs)
@@ -155,21 +288,21 @@ all_text = [
     ("code", code_text),
     ("math", math_text),
     ("science", science_text),
-    ("fwe-train", train_text),
+    ("nemotron-train", train_text),
 ]
 if val_text:
-    all_text.append(("fwe-val", val_text))
+    all_text.append(("nemotron-val", val_text))
 
 # Try out current default compared to GPT-2 and GPT-4 tokenizers
 tokenizer_results = {}
 vocab_sizes = {}
 
 for tokenizer_name in ["gpt2", "gpt4", "ours"]:
-
+    print(f"Evaluating {tokenizer_name}...")
     if tokenizer_name == "gpt2":
-        tokenizer = RustBPETokenizer.from_pretrained("gpt2") # gpt-2 base model tokenizer
+        tokenizer = HuggingFaceTokenizer.from_pretrained("gpt2") # gpt-2 base model tokenizer
     elif tokenizer_name == "gpt4":
-        tokenizer = RustBPETokenizer.from_pretrained("cl100k_base") # gpt-4 base model tokenizer
+        tokenizer = HuggingFaceTokenizer.from_pretrained("cl100k_base") # gpt-4 base model tokenizer
     else:
         tokenizer = get_tokenizer()
 

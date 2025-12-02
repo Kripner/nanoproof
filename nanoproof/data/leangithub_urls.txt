@@ -1,4 +1,9 @@
-# Source repos from internlm/Lean-Github (except for https://github.com/mortarsanjaya/IMOSLLean4.git, which contains IMO problems)
+# Source repos from internlm/Lean-Github
+# ... except for https://github.com/mortarsanjaya/IMOSLLean4.git, which contains IMO problems
+# ... plus mathlib
+
+https://github.com/leanprover-community/mathlib4.git
+
 https://github.com/kevinsullivan/cs2120f23.git
 https://github.com/pthomas505/FOL.git
 https://github.com/pandaman64/QuickSortInLean.git

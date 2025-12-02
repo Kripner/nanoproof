@@ -30,7 +30,7 @@ DATASET_NAME = "nvidia/Nemotron-CC-Math-v1"
 BASE_URL = "https://huggingface.co/datasets/nvidia/Nemotron-CC-Math-v1/resolve/main"
 
 base_dir = get_base_dir()
-DATA_DIR = os.path.join(base_dir, "base_data")
+DATA_DIR = os.path.join(base_dir, "data", "nemotron")
 
 MAX_SHARD = 45 # the last datashard is part_000045.parquet
 index_to_filename = lambda index: f"4plus/part_{index:06d}.parquet" # format of the filenames
@@ -65,6 +65,35 @@ def parquets_iter_batched(split, start=0, step=1):
             texts = rg.column('text').to_pylist()
             yield texts
 
+def process_file(filepath):
+    """
+    Loads a parquet file, changes group size to 1024, drops all columns except 'text',
+    and overwrites the file.
+    """
+    try:
+        # Read the table
+        table = pq.read_table(filepath)
+        
+        # Select only 'text' column if others exist
+        if 'text' in table.column_names:
+            table = table.select(['text'])
+        else:
+            print(f"Warning: 'text' column not found in {filepath}")
+            
+        # Write to a temporary file with new row group size
+        temp_path = filepath + ".rechunk"
+        pq.write_table(table, temp_path, row_group_size=1024)
+        
+        # Overwrite the original file
+        os.rename(temp_path, filepath)
+    except Exception as e:
+        print(f"Failed to process {filepath}: {e}")
+        # Clean up temp file if it was created
+        if os.path.exists(filepath + ".rechunk"):
+            try:
+                os.remove(filepath + ".rechunk")
+            except:
+                pass
 
 def download_single_file(index):
     """ Downloads a single file index, with some backoff """
@@ -104,7 +133,9 @@ def download_single_file(index):
                             pbar.update(len(chunk))
             # Move temp file to final location
             os.rename(temp_path, filepath)
-            print(f"Successfully downloaded {filename}")
+            # Process the file immediately after download
+            process_file(filepath)
+            print(f"Successfully downloaded and processed {filename}")
             return True
 
         except (requests.RequestException, IOError) as e:
@@ -124,29 +155,42 @@ def download_single_file(index):
             else:
                 print(f"Failed to download {filename} after {max_attempts} attempts")
                 return False
-
     return False
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Download Nemotron-CC-Math-v1 52BT dataset shards")
-    parser.add_argument("-n", "--num-files", type=int, default=-1, help="Number of shards to download (default: -1), -1 = disable")
-    parser.add_argument("-w", "--num-workers", type=int, default=4, help="Number of parallel download workers (default: 4)")
+    parser = argparse.ArgumentParser(description="Manage Nemotron-CC-Math-v1 dataset")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    parser_download = subparsers.add_parser("download", help="Download dataset shards")
+    parser_download.add_argument("-n", "--num-files", type=int, default=-1, help="Number of shards to download (default: -1), -1 = disable")
+    parser_download.add_argument("-w", "--num-workers", type=int, default=4, help="Number of parallel download workers (default: 4)")
+
+    parser_process = subparsers.add_parser("process", help="Process all downloaded parquet files (re-chunk to 1024 group size)")
+    
     args = parser.parse_args()
 
     os.makedirs(DATA_DIR, exist_ok=True)
 
-    num = MAX_SHARD + 1 if args.num_files == -1 else min(args.num_files, MAX_SHARD + 1)
-    ids_to_download = list(range(num))
-    print(f"Downloading {len(ids_to_download)} shards using {args.num_workers} workers...")
-    print(f"Target directory: {DATA_DIR}")
-    print()
-    with Pool(processes=args.num_workers) as pool:
-        results = list(tqdm(
-            pool.imap(download_single_file, ids_to_download),
-            total=len(ids_to_download),
-            desc="Downloading shards"
-        ))
+    if args.command == "download":
+        num = MAX_SHARD + 1 if args.num_files == -1 else min(args.num_files, MAX_SHARD + 1)
+        ids_to_download = list(range(num))
+        print(f"Downloading {len(ids_to_download)} shards using {args.num_workers} workers...")
+        print(f"Target directory: {DATA_DIR}")
+        print()
+        with Pool(processes=args.num_workers) as pool:
+            results = list(tqdm(
+                pool.imap(download_single_file, ids_to_download),
+                total=len(ids_to_download),
+                desc="Downloading shards"
+            ))
 
-    successful = sum(1 for success in results if success)
-    print(f"Done! Downloaded: {successful}/{len(ids_to_download)} shards to {DATA_DIR}")
+        successful = sum(1 for success in results if success)
+        print(f"Done! Downloaded: {successful}/{len(ids_to_download)} shards to {DATA_DIR}")
+
+    elif args.command == "process":
+        parquet_paths = list_parquet_files()
+        print(f"Found {len(parquet_paths)} parquet files to process in {DATA_DIR}...")
+        for filepath in tqdm(parquet_paths, desc="Processing files"):
+            process_file(filepath)
+        print("Done processing all files.")

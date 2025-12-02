@@ -19,6 +19,8 @@ import torch
 from nanoproof.common import get_base_dir
 from nanoproof.tokenizer import get_tokenizer
 
+# 142.61 MB of text in total
+
 # Not available anymore:
 # - https://github.com/pthomas505/FOL.git
 # - https://github.com/brown-cs22/CS22-Lean-2024.git
@@ -123,20 +125,19 @@ def build_dataset():
         print("No data collected.")
         return
 
-    print(f"Collected data from {len(parquet_files)} repositories.")
-    print(f"Total characters: {total_chars:,}")
-    print(f"Total bytes: {total_bytes:,} ({total_bytes / 1024 / 1024:.2f} MB)")
-    print(f"Total files: {total_files:,}")
+    print("Processed now:")
+    print(f"  Total characters: {total_chars:,}")
+    print(f"  Total bytes: {total_bytes:,} ({total_bytes / 1024 / 1024:.2f} MB)")
+    print(f"  Total files: {total_files:,}")
 
-    print("Combining parquet files...")
-    
+    print(f"Combining data from {len(parquet_files)} repositories...")
     tables = []
     for pf in tqdm(parquet_files):
         tables.append(pq.read_table(pf))
     combined_table = pa.concat_tables(tables)
     combined_output_file = os.path.join(output_dir, "leangithubraw.parquet")
-    pq.write_table(combined_table, combined_output_file)
-    
+    # 1024 group size for efficient loading during training
+    pq.write_table(combined_table, combined_output_file, row_group_size=1024)
     print(f"Dataset saved to: {combined_output_file}")
 
 def publish_dataset(repo_id):
@@ -291,6 +292,48 @@ def iter_data(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device
         
         yield inputs, targets
 
+def dataset_stats():
+    parquet_path = os.path.join(DATA_DIR, "leangithubraw.parquet")
+    if not os.path.exists(parquet_path):
+        print(f"Dataset not found at {parquet_path}. Build or download it first.")
+        return
+
+    print(f"Loading dataset from {parquet_path}...")
+    try:
+        table = pq.read_table(parquet_path)
+    except Exception as e:
+        print(f"Error reading parquet file: {e}")
+        return
+
+    texts = table.column("text").to_pylist()
+    num_samples = len(texts)
+    
+    print(f"Calculating statistics for {num_samples} samples...")
+    
+    total_chars = 0
+    total_bytes = 0
+    total_tokens = 0
+    
+    tokenizer = get_tokenizer()
+    
+    batch_size = 1000
+    for i in tqdm(range(0, num_samples, batch_size)):
+        batch_texts = texts[i:i+batch_size]
+        
+        for text in batch_texts:
+            total_chars += len(text)
+            total_bytes += len(text.encode("utf-8"))
+            
+        encoded_batch = tokenizer.encode(batch_texts)
+        for ids in encoded_batch:
+            total_tokens += len(ids)
+            
+    print("\nDataset Stats:")
+    print(f"{'Samples (Files):':<20} {num_samples:,}")
+    print(f"{'Tokens:':<20} {total_tokens:,}")
+    print(f"{'Characters:':<20} {total_chars:,}")
+    print(f"{'Bytes:':<20} {total_bytes:,} ({total_bytes / 1024 / 1024:.2f} MB)")
+
 def main():
     parser = argparse.ArgumentParser(description="Manage Lean GitHub Raw Dataset")
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -313,6 +356,9 @@ def main():
     show_parser.add_argument("--T", type=int, default=512, help="Sequence length")
     show_parser.add_argument("--num-batches", type=int, default=10, help="Number of batches to show")
     
+    # Stats
+    subparsers.add_parser("stats", help="Display dataset statistics (tokens, chars, bytes, samples)")
+    
     args = parser.parse_args()
     
     if args.action == "build":
@@ -323,6 +369,8 @@ def main():
         download_dataset(args.repo_id)
     elif args.action == "show":
         show_dataset(split=args.split, B=args.B, T=args.T, num_batches=args.num_batches)
+    elif args.action == "stats":
+        dataset_stats()
 
 if __name__ == "__main__":
     main()
