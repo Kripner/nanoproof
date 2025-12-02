@@ -283,8 +283,10 @@ nemotron_train_text = "\n".join(nemotron_train_docs)
 nemotron_val_docs = next(parquets_iter_batched(split="val"))
 nemotron_val_text = "\n".join(nemotron_val_docs)
 
-leangithubraw_train_docs = next(iter_texts_batched())
+leangithubraw_train_docs = next(iter_texts_batched(split="train"))
 leangithubraw_train_text = "\n".join(leangithubraw_train_docs)
+leangithubraw_val_docs = next(iter_texts_batched(split="val"))
+leangithubraw_val_text = "\n".join(leangithubraw_val_docs)
 
 all_text = [
     ("news", news_text),
@@ -292,22 +294,29 @@ all_text = [
     ("code", code_text),
     ("math", math_text),
     ("science", science_text),
-    ("nemotron-train", nemotron_train_text),
-    ("leangithubraw-train", leangithubraw_train_text),
+    ("nm-train", nemotron_train_text),
+    ("lg-train", leangithubraw_train_text),
 ]
 if nemotron_val_text:
-    all_text.append(("nemotron-val", nemotron_val_text))
+    all_text.append(("nm-val", nemotron_val_text))
+if leangithubraw_val_text:
+    all_text.append(("lg-val", leangithubraw_val_text))
 
 # Try out current default compared to GPT-2 and GPT-4 tokenizers
 tokenizer_results = {}
 vocab_sizes = {}
 
-for tokenizer_name in ["gpt2", "gpt4", "ours"]:
+# for tokenizer_name in ["gpt2", "gpt4", "ours"]:
+for tokenizer_name in ["gpt2", "nemotron", "deepseek", "ours"]:
     print(f"Evaluating {tokenizer_name}...")
     if tokenizer_name == "gpt2":
         tokenizer = HuggingFaceTokenizer.from_pretrained("gpt2") # gpt-2 base model tokenizer
-    elif tokenizer_name == "gpt4":
-        tokenizer = HuggingFaceTokenizer.from_pretrained("cl100k_base") # gpt-4 base model tokenizer
+    # elif tokenizer_name == "gpt4":
+    #     tokenizer = HuggingFaceTokenizer.from_pretrained("cl100k_base") # gpt-4 base model tokenizer
+    elif tokenizer_name == "nemotron":
+        tokenizer = HuggingFaceTokenizer.from_pretrained("nvidia/NVIDIA-Nemotron-Nano-9B-v2")
+    elif tokenizer_name == "deepseek":
+        tokenizer = HuggingFaceTokenizer.from_pretrained("deepseek-ai/DeepSeek-V3.2")
     else:
         tokenizer = get_tokenizer()
 
@@ -335,7 +344,8 @@ RESET = '\033[0m'
 # Print vocab sizes
 print(f"\nVocab sizes:")
 print(f"GPT-2: {vocab_sizes['gpt2']}")
-print(f"GPT-4: {vocab_sizes['gpt4']}")
+print(f"Nemotron: {vocab_sizes['nemotron']}")
+print(f"DeepSeek: {vocab_sizes['deepseek']}")
 print(f"Ours: {vocab_sizes['ours']}")
 
 def print_comparison(baseline_name, baseline_results, ours_results, all_text):
@@ -378,12 +388,13 @@ def print_comparison(baseline_name, baseline_results, ours_results, all_text):
 
 # Print comparisons
 print_comparison("GPT-2", tokenizer_results['gpt2'], tokenizer_results['ours'], all_text)
-print_comparison("GPT-4", tokenizer_results['gpt4'], tokenizer_results['ours'], all_text)
+print_comparison("Nemotron", tokenizer_results['nemotron'], tokenizer_results['ours'], all_text)
+print_comparison("DeepSeek", tokenizer_results['deepseek'], tokenizer_results['ours'], all_text)
 
 # Log to report
 from nanoproof.report import get_report
 lines = []
-for baseline_name in ["GPT-2", "GPT-4"]:
+for baseline_name in ["GPT-2", "Nemotron", "DeepSeek"]:
     baseline_key = baseline_name.lower().replace('-', '')
     baseline_results = tokenizer_results[baseline_key]
     ours_results = tokenizer_results['ours']

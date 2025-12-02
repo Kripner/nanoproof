@@ -33,7 +33,7 @@ class NetworkConfig:
     n_embd: int = 768
 
     # value head
-    num_value_bins: int = 64
+    num_value_bins: int = 64  # TODO: merge with tokenizer
     min_value: float = 0.0
     max_value: float = 1.0
 

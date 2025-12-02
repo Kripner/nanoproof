@@ -27,6 +27,8 @@ from nanoproof.tokenizer import get_tokenizer
 # Excluded:
 # - https://github.com/mortarsanjaya/IMOSLLean4.git (contains IMO problems)
 
+# TODO: maybe look at/exclude repos that have thousands of emojis?
+
 URLS_FILE = os.path.join(os.path.dirname(__file__), "leangithub_urls.txt")
 BASE_DIR = get_base_dir()
 DATA_DIR = os.path.join(BASE_DIR, "data", "leangithubraw")
@@ -238,18 +240,22 @@ def iter_data(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device
         raise FileNotFoundError(f"Parquet file not found at {parquet_path}. Build it or download it first.")
     
     pf = pq.ParquetFile(parquet_path)
-    table = pf.read()
-    texts = table.column("text").to_pylist()
+    
+    # last two groups are validation, rest is train
+    num_groups = pf.num_row_groups
+    assert num_groups > 10
+    if split == "train":
+        group_indices = range(num_groups - 2)
+    else:
+        group_indices = range(num_groups - 2, num_groups)
+        
+    texts = []
+    for i in group_indices:
+        table = pf.read_row_group(i)
+        texts.extend(table.column("text").to_pylist())
     
     random.seed(0)
     random.shuffle(texts)
-    
-    # split into train (first 95%) and val (last 5%)
-    split_idx = int(len(texts) * 0.95)
-    if split == "train":
-        texts = texts[:split_idx]
-    else:
-        texts = texts[split_idx:]
     
     tokenizer = get_tokenizer()
     bos_token = tokenizer.get_bos_token_id()
@@ -292,22 +298,40 @@ def iter_data(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device
         
         yield inputs, targets
 
-def iter_texts_batched():
+def iter_texts_batched(split, url_whitelist=None):
     """
     Iterate through the dataset, in batches of underlying row_groups for efficiency.
     - split can be "train" or "val". the last parquet file will be val.
     - start/step are useful for skipping rows in DDP. e.g. start=rank, step=world_size
     """
+    assert split in ["train", "val"], "split must be 'train' or 'val'"
     parquet_path = os.path.join(DATA_DIR, "leangithubraw.parquet")
     if not os.path.exists(parquet_path):
         raise FileNotFoundError(f"Parquet file not found at {parquet_path}. Build it or download it first.")
     
     pf = pq.ParquetFile(parquet_path)
-    for rg_idx in range(pf.num_row_groups):
+    
+    # last two groups are validation, rest is train
+    num_groups = pf.num_row_groups
+    assert num_groups > 10
+    if split == "train":
+        group_indices = range(num_groups - 2)
+    else:
+        group_indices = range(num_groups - 2, num_groups)
+
+    for rg_idx in group_indices:
         rg = pf.read_row_group(rg_idx)
         texts = rg.column("text").to_pylist()
+        
+        if url_whitelist is not None:
+            urls = rg.column("url").to_pylist()
+            filtered_texts = []
+            for text, url in zip(texts, urls):
+                if any(url.startswith(prefix) for prefix in url_whitelist):
+                    filtered_texts.append(text)
+            texts = filtered_texts
+        
         yield texts
-
 def dataset_stats():
     parquet_path = os.path.join(DATA_DIR, "leangithubraw.parquet")
     if not os.path.exists(parquet_path):

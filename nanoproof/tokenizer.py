@@ -11,10 +11,20 @@ import os
 
 from nanoproof.model import NetworkConfig
 
+_MIN_VALUE = 1
+_MAX_VALUE = 64  # max value corresponds to "infinity"
+
 SPECIAL_TOKENS = [
     # every document begins with the Beginning of Sequence (BOS) token that delimits documents
     "<|bos|>",
     "<|eos|>",
+    "<|pad|>",
+    "<|tactic|>",
+    "<|value|>",
+    *[f"<|bin_{i:02d}|>" for i in range(_MIN_VALUE, _MAX_VALUE + 1)],
+    # these occur at least 1000 times in Mathlib but do not have dedicated tokens in GPT-2
+    "ˢ", "ˣ", "Γ", "Δ", "Λ", "Π", "Σ", "Φ", "Ω", "δ", "ζ", "η", "θ", "φ", "χ", "ψ", "ϕ", "ᵈ", "ᵐ", "ᵒ", "ᵖ", "ᵢ", "ᵣ", "ᵥ", "ᶜ", "ᶠ", "‖", "‹", "›", "⁅", "⁆", "⁰", "⁻", "₀", "₁", "₂", "₃", "₄", "₊", "ₐ", "ₑ", "ₗ", "ₘ", "ₙ", "ₚ", "ₛ", "ₜ", "ℂ", "ℕ", "ℚ", "ℝ", "ℤ", "ℱ", "←", "↔", "↦", "↪", "⇑", "∀", "∂", "∃", "∅", "∈", "∉", "∏", "∑", "∘", "∞", "∣", "∧", "∨", "∩", "∪", "∫", "≃", "≅", "≠", "≡", "≤", "≥", "≪", "≫", "⊆", "⊓", "⊔", "⊕", "⊗", "⊢", "⊤", "⊥", "⋂", "⋃", "⋆", "⋙", "▷", "▸", "◁", "⟦", "⟧", "⟨", "⟩", "⟪", "⟫", "⟶", "⥤", "⦃", "⦄", "⧸", "⨅", "⨆", "𝒜", "𝒰", "𝓘", "𝓝", "𝔖", "𝕜", "𝟙",
+    # these are left out because they are already in GPT2 tokenizer (although weirdly not reported in tok_show): "¬", "¹"
 ]
 
 # NOTE: this split pattern deviates from GPT-4 in that we use \p{N}{1,2} instead of \p{N}{1,3}
@@ -147,8 +157,6 @@ class HuggingFaceTokenizer:
         self.tokenizer.save(tokenizer_path)
         print(f"Saved tokenizer to {tokenizer_path}")
 
-_MIN_VALUE = 1
-_MAX_VALUE = 32  # max value corresponds to "infinity"
 # TODO: use special tokens!
 def value_to_token_ids(tokenizer, value: int) -> list[int]:
     assert value >= _MIN_VALUE

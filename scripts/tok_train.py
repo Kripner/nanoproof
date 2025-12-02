@@ -6,17 +6,20 @@ import os
 import time
 import argparse
 import torch
-from nanoproof.tokenizer import HuggingFaceTokenizer
+from nanoproof.tokenizer import HuggingFaceTokenizer, SPECIAL_TOKENS
 from nanoproof.common import get_base_dir
-from nanoproof.data.dataset import parquets_iter_batched
+from nanoproof.data.nemotron import parquets_iter_batched
+from nanoproof.data.leangithubraw import iter_texts_batched
 
 # -----------------------------------------------------------------------------
 # Parse command line arguments
 
 parser = argparse.ArgumentParser(description='Train a BPE tokenizer')
-parser.add_argument('--max_chars', type=int, default=10_000_000_000, help='Maximum characters to train on (default: 10B)')
+# parser.add_argument('--max_chars', type=int, default=10_000_000_000, help='Maximum characters to train on (default: 10B)')
+parser.add_argument('--max_chars', type=int, default=1_000_000_000, help='Maximum characters to train on (default: 1B)')
 parser.add_argument('--doc_cap', type=int, default=10_000, help='Maximum characters per document (default: 10,000)')
-parser.add_argument('--vocab_size', type=int, default=65536, help='Vocabulary size (default: 65536 = 2^16)')
+# parser.add_argument('--vocab_size', type=int, default=65536, help='Vocabulary size (default: 65536 = 2^16)')
+parser.add_argument('--vocab_size', type=int, default=32768, help='Vocabulary size (default: 32768 = 2^15)')
 args = parser.parse_args()
 print(f"max_chars: {args.max_chars:,}")
 print(f"doc_cap: {args.doc_cap:,}")
@@ -32,24 +35,53 @@ def text_iterator():
     3) Break when we've seen args.max_chars characters
     """
     nchars = 0
-    for batch in parquets_iter_batched(split="train"):
-        for doc in batch:
-            doc_text = doc
-            if len(doc_text) > args.doc_cap:
-                doc_text = doc_text[:args.doc_cap]
-            nchars += len(doc_text)
-            yield doc_text
-            if nchars > args.max_chars:
-                return
+    
+    # Generator for nemotron documents
+    def nemotron_gen():
+        for batch in parquets_iter_batched(split="train"):
+            for doc in batch:
+                yield doc
+
+    # Generator for leangithubraw documents (infinite/restarting)
+    def leangithub_gen():
+        while True:
+            for batch in iter_texts_batched(split="train"):
+                for doc in batch:
+                    yield doc
+
+    nemotron_iter = nemotron_gen()
+    leangithub_iter = leangithub_gen()
+
+    while True:
+        try:
+            doc_nemotron = next(nemotron_iter)
+        except StopIteration:
+            print("WARNING: Nemotron iterator exhausted")
+            break
+        if len(doc_nemotron) > args.doc_cap:
+            doc_nemotron = doc_nemotron[:args.doc_cap]
+
+        doc_lean = next(leangithub_iter)
+        if len(doc_lean) > args.doc_cap:
+            doc_lean = doc_lean[:args.doc_cap]
+
+        doc_text = doc_nemotron + "\n" + doc_lean
+        
+        nchars += len(doc_text)
+        yield doc_text
+        if nchars >= args.max_chars:
+            return
 text_iter = text_iterator()
 
 # -----------------------------------------------------------------------------
 # Train the tokenizer
 t0 = time.time()
-# TODO: train our own tokenizer
+# TODO!
 # tokenizer = RustBPETokenizer.train_from_iterator(text_iter, args.vocab_size)
-# tokenizer = HuggingFaceTokenizer.from_pretrained("gpt2")
-tokenizer = HuggingFaceTokenizer.train_from_iterator(text_iter, args.vocab_size)
+# tokenizer = HuggingFaceTokenizer.train_from_iterator(text_iter, args.vocab_size)
+tokenizer = HuggingFaceTokenizer.from_pretrained("gpt2")
+tokenizer.tokenizer.add_special_tokens(SPECIAL_TOKENS)
+
 t1 = time.time()
 train_time = t1 - t0
 print(f"Training time: {train_time:.2f}s")

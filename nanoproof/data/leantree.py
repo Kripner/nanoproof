@@ -98,7 +98,7 @@ def print_stats():
         end_time = time.time()
         print(f"time: {end_time - start_time:.2f}s")
         print(f"total: {len(lens['state'])}")
-        for prop, max_len in [("state", 640), ("tactic", 128)]:
+        for prop, max_len in [("state", 448), ("tactic", 64)]:
             print(f"{prop} lengths:")
             print(f"  min: {np.min(lens[prop])}")
             print(f"  max: {np.max(lens[prop])}")

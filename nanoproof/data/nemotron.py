@@ -57,10 +57,10 @@ def parquets_iter_batched(split, start=0, step=1):
     assert split in ["train", "val"], "split must be 'train' or 'val'"
     parquet_paths = list_parquet_files()
     parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
-    for filepath in tqdm(parquet_paths, desc=f"Processing {split} parquet files"):
+    for filepath in parquet_paths:
         pf = pq.ParquetFile(filepath)
         row_group_indices = list(range(start, pf.num_row_groups, step))
-        for rg_idx in tqdm(row_group_indices, desc=f"Row groups in {os.path.basename(filepath)}", leave=False):
+        for rg_idx in row_group_indices:
             rg = pf.read_row_group(rg_idx)
             texts = rg.column('text').to_pylist()
             yield texts
