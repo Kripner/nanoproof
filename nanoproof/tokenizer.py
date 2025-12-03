@@ -125,15 +125,11 @@ class HuggingFaceTokenizer:
         return self.tokenizer.token_to_id(text)
 
     def get_bos_token_id(self):
-        # TODO: revert this!
-        # bos = self.encode_special("<|bos|>")
-        bos = self.encode_special("<|endoftext|>")
+        bos = self.encode_special("<|bos|>")
         return bos
 
     def get_eos_token_id(self):
-        # TODO: revert this!
-        # eos = self.encode_special("<|eos|>")
-        eos = self.encode_special("<|endoftext|>")
+        eos = self.encode_special("<|eos|>")
         return eos
 
     def encode(self, text, *args, **kwargs):

@@ -165,21 +165,21 @@ h : LocallyBoundedVariationOn f s
 A : ∀ (i : ι), LipschitzWith 1 fun x => x i
 i : ι
 ⊢ LocallyBoundedVariationOn (fun x => f x i) s
-<|tactic|> """,
+<|tactic|>""",
             # sensible tactic: 'intro h'
             """p q : Prop
 ⊢ p ∧ q → p
-<|tactic|> """,
+<|tactic|>""",
             # sensible tactic: 'rfl'
             """⊢ 2 + 3 = 5
-<|tactic|> """,
+<|tactic|>""",
             # sensible tactic: 'exact Or.inl ⟨hp, hq⟩'
             """case mp.inl
 p q r : Prop
 hp : p
 hq : q
 ⊢ p ∧ q ∨ p ∧ r
-<|tactic|> """,
+<|tactic|>""",
             # sensible tactic: 'exact Exists.intro x0 hx0'
             """α : Type
 P : α → Prop

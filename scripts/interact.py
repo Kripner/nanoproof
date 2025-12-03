@@ -31,9 +31,8 @@ def get_input() -> str:
 inp = get_input()
 while inp.strip() not in ["q", "quit", "exit"]:
     print("Sampling ...")
-    # TODO: revert this after re-running the fixed SFT!!!
     # tokens = tokenizer(inp.strip() + "\n<|tactic|> ", prepend="<|endoftext|>")
-    tokens = tokenizer(inp.strip() + "<|endoftext|>\n<|tactic|> ", prepend="<|endoftext|>")
+    tokens = tokenizer(inp.strip() + "\n<|tactic|> ", prepend="<|eos|>")
     with autocast_ctx:
         sample_toks, _ = engine.generate_batch(tokens, num_samples=1, min_tokens=1)
     tactic = tokenizer.decode(sample_toks[0])

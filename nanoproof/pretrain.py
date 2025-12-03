@@ -271,9 +271,7 @@ while True:
         ]
         engine = Engine(orig_model, tokenizer) # use orig_model to avoid recompilation
         for prompt in prompts:
-            # TODO: revert this!
-            # tokens = tokenizer(prompt, prepend="<|bos|>")
-            tokens = tokenizer(prompt, prepend="<|endoftext|>")
+            tokens = tokenizer(prompt, prepend="<|bos|>")
             with autocast_ctx:
                 sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
             print0(tokenizer.decode(sample[0]))
