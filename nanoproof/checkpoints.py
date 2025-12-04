@@ -80,33 +80,6 @@ def build_model(checkpoint_dir, step, device, phase):
     model.to_empty(device=device)
     model.init_weights() # note: this is dumb, but we need to init the rotary embeddings. TODO: fix model re-init
 
-    # TODO: REMOVE THIS
-    # Hack fix: resize vocab_size mismatches by padding with zeros
-    expected_vocab_size = 50304
-    if "transformer.wte.weight" in model_data:
-        saved_vocab_size = model_data["transformer.wte.weight"].shape[0]
-        if saved_vocab_size != expected_vocab_size:
-            log0(f"Hack fix: resizing vocab_size from {saved_vocab_size} to {expected_vocab_size}")
-            # Pad transformer.wte.weight
-            if saved_vocab_size < expected_vocab_size:
-                padding_size = expected_vocab_size - saved_vocab_size
-                wte_padding = torch.zeros(padding_size, model_data["transformer.wte.weight"].shape[1], 
-                                         dtype=model_data["transformer.wte.weight"].dtype,
-                                         device=model_data["transformer.wte.weight"].device)
-                model_data["transformer.wte.weight"] = torch.cat([model_data["transformer.wte.weight"], wte_padding], dim=0)
-            else:
-                model_data["transformer.wte.weight"] = model_data["transformer.wte.weight"][:expected_vocab_size]
-            # Pad lm_head.weight
-            if "lm_head.weight" in model_data:
-                if saved_vocab_size < expected_vocab_size:
-                    padding_size = expected_vocab_size - saved_vocab_size
-                    lm_head_padding = torch.zeros(padding_size, model_data["lm_head.weight"].shape[1],
-                                                  dtype=model_data["lm_head.weight"].dtype,
-                                                  device=model_data["lm_head.weight"].device)
-                    model_data["lm_head.weight"] = torch.cat([model_data["lm_head.weight"], lm_head_padding], dim=0)
-                else:
-                    model_data["lm_head.weight"] = model_data["lm_head.weight"][:expected_vocab_size]
-    
     model.load_state_dict(model_data, strict=True, assign=True)
     # Put the model in the right training phase / mode
     if phase == "eval":

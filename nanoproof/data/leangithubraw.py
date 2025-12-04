@@ -16,7 +16,7 @@ from itertools import islice
 import random
 import torch
 
-from nanoproof.common import get_base_dir
+from nanoproof.common import get_base_dir, get_dist_info
 from nanoproof.tokenizer import get_tokenizer
 
 # 142.61 MB of text in total
@@ -186,17 +186,19 @@ def download_dataset(repo_id):
     except Exception as e:
         print(f"Error downloading dataset: {e}")
 
-def show_dataset(split="train", B=4, T=512, num_batches=10):
+def show_dataset(split="train", B=4, T=512, offset=0, num_batches=10):
     """Show the first N batches from the dataset."""
     print(f"Loading dataset (split={split})...")
     tokenizer = get_tokenizer()
     
     try:
         dataloader = iter_data(B=B, T=T, split=split, device="cpu")
-        for batch_idx, (inputs, targets) in enumerate(islice(dataloader, num_batches)):
+        for batch_idx, (inputs, targets, approx_progress, last_step) in enumerate(islice(dataloader, offset, offset + num_batches)):
             print(f"\nBatch {batch_idx}:")
             print(f"  Inputs shape: {inputs.shape}")
             print(f"  Targets shape: {targets.shape}")
+            print(f"  Approx progress: {approx_progress}")
+            print(f"  Last step: {last_step}")
             
             for i in range(min(2, inputs.size(0))):  # Show first 2 samples per batch
                 print(f"\n  Sample {i}:")
@@ -234,48 +236,49 @@ def iter_data(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device
         targets: Tensor of shape (B, T) with target token IDs
     """
     assert split in ["train", "val"], "split must be 'train' or 'val'"
-    
-    parquet_path = os.path.join(DATA_DIR, "leangithubraw.parquet")
-    if not os.path.exists(parquet_path):
-        raise FileNotFoundError(f"Parquet file not found at {parquet_path}. Build it or download it first.")
-    
-    pf = pq.ParquetFile(parquet_path)
-    
-    # last two groups are validation, rest is train
-    num_groups = pf.num_row_groups
-    assert num_groups > 10
-    if split == "train":
-        group_indices = range(num_groups - 2)
-    else:
-        group_indices = range(num_groups - 2, num_groups)
-        
-    texts = []
-    for i in group_indices:
-        table = pf.read_row_group(i)
-        texts.extend(table.column("text").to_pylist())
-    
-    random.seed(0)
-    random.shuffle(texts)
-    
+
+    ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
+
     tokenizer = get_tokenizer()
     bos_token = tokenizer.get_bos_token_id()
     assert bos_token is not None
-    
+
+    parquet_path = os.path.join(DATA_DIR, "leangithubraw.parquet")
+    if not os.path.exists(parquet_path):
+        raise FileNotFoundError(f"Parquet file not found at {parquet_path}. Build it or download it first.")
+    pf = pq.ParquetFile(parquet_path)
+
     def document_batches():
-        for i in range(0, len(texts), tokenizer_batch_size):
-            batch = texts[i:i+tokenizer_batch_size]
-            yield batch
-    
+        # last three groups are validation, rest is train
+        num_groups = pf.num_row_groups
+        assert num_groups > 10
+        group_indices = list(range(num_groups - 3) if split == "train" else range(num_groups - 3, num_groups))
+
+        random.Random(0).shuffle(group_indices)
+
+        group_indices = group_indices[ddp_rank::ddp_world_size]
+
+        for i in range(len(group_indices)):
+            group = pf.read_row_group(group_indices[i])
+            samples = group.column("text").to_pylist()
+            approx_progress = i / len(group_indices)
+            # batches for tokenizer
+            for offset in range(0, len(samples), tokenizer_batch_size):
+                last_step = i == len(group_indices) - 1 and offset + tokenizer_threads >= len(samples)
+                yield samples[offset:offset+tokenizer_batch_size], approx_progress, last_step
+
     batches = document_batches()
     
     needed_tokens = B * T + 1  # +1 because we also need the target at the last token
     token_buffer = deque()  # we stream tokens on the right and pop from the left
-    
+
+    last_step = False
+    approx_progress = 0.0
     while True:
         # accumulate enough tokens for one iteration before yielding
         while len(token_buffer) < needed_tokens:
             try:
-                doc_batch = next(batches)
+                doc_batch, approx_progress, last_step = next(batches)
             except StopIteration:
                 break
             token_lists = tokenizer.encode(doc_batch, prepend=bos_token)
@@ -295,8 +298,11 @@ def iter_data(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device
         # reshape to 2D and move to device async
         inputs = inputs_cpu.view(B, T).to(device=device, non_blocking=use_cuda_optimizations)
         targets = targets_cpu.view(B, T).to(device=device, non_blocking=use_cuda_optimizations)
-        
-        yield inputs, targets
+
+        if split == "train":
+            yield inputs, targets, approx_progress, last_step
+        else:
+            yield inputs, targets
 
 def iter_texts_batched(split, url_whitelist=None):
     """
@@ -332,6 +338,7 @@ def iter_texts_batched(split, url_whitelist=None):
             texts = filtered_texts
         
         yield texts
+
 def dataset_stats():
     parquet_path = os.path.join(DATA_DIR, "leangithubraw.parquet")
     if not os.path.exists(parquet_path):
@@ -394,8 +401,9 @@ def main():
     show_parser.add_argument("--split", default="train", choices=["train", "val"], help="Dataset split to show")
     show_parser.add_argument("--B", type=int, default=4, help="Batch size")
     show_parser.add_argument("--T", type=int, default=512, help="Sequence length")
+    show_parser.add_argument("--offset", type=int, default=0)
     show_parser.add_argument("--num-batches", type=int, default=10, help="Number of batches to show")
-    
+
     # Stats
     subparsers.add_parser("stats", help="Display dataset statistics (tokens, chars, bytes, samples)")
     
@@ -408,7 +416,7 @@ def main():
     elif args.action == "download":
         download_dataset(args.repo_id)
     elif args.action == "show":
-        show_dataset(split=args.split, B=args.B, T=args.T, num_batches=args.num_batches)
+        show_dataset(split=args.split, B=args.B, T=args.T, offset=args.offset, num_batches=args.num_batches)
     elif args.action == "stats":
         dataset_stats()
 

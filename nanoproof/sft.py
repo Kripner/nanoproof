@@ -146,7 +146,7 @@ for step in range(num_iterations):
         })
         model.train()
 
-    # TODO: eval tactic recall
+    # TODO: eval tactic accuracy
     # TODO: eval value MSE
 
     # evaluate accuracy of the multiple choice tasks (which are quick to run)

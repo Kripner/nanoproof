@@ -70,6 +70,10 @@ if tokenizer_name == "gpt2":
     tokenizer = HuggingFaceTokenizer.from_pretrained("gpt2")
 elif tokenizer_name == "ours":
     tokenizer = get_tokenizer()
+else:
+    raise ValueError(f"Unknown tokenizer: {tokenizer_name}")
+
+print(f"Vocab size: {tokenizer.get_vocab_size():,}")
 
 for text in [("news", news_text), ("lean", lean_search_text)]:
     name, text = text

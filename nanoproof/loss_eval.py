@@ -2,6 +2,8 @@
 A number of functions that help with evaluating a base model.
 """
 import math
+import os
+
 import torch
 import torch.distributed as dist
 
@@ -51,6 +53,7 @@ def evaluate_bpb(model, batches, steps, token_bytes):
             num_bytes2d = token_bytes[y]
             total_nats += (loss2d * (num_bytes2d > 0)).sum()
             total_bytes += num_bytes2d.sum()
+    print(int(os.environ.get('RANK', 0)), total_nats)
     # sum reduce across all ranks
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     if world_size > 1:

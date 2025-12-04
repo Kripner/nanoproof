@@ -34,7 +34,8 @@ step = None # step to load the model from (base model or midtrained model)
 dtype = "bfloat16"
 num_iterations = -1 # explicit number of steps of the optimization (-1 = disable)
 max_seq_len = 768
-device_batch_size = 32
+# device_batch_size = 32 # H100
+device_batch_size = 16
 unembedding_lr = 0.004
 embedding_lr = 0.2
 matrix_lr = 0.02
@@ -43,7 +44,7 @@ weight_decay = 0.0
 eval_every = 150 # -1 = disable
 # total_batch_size = 524288
 total_batch_size = 491520
-eval_tokens = 20*total_batch_size
+eval_tokens = 15*total_batch_size
 dry_run = 0 # dry_run=1 is for experiments: we will log to wandb but we won't write checkpoints or report
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open(os.path.join('nanoproof', 'configurator.py')).read()) # overrides from command line or config file
@@ -92,56 +93,8 @@ for opt in optimizers:
 # Midtraining data mixture and DataLoader
 base_dir = get_base_dir()
 train_loader = iter_data(device_batch_size, max_seq_len, "train")
-build_val_loader = iter_data(device_batch_size, max_seq_len, "val")
+build_val_loader = lambda: iter_data(device_batch_size, max_seq_len, "val")
 
-# DataLoader is defined here, it emits inputs, targets : 2D tensors of shape (device_batch_size, max_seq_len)
-# A big problem is that we don't know the final num_iterations in advance. So we create
-# these two global variables and update them from within the data generator.
-last_step = False # we will toggle this to True when we reach the end of the dataset
-approx_progress = 0.0 # will go from 0 to 1 over the course of the epoch
-def mid_data_generator(split):
-    global last_step, approx_progress
-    assert split in {"train", "val"}, "split must be 'train' or 'val'"
-    dataset = train_dataset if split == "train" else val_dataset
-    dataset_size = len(dataset)
-    assert dataset_size > 0
-    needed_tokens = device_batch_size * max_seq_len + 1 # to form one training batch of inputs,targets
-    token_buffer = deque()
-    # CUDA supports memory pinning for faster transfers between CPU and GPU:
-    scratch = torch.empty(needed_tokens, dtype=torch.int64, pin_memory=(device_type == "cuda"))
-    cursor = ddp_rank # increments by ddp_world_size each time, so each rank processes unique documents
-    it = 0 # iteration counter
-    while True:
-        # Accumulate enough tokens for one iteration before yielding
-        while len(token_buffer) < needed_tokens:
-            conversation = dataset[cursor]
-            ids, _ = tokenizer.render_conversation(conversation)
-            token_buffer.extend(ids)
-            cursor += ddp_world_size
-            if cursor >= dataset_size:
-                cursor -= dataset_size # wrap around for another epoch
-                if split == "train":
-                    last_step = True # toggle last_step to True, which will terminate the training loop
-        # Stopping condition to respect num_iterations, if given
-        it += 1
-        if num_iterations > 0 and it >= num_iterations:
-            last_step = True # toggle last_step to True, which will terminate the training loop
-        # Build up inputs/targets and yield
-        for i in range(needed_tokens):
-            scratch[i] = token_buffer.popleft()
-        inputs_cpu = scratch[:-1].to(dtype=torch.int32)
-        targets_cpu = scratch[1:]
-        inputs = inputs_cpu.view(device_batch_size, max_seq_len).to(device=device, dtype=torch.int32, non_blocking=True)
-        targets = targets_cpu.view(device_batch_size, max_seq_len).to(device=device, dtype=torch.int64, non_blocking=True)
-        if split == "train":
-            if num_iterations > 0:
-                approx_progress = it / num_iterations # calculate progress from the max number of iterations
-            else:
-                approx_progress = cursor / dataset_size # approximate progress as a fraction of the dataset
-        yield inputs, targets
-
-train_loader = mid_data_generator("train")
-build_val_loader = lambda: mid_data_generator("val")
 progress = 0 # will go from 0 to 1 over the course of the epoch
 
 # Learning rate scheduler
@@ -157,7 +110,7 @@ def get_muon_momentum(it):
 
 # -----------------------------------------------------------------------------
 # Training loop
-x, y = next(train_loader) # prefetch the very first batch of data
+x, y, approx_progress, last_step = next(train_loader) # prefetch the very first batch of data
 min_val_bpb = float("inf")
 smooth_train_loss = 0 # EMA of training loss
 ema_beta = 0.9 # EMA decay factor
@@ -228,7 +181,7 @@ while True:
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         loss.backward()
-        x, y = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
+        x, y, approx_progress, last_step = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
         progress = max(progress, approx_progress) # only increase progress monotonically
     # step the optimizers
     lrm = get_lr_multiplier(progress)
