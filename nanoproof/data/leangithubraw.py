@@ -249,10 +249,10 @@ def iter_data(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device
     pf = pq.ParquetFile(parquet_path)
 
     def document_batches():
-        # last three groups are validation, rest is train
+        # first 4 are validation, rest is train
         num_groups = pf.num_row_groups
         assert num_groups > 10
-        group_indices = list(range(num_groups - 3) if split == "train" else range(num_groups - 3, num_groups))
+        group_indices = list(range(4, num_groups) if split == "train" else range(4))
 
         random.Random(0).shuffle(group_indices)
 

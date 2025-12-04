@@ -35,7 +35,7 @@ dtype = "bfloat16"
 num_iterations = -1 # explicit number of steps of the optimization (-1 = disable)
 max_seq_len = 768
 # device_batch_size = 32 # H100
-device_batch_size = 16
+device_batch_size = 8 # A100 40GB
 unembedding_lr = 0.004
 embedding_lr = 0.2
 matrix_lr = 0.02
@@ -44,7 +44,7 @@ weight_decay = 0.0
 eval_every = 150 # -1 = disable
 # total_batch_size = 524288
 total_batch_size = 491520
-eval_tokens = 15*total_batch_size
+eval_tokens = 20*total_batch_size
 dry_run = 0 # dry_run=1 is for experiments: we will log to wandb but we won't write checkpoints or report
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open(os.path.join('nanoproof', 'configurator.py')).read()) # overrides from command line or config file
