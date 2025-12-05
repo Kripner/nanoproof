@@ -23,14 +23,15 @@ from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
 from nanoproof.data.leantree import iter_data
 from nanoproof.data.leantree_dataloader import sft_data_generator
+from scripts.policy_eval import eval_tactic_accuracy
 
 # -----------------------------------------------------------------------------
 # SFT Hyperparameters
 run = "dummy" # wandb run name default ("dummy" is special - we won't log to wandb)
 seed = 0
 # input model options
-source = "base" # base|mid , which checkpoint to load the model from (base model or midtrained model)
-model_tag = "d20" # model tag to load the model from (base model or midtrained model)
+source = "mid" # base|mid , which checkpoint to load the model from (base model or midtrained model)
+model_tag = "d26" # model tag to load the model from (base model or midtrained model)
 step = None # step to load the model from (base model or midtrained model)
 # compute/precision
 device_type = "" # cuda|cpu|mps (empty => autodetect)
@@ -125,9 +126,10 @@ train_iter = iter(train_loader)
 for step in range(num_iterations):
     last_step = step == num_iterations - 1
 
-    # evaluate the validation loss
     if last_step or step % eval_every == 0:
         model.eval()
+
+        # evaluate the validation loss
         val_iter = iter(build_val_loader())
         losses = []
         for _ in range(eval_steps):
@@ -140,10 +142,16 @@ for step in range(num_iterations):
             dist.all_reduce(val_loss, op=dist.ReduceOp.AVG) # average over ranks
         val_loss = val_loss.item()
         print0(f"Step {step:05d} | Validation loss: {val_loss:.6f}")
+
+        results = eval_tactic_accuracy(model, build_val_loader(), max_steps=eval_steps)
+        
         wandb_run.log({
             "step": step,
             "val_loss": val_loss,
+            "val_full_acc": results["full_acc"],
+            "val_first_token_acc": results["first_token_acc"],
         })
+
         model.train()
 
     # TODO: eval tactic accuracy

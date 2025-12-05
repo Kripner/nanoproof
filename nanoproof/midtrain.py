@@ -34,8 +34,8 @@ step = None # step to load the model from (base model or midtrained model)
 dtype = "bfloat16"
 num_iterations = -1 # explicit number of steps of the optimization (-1 = disable)
 max_seq_len = 768
-# device_batch_size = 32 # H100
-device_batch_size = 8 # A100 40GB
+device_batch_size = 32 # H100
+# device_batch_size = 8 # A100 40GB
 unembedding_lr = 0.004
 embedding_lr = 0.2
 matrix_lr = 0.02
@@ -99,8 +99,8 @@ progress = 0 # will go from 0 to 1 over the course of the epoch
 
 # Learning rate scheduler
 def get_lr_multiplier(progress):
-    # first 80% of training: no decay, then linearly ramp down to 0.
-    return 1 if progress < 0.8 else 1 - (progress - 0.8) / 0.2
+    # first 80% of training: no decay, then linearly ramp down to 0.01
+    return 1 if progress < 0.8 else max(0.01, 1 - (progress - 0.8) / 0.2)
 
 # Momentum scheduler for Muon optimizer
 def get_muon_momentum(it):

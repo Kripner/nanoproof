@@ -33,6 +33,7 @@ URLS_FILE = os.path.join(os.path.dirname(__file__), "leangithub_urls.txt")
 BASE_DIR = get_base_dir()
 DATA_DIR = os.path.join(BASE_DIR, "data", "leangithubraw")
 
+# TODO: we should shuffle the rows so that the number of characters in groups are not too different
 def build_dataset():
     """
     Builds the dataset by cloning repos listed in leangithub_urls.txt and reading .lean files.
@@ -249,23 +250,30 @@ def iter_data(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device
     pf = pq.ParquetFile(parquet_path)
 
     def document_batches():
-        # first 4 are validation, rest is train
+        # last 4 are validation, rest is train
         num_groups = pf.num_row_groups
         assert num_groups > 10
-        group_indices = list(range(4, num_groups) if split == "train" else range(4))
+        group_indices = list(range(num_groups - 4) if split == "train" else range(num_groups - 4, num_groups))
 
         random.Random(0).shuffle(group_indices)
 
         group_indices = group_indices[ddp_rank::ddp_world_size]
 
-        for i in range(len(group_indices)):
-            group = pf.read_row_group(group_indices[i])
-            samples = group.column("text").to_pylist()
-            approx_progress = i / len(group_indices)
-            # batches for tokenizer
-            for offset in range(0, len(samples), tokenizer_batch_size):
-                last_step = i == len(group_indices) - 1 and offset + tokenizer_threads >= len(samples)
-                yield samples[offset:offset+tokenizer_batch_size], approx_progress, last_step
+        time.sleep(random.random())
+        group_sizes = [pf.metadata.row_group(idx).num_rows for idx in group_indices]
+        print(f"{ddp_rank=} {ddp_world_size=} {len(group_indices)=} {group_indices=} {group_sizes=}", flush=True)
+
+        while True:
+            last_step = False
+            for i in range(len(group_indices)):
+                group = pf.read_row_group(group_indices[i])
+                samples = group.column("text").to_pylist()
+                # batches for tokenizer
+                for offset in range(0, len(samples), tokenizer_batch_size):
+                    last_step = last_step or (i == len(group_indices) - 1 and offset + tokenizer_batch_size >= len(samples))
+                    approx_progress = (i + offset / len(samples)) / len(group_indices) if not last_step else 1.0
+                    yield samples[offset:offset+tokenizer_batch_size], approx_progress, last_step
+            print(f"Warning: Rank {ddp_rank} will loop again on Lean-Github-Raw.", flush=True)
 
     batches = document_batches()
     

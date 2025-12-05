@@ -6,8 +6,8 @@ from nanoproof.tokenizer import get_tokenizer, value_to_token_ids
 from nanoproof.data.leantree import iter_data
 from nanoproof.model import NetworkConfig
 
-STATE_MAX_LEN = 1536
-TACTIC_MAX_LEN = 512
+STATE_MAX_LEN = 640
+TACTIC_MAX_LEN = 128
 
 def sft_data_generator(dataset, batch_size, device="cuda"):
     assert batch_size % 2 == 0  # need this because we generate both tactic and value samples for each datapoint
@@ -40,39 +40,38 @@ def sft_data_generator(dataset, batch_size, device="cuda"):
 
     # iterates over the dataset in epochs, tokenizes
     batch = []
-    while True:
-        for i in range(ddp_rank, len(dataset), ddp_world_size):
-            state, tactic, proof_depth = dataset[i]
-            state, tactic = state.strip(), tactic.strip()
-            assert len(state) != 0 and len(tactic) != 0 and proof_depth >= 1
+    for i in range(ddp_rank, len(dataset), ddp_world_size):
+        state, tactic, proof_depth = dataset[i]
+        state, tactic = state.strip(), tactic.strip()
+        assert len(state) != 0 and len(tactic) != 0 and proof_depth >= 1
 
-            state_toks = tokenizer.encode(state + "\n", prepend=bos_token)
+        state_toks = tokenizer.encode(state + "\n", prepend=bos_token)
 
-            tactic_delim_tok = tokenizer.encode_special("<|tactic|>")
-            tactic_toks = tokenizer.encode(tactic, append=eos_token)
+        tactic_delim_tok = tokenizer.encode_special("<|tactic|>")
+        tactic_toks = tokenizer.encode(tactic, append=eos_token)
 
-            value_delim_tok = tokenizer.encode_special("<|value|>")
-            value_toks = value_to_token_ids(tokenizer, proof_depth) + [eos_token]
+        value_delim_tok = tokenizer.encode_special("<|value|>")
+        value_toks = value_to_token_ids(tokenizer, proof_depth) + [eos_token]
 
-            # these are <0.1% of mathlib
-            if len(tactic_toks) > 256:
-                continue
-            if len(state_toks) + 1 + len(tactic_toks) > 768:
-                continue
-            assert len(state_toks) + 1 + len(value_toks) <= 768
+        # these are <0.1% of mathlib
+        if len(tactic_toks) > TACTIC_MAX_LEN:
+            continue
+        if len(state_toks) + 1 + len(tactic_toks) > 768:
+            continue
+        assert len(state_toks) + 1 + len(value_toks) <= 768
 
-            batch.append((
-                state_toks + [tactic_delim_tok] + tactic_toks,
-                [0] * (len(state_toks) + 1) + [1] * len(tactic_toks)
-            ))
-            batch.append((
-                state_toks + [value_delim_tok] + value_toks,
-                [0] * (len(state_toks) + 1) + [1] * len(value_toks)
-            ))
+        batch.append((
+            state_toks + [tactic_delim_tok] + tactic_toks,
+            [0] * (len(state_toks) + 1) + [1] * len(tactic_toks)
+        ))
+        batch.append((
+            state_toks + [value_delim_tok] + value_toks,
+            [0] * (len(state_toks) + 1) + [1] * len(value_toks)
+        ))
 
-            if len(batch) == batch_size:
-                yield collate_and_yield(batch)
-                batch = []
+        if len(batch) == batch_size:
+            yield collate_and_yield(batch)
+            batch = []
 
 if __name__ == "__main__":
     print("Loading dataset...")

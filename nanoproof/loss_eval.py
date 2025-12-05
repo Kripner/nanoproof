@@ -30,8 +30,12 @@ def evaluate_bpb(model, batches, steps, token_bytes):
     total_nats = torch.tensor(0.0, dtype=torch.float32, device=model.get_device())
     total_bytes = torch.tensor(0, dtype=torch.int64, device=model.get_device())
     batch_iter = iter(batches)
-    for _ in range(steps):
-        x, y = next(batch_iter)
+    for i in range(steps):
+        try:
+            x, y = next(batch_iter)
+        except StopIteration:
+            print(f"Warning: Rank {dist.get_rank()} reached end of batches at eval step {i}")
+            break
         loss2d = model(x, y, loss_reduction='none') # (B, T)
         loss2d = loss2d.view(-1) # flatten
         y = y.view(-1) # flatten
