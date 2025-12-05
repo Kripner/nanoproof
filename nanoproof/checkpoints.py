@@ -118,6 +118,7 @@ def load_model_from_dir(checkpoints_dir, device, phase, model_tag, step=None):
 def load_model(source, *args, **kwargs):
     model_dir = {
         "base": "base_checkpoints",
+        "mid": "mid_checkpoints",
         "sft": "sft_checkpoints",
         "rl": "rl_checkpoints",
     }[source]
