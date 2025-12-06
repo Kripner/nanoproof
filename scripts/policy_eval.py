@@ -2,6 +2,7 @@ import torch
 from itertools import islice
 import sys
 import os
+from contextlib import nullcontext
 
 from nanoproof.common import compute_init, autodetect_device_type, print0
 from nanoproof.checkpoints import load_model
@@ -28,7 +29,7 @@ def eval_tactic_accuracy(model, leantree_batches, max_steps=None):
         total_full_correct += (correct | torch.logical_not(mask)).all(dim=1).sum().item()
 
         # First Token Accuracy: correctness on the first non-masked token
-        first_token_indices = mask.argmax(dim=1)  # argmax returns the first True index
+        first_token_indices = mask.int().argmax(dim=1)  # argmax returns the first True index
         batch_indices = torch.arange(logits.shape[0], device=logits.device)
         total_first_token_correct += correct[batch_indices, first_token_indices].sum().item()
 
@@ -42,31 +43,16 @@ def main():
     device_type = autodetect_device_type()
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
     
-    # Load model
-    # Try to load d26 base model
     print0("Loading model...")
-    try:
-        model, tokenizer, meta = load_model("sft", device, phase="eval", model_tag="d26")
-    except Exception as e:
-        print0(f"Could not load d26 sft model: {e}")
-        print0("Trying generic base model...")
-        try:
-             model, tokenizer, meta = load_model("base", device, phase="eval")
-        except Exception as e2:
-             print0(f"Failed to load base model: {e2}")
-             return
+    model, tokenizer, meta = load_model("sft", device, phase="eval", model_tag="d26")
+    model.eval()
 
     print0(f"Model loaded. Config: {meta.get('model_config', 'N/A')}")
 
     # Load Data
     print0("Loading dataset...")
     split = "val"
-    try:
-        dataset = list(iter_data(split=split))
-    except Exception as e:
-        print0(f"Val split failed ({e}), falling back to train split (first 1000 items)")
-        dataset = list(iter_data(split="train"))
-        dataset = dataset[:1000] 
+    dataset = list(iter_data(split=split))
     
     if len(dataset) == 0:
         print0("Dataset is empty!")
@@ -94,7 +80,11 @@ def main():
     
     data_gen = sft_data_generator(dataset, batch_size, device=device)
     
-    results = eval_tactic_accuracy(model, data_gen, max_steps=steps)
+    dtype = "bfloat16"
+    ptdtype = torch.float32 if dtype == 'float32' else torch.bfloat16
+    autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
+    with autocast_ctx:
+        results = eval_tactic_accuracy(model, data_gen, max_steps=steps)
     
     print0(f"Results for split '{split}':")
     print0(f"Full Accuracy: {results['full_acc']:.4%}")

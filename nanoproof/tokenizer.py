@@ -16,8 +16,6 @@ _MAX_VALUE = 64  # max value corresponds to "infinity"
 
 SPECIAL_TOKENS = [
     # every document begins with the Beginning of Sequence (BOS) token that delimits documents
-    "<|bos|>",
-    "<|eos|>",
     "<|pad|>",
     "<|tactic|>",
     "<|value|>",
@@ -125,11 +123,11 @@ class HuggingFaceTokenizer:
         return self.tokenizer.token_to_id(text)
 
     def get_bos_token_id(self):
-        bos = self.encode_special("<|bos|>")
+        bos = self.encode_special("<|endoftext|>")
         return bos
 
     def get_eos_token_id(self):
-        eos = self.encode_special("<|eos|>")
+        eos = self.encode_special("<|endoftext|>")
         return eos
 
     def encode(self, text, *args, **kwargs):

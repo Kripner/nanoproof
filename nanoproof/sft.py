@@ -141,10 +141,12 @@ for step in range(num_iterations):
         if ddp:
             dist.all_reduce(val_loss, op=dist.ReduceOp.AVG) # average over ranks
         val_loss = val_loss.item()
-        print0(f"Step {step:05d} | Validation loss: {val_loss:.6f}")
 
-        results = eval_tactic_accuracy(model, build_val_loader(), max_steps=eval_steps)
+        with autocast_ctx:
+            results = eval_tactic_accuracy(model, build_val_loader(), max_steps=eval_steps)
         
+        print0(f"Step {step:05d} | Validation loss: {val_loss:.6f} | Tactic full accuracy: {results['full_acc']:.4%} | Tactic first token accuracy: {results['first_token_acc']:.4%}")
+
         wandb_run.log({
             "step": step,
             "val_loss": val_loss,

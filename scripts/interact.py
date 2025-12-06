@@ -1,3 +1,5 @@
+from contextlib import nullcontext
+
 import torch
 
 from nanoproof.common import compute_init, compute_cleanup, get_base_dir, print0, DummyWandb, autodetect_device_type
@@ -6,7 +8,7 @@ from nanoproof.engine import Engine
 from nanoproof.data.minif2f import list_theorems, get_imports
 
 source = "sft" # which checkpoint to load the model from
-model_tag = "d20" # model tag to load the model from
+model_tag = "d26" # model tag to load the model from
 device_type = "" # cuda|cpu|mps (empty => autodetect)
 dtype = "bfloat16"
 base_dir = get_base_dir()
@@ -24,17 +26,16 @@ def get_input() -> str:
     print("Type in a tactic state, followed by an empty line:")
     line = input()
     while line.strip() or not lines:
-        lines.append(line)
+        lines.append(line.rstrip())
         line = input()
     return "\n".join(lines)
 
 inp = get_input()
 while inp.strip() not in ["q", "quit", "exit"]:
-    print("Sampling ...")
-    # tokens = tokenizer(inp.strip() + "\n<|tactic|> ", prepend="<|endoftext|>")
-    tokens = tokenizer(inp.strip() + "\n<|tactic|> ", prepend="<|eos|>")
+    tokens = tokenizer(inp.strip() + "\n<|tactic|>", prepend="<|bos|>")
+    print(f"Generating ... (input has {len(tokens)} tokens)")
     with autocast_ctx:
-        sample_toks, _ = engine.generate_batch(tokens, num_samples=1, min_tokens=1)
+        sample_toks, _ = engine.generate_batch(tokens, num_samples=1, min_tokens=1, max_tokens=64)
     tactic = tokenizer.decode(sample_toks[0])
     print(f"Tactic:\n--\n'{tactic}'\n--")
 

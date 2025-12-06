@@ -11,15 +11,15 @@ from nanoproof.engine import Engine
 from nanoproof.data.minif2f import list_theorems, get_imports
 
 """
-leanserver --project-path ~/troja/nanoproof/leantree_project/ --repl-exe ~/repos/leantree/lean-repl/.lake/build/bin/repl --imports Mathlib FormalConjectures.ForMathlib.Analysis.SpecialFunctions.NthRoot FormalConjectures.Util.Answer --max-processes 2 --address=10.10.24.9 --log-level=DEBUG
+leanserver --project-path ~/troja/nanoproof/leantree_project/ --repl-exe ~/repos/leantree/lean-repl/.lake/build/bin/repl --imports Mathlib FormalConjectures.ForMathlib.Analysis.SpecialFunctions.NthRoot FormalConjectures.Util.Answer --max-processes 2 --address=<PUBLIC_IP> --log-level=DEBUG
 """
 
 source = "sft" # which checkpoint to load the model from
-model_tag = "d20" # model tag to load the model from
+model_tag = "d26" # model tag to load the model from
 device_type = "" # cuda|cpu|mps (empty => autodetect)
 dtype = "bfloat16"
 base_dir = get_base_dir()
-server_address = "10.10.24.9"
+server_address = "10.10.25.9"
 server_port = 8000
 
 device_type = autodetect_device_type() if device_type == "" else device_type
@@ -46,6 +46,7 @@ else:
 
 model, tokenizer, meta = load_model(source, device, phase="eval", model_tag=model_tag)
 engine = Engine(model, tokenizer)
+bos_token = tokenizer.get_bos_token_id()
 
 theorem = list_theorems("Valid")[0]
 print(theorem + "\n-----")
@@ -75,17 +76,18 @@ open scoped Polynomial
     rng.manual_seed(0)
     while open_branches:
         branch = open_branches.pop(0)
-        state_str = str(branch.state)
+        state_str = str(branch.state).strip()
         print("-" * 80)
         print(f"Solving state:\n{state_str}\n")
         for retry_idx in range(10):
             print("Generating ..." + f" (retry {retry_idx})" if retry_idx != 0 else "")
-            # TODO: revert this after re-running the fixed SFT!!!
-            # tokens = tokenizer(state_str + "\n<|tactic|> ", prepend="<|endoftext|>")
-            tokens = tokenizer(state_str.strip() + "<|endoftext|>\n<|tactic|> ", prepend="<|endoftext|>")
+            tokens = tokenizer(state_str + "\n<|tactic|>", prepend=bos_token)
+            # print(" ".join([tokenizer.id_to_token(token) for token in tokens]))
+            print(tokens)
+            print(tokenizer.decode(tokens))
             with autocast_ctx:
                 seed = torch.randint(torch.iinfo(torch.int32).max, (1,), device=device, generator=rng).item()
-                sample_toks, masks = engine.generate_batch(tokens, num_samples=1, min_tokens=1, seed=seed)
+                sample_toks, masks = engine.generate_batch(tokens, num_samples=1, min_tokens=1, max_tokens=64, seed=seed)
             tactic_toks = [token for token, mask in zip(sample_toks[0], masks[0]) if mask == 1]
             tactic = tokenizer.decode(tactic_toks)
             print(f"Trying tactic:\n'{tactic}'")
