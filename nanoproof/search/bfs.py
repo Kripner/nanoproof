@@ -15,11 +15,11 @@ leanserver --project-path ~/troja/nanoproof/leantree_project/ --repl-exe ~/repos
 """
 
 source = "sft" # which checkpoint to load the model from
-model_tag = "d26" # model tag to load the model from
+model_tag = "d20" # model tag to load the model from
 device_type = "" # cuda|cpu|mps (empty => autodetect)
 dtype = "bfloat16"
 base_dir = get_base_dir()
-server_address = "10.10.25.9"
+server_address = "10.10.25.40"
 server_port = 8000
 
 device_type = autodetect_device_type() if device_type == "" else device_type

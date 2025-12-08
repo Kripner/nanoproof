@@ -138,6 +138,19 @@ def build_dataset():
     for pf in tqdm(parquet_files):
         tables.append(pq.read_table(pf))
     combined_table = pa.concat_tables(tables)
+    
+    # sanity check: count characters
+    # total_chars_pre = combined_table.to_pandas()["text"].str.len().sum()
+    # print(f"Total characters before shuffle: {total_chars_pre:,}")
+
+    # shuffle rows so that the number of characters in groups are not too different
+    print("Shuffling rows ...")
+    indices = torch.randperm(len(combined_table)).tolist()
+    combined_table = combined_table.take(indices)
+
+    # total_chars_post = combined_table.to_pandas()["text"].str.len().sum()
+    # print(f"Total characters after shuffle: {total_chars_post:,}")
+
     combined_output_file = os.path.join(output_dir, "leangithubraw.parquet")
     # 1024 group size for efficient loading during training
     pq.write_table(combined_table, combined_output_file, row_group_size=1024)
@@ -194,7 +207,14 @@ def show_dataset(split="train", B=4, T=512, offset=0, num_batches=10):
     
     try:
         dataloader = iter_data(B=B, T=T, split=split, device="cpu")
-        for batch_idx, (inputs, targets, approx_progress, last_step) in enumerate(islice(dataloader, offset, offset + num_batches)):
+        for batch_idx, batch in enumerate(islice(dataloader, offset, offset + num_batches)):
+            if len(batch) == 4:
+                inputs, targets, approx_progress, last_step = batch
+            else:
+                inputs, targets = batch
+                approx_progress = "N/A"
+                last_step = "N/A"
+
             print(f"\nBatch {batch_idx}:")
             print(f"  Inputs shape: {inputs.shape}")
             print(f"  Targets shape: {targets.shape}")
@@ -219,6 +239,30 @@ def show_dataset(split="train", B=4, T=512, offset=0, num_batches=10):
     except Exception as e:
         print(f"Error showing dataset: {e}")
         raise
+
+def show_whole_dataset(split="train", B=32, T=768):
+    print(f"Iterating through dataset (split={split}, B={B}, T={T})...")
+    
+    dataloader = iter_data(B=B, T=T, split=split)
+    batch_count = 0
+    first_last_step = None
+    
+    for i, batch in enumerate(dataloader):
+        if split == "train":
+            inputs, targets, approx_progress, last_step = batch
+            print(f"Batch {i:05d}: inputs.shape={inputs.shape}, targets.shape={targets.shape}, approx_progress={approx_progress}, last_step={last_step}")
+        else:
+            inputs, targets = batch
+            print(f"Batch {i:05d}: inputs.shape={inputs.shape}, targets.shape={targets.shape}")
+        
+        batch_count += 1
+        
+        if last_step and first_last_step is None:
+            print(f"\nTotal batches: {batch_count}")
+            first_last_step = i
+        if first_last_step is not None and i - first_last_step >= 100:
+            break
+    
 
 def iter_data(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device="cuda"):
     """
@@ -263,8 +307,8 @@ def iter_data(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device
         group_sizes = [pf.metadata.row_group(idx).num_rows for idx in group_indices]
         print(f"{ddp_rank=} {ddp_world_size=} {len(group_indices)=} {group_indices=} {group_sizes=}", flush=True)
 
+        last_step = False
         while True:
-            last_step = False
             for i in range(len(group_indices)):
                 group = pf.read_row_group(group_indices[i])
                 samples = group.column("text").to_pylist()
@@ -273,7 +317,7 @@ def iter_data(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device
                     last_step = last_step or (i == len(group_indices) - 1 and offset + tokenizer_batch_size >= len(samples))
                     approx_progress = (i + offset / len(samples)) / len(group_indices) if not last_step else 1.0
                     yield samples[offset:offset+tokenizer_batch_size], approx_progress, last_step
-            print(f"Warning: Rank {ddp_rank} will loop again on Lean-Github-Raw.", flush=True)
+            print(f"Warning: Rank {ddp_rank} will loop again on Lean-Github-Raw ({split=}).", flush=True)
 
     batches = document_batches()
     
@@ -412,6 +456,12 @@ def main():
     show_parser.add_argument("--offset", type=int, default=0)
     show_parser.add_argument("--num-batches", type=int, default=10, help="Number of batches to show")
 
+    # Show whole
+    show_whole_parser = subparsers.add_parser("show_whole", help="Show the whole dataset")
+    show_whole_parser.add_argument("--split", default="train", choices=["train", "val"], help="Dataset split to show")
+    show_whole_parser.add_argument("--B", type=int, default=32, help="Batch size")
+    show_whole_parser.add_argument("--T", type=int, default=768, help="Sequence length")
+
     # Stats
     subparsers.add_parser("stats", help="Display dataset statistics (tokens, chars, bytes, samples)")
     
@@ -425,6 +475,8 @@ def main():
         download_dataset(args.repo_id)
     elif args.action == "show":
         show_dataset(split=args.split, B=args.B, T=args.T, offset=args.offset, num_batches=args.num_batches)
+    elif args.action == "show_whole":
+        show_whole_dataset(split=args.split, B=args.B, T=args.T)
     elif args.action == "stats":
         dataset_stats()
 

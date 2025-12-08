@@ -206,13 +206,22 @@ while True:
     smooth_train_loss = ema_beta * smooth_train_loss + (1 - ema_beta) * train_loss.item() # EMA the training loss
     debiased_smooth_loss = smooth_train_loss / (1 - ema_beta**(step + 1)) # debias the EMA
     pct_done = 100 * progress
+    if ddp:
+        pct_done_tensor = torch.tensor([pct_done], dtype=torch.float32, device=device)
+        gathered_pct_done = [torch.zeros_like(pct_done_tensor) for _ in range(ddp_world_size)]
+        dist.all_gather(gathered_pct_done, pct_done_tensor)
+        pct_dones = [t.item() for t in gathered_pct_done]
+        pct_done_str = "[" + ", ".join(f"{p:.2f}" for p in pct_dones) + "]%"
+    else:
+        pct_done_str = f"{pct_done:.2f}%"
+
     tok_per_sec = int(total_batch_size / dt)
     flops_per_sec = num_flops_per_token * total_batch_size / dt
     promised_flops_per_sec_h100 = 989e12 * ddp_world_size # bfloat16 H100 SXM and without 2:4 sparsity
     mfu = 100 * flops_per_sec / promised_flops_per_sec_h100 # in %
     if step > 10:
         total_training_time += dt # only count the time after the first 10 steps
-    print0(f"step {step:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | total time: {total_training_time/60:.2f}m")
+    print0(f"step {step:05d} ({pct_done_str}) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | total time: {total_training_time/60:.2f}m")
     if step % 10 == 0:
         wandb_run.log({
             "step": step,
