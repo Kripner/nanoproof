@@ -89,11 +89,13 @@ print0(f"=> Setting grad accum steps: {grad_accum_steps}")
 train_ds = list(iter_data(split="train"))
 random.Random(seed).shuffle(train_ds)
 val_ds = list(iter_data(split="val"))
+print0(f"Train dataset size: {len(train_ds)} | Val dataset size: {len(val_ds)}")
 
 if num_iterations == -1:
     # derive num_iterations from num_epochs and the size of the dataset
     assert num_epochs > 0, "num_epochs must be positive if num_iterations is -1"
     num_iterations = (len(train_ds) // target_examples_per_step) * num_epochs
+    print0(f"=> Setting number of iterations: {num_iterations}")
 train_loader = sft_data_generator(train_ds, batch_size=device_batch_size)
 build_val_loader = lambda: sft_data_generator(val_ds, batch_size=device_batch_size)
 

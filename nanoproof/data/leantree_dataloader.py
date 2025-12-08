@@ -64,10 +64,12 @@ def sft_data_generator(dataset, batch_size, device="cuda"):
             state_toks + [tactic_delim_tok] + tactic_toks,
             [0] * (len(state_toks) + 1) + [1] * len(tactic_toks)
         ))
-        batch.append((
-            state_toks + [value_delim_tok] + value_toks,
-            [0] * (len(state_toks) + 1) + [1] * len(value_toks)
-        ))
+        # TODO: uncomment this once we are using <|value|>
+        # TODO: we also need to change the dataset size calculation in SFT.py accordingly!
+        # batch.append((
+        #     state_toks + [value_delim_tok] + value_toks,
+        #     [0] * (len(state_toks) + 1) + [1] * len(value_toks)
+        # ))
 
         if len(batch) == batch_size:
             yield collate_and_yield(batch)
