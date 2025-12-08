@@ -91,11 +91,11 @@ random.Random(seed).shuffle(train_ds)
 val_ds = list(iter_data(split="val"))
 print0(f"Train dataset size: {len(train_ds)} | Val dataset size: {len(val_ds)}")
 
-if num_iterations == -1:
-    # derive num_iterations from num_epochs and the size of the dataset
-    assert num_epochs > 0, "num_epochs must be positive if num_iterations is -1"
-    num_iterations = (len(train_ds) // target_examples_per_step) * num_epochs
-    print0(f"=> Setting number of iterations: {num_iterations}")
+# if num_iterations == -1:
+#     # derive num_iterations from num_epochs and the size of the dataset
+#     assert num_epochs > 0, "num_epochs must be positive if num_iterations is -1"
+#     num_iterations = (len(train_ds) // target_examples_per_step) * num_epochs
+#     print0(f"=> Setting number of iterations: {num_iterations}")
 train_loader = sft_data_generator(train_ds, batch_size=device_batch_size)
 build_val_loader = lambda: sft_data_generator(val_ds, batch_size=device_batch_size)
 
@@ -118,15 +118,26 @@ for opt in optimizers:
 # Training loop
 
 # Learning rate scheduler
-def get_lr_multiplier(it):
-    lrm = 1.0 - it / num_iterations
-    return lrm
+# def get_lr_multiplier(it):
+#     lrm = 1.0 - it / num_iterations
+#     return lrm
+
+progress = 0 # will go from 0 to 1 over the course of the epoch
+
+# Learning rate scheduler
+def get_lr_multiplier(progress):
+    return max(0.0, 1.0 - progress)
 
 # Go!
 step = 0
 train_iter = iter(train_loader)
-for step in range(num_iterations):
-    last_step = step == num_iterations - 1
+x, y, approx_progress, last_step = next(train_iter) # prefetch the very first batch of data
+while True:
+    # Synchronize last_step across all ranks to avoid hangs in the distributed setting
+    if ddp:
+        last_step_tensor = torch.tensor(last_step, dtype=torch.int32, device=device)
+        dist.all_reduce(last_step_tensor, op=dist.ReduceOp.MAX)
+        last_step = bool(last_step_tensor.item())
 
     if last_step or step % eval_every == 0:
         model.eval()
@@ -135,7 +146,7 @@ for step in range(num_iterations):
         val_iter = iter(build_val_loader())
         losses = []
         for _ in range(eval_steps):
-            val_inputs, val_targets = next(val_iter)
+            val_inputs, val_targets, _, _ = next(val_iter)
             with torch.no_grad(), autocast_ctx:
                 loss = model(val_inputs, val_targets)
             losses.append(loss)
@@ -230,7 +241,8 @@ hx0 : P x0
     # evaluate the gradient
     num_tokens = torch.tensor(0, device=device) # the number of "active" tokens of supervision seen
     for micro_step in range(grad_accum_steps):
-        train_inputs, train_targets = next(train_iter)
+        train_inputs, train_targets, approx_progress, last_step = next(train_iter) # prefetch the next batch while the GPU is busy with forward/backward
+        progress = max(progress, approx_progress) # only increase progress monotonically
         with autocast_ctx:
             loss = model(train_inputs, train_targets)
         train_loss = loss.detach() # for logging
@@ -241,7 +253,7 @@ hx0 : P x0
         dist.all_reduce(num_tokens, op=dist.ReduceOp.SUM) # sum over ranks
 
     # learning rate scheduler
-    lrm = get_lr_multiplier(step)
+    lrm = get_lr_multiplier(progress)
     for opt in optimizers:
         for group in opt.param_groups:
             group["lr"] = group["initial_lr"] * lrm
@@ -251,16 +263,27 @@ hx0 : P x0
         opt.step()
     model.zero_grad(set_to_none=True)
 
+    pct_done = 100 * progress
+    if ddp:
+        pct_done_tensor = torch.tensor([pct_done], dtype=torch.float32, device=device)
+        gathered_pct_done = [torch.zeros_like(pct_done_tensor) for _ in range(ddp_world_size)]
+        dist.all_gather(gathered_pct_done, pct_done_tensor)
+        pct_dones = [t.item() for t in gathered_pct_done]
+        pct_done_str = "[" + ", ".join(f"{p:.2f}" for p in pct_dones) + "]%"
+    else:
+        pct_done_str = f"{pct_done:.2f}%"
+
     # logging
     train_loss_item = train_loss.item()
     num_tokens_item = num_tokens.item()
-    print0(f"Step {step:05d}/{num_iterations:05d} | Training loss: {train_loss_item:.6f}| lrm: {lrm:.6f}| num_tokens: {num_tokens_item:,}")
+    print0(f"Step {step:05d} ({pct_done_str}) | Training loss: {train_loss_item:.6f}| lrm: {lrm:.6f}| num_tokens: {num_tokens_item:,}")
     wandb_run.log({
         "step": step,
         "lrm": lrm,
         "train_loss": train_loss_item,
         "num_tokens": num_tokens_item,
     })
+
     step += 1
 
 # Save the model at the end of the run
@@ -289,7 +312,7 @@ get_report().log(section="SFT", data=[
     user_config, # CLI args
     {
         "Training rows": len(train_ds),
-        "Number of iterations": num_iterations,
+        "Number of iterations": step,
         "Training loss": train_loss_item,
         "Validation loss": val_loss,
     },

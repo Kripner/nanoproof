@@ -40,6 +40,7 @@ def sft_data_generator(dataset, batch_size, device="cuda"):
 
     # iterates over the dataset in epochs, tokenizes
     batch = []
+    last_step = False
     for i in range(ddp_rank, len(dataset), ddp_world_size):
         state, tactic, proof_depth = dataset[i]
         state, tactic = state.strip(), tactic.strip()
@@ -66,13 +67,16 @@ def sft_data_generator(dataset, batch_size, device="cuda"):
         ))
         # TODO: uncomment this once we are using <|value|>
         # TODO: we also need to change the dataset size calculation in SFT.py accordingly!
+        # TODO: we also need to change the tactic_eval script to distinguish between tactic and value samples
         # batch.append((
         #     state_toks + [value_delim_tok] + value_toks,
         #     [0] * (len(state_toks) + 1) + [1] * len(value_toks)
         # ))
 
+        approx_progress = i / len(dataset)
+        last_step = last_step or (i + ddp_world_size >= len(dataset))
         if len(batch) == batch_size:
-            yield collate_and_yield(batch)
+            yield *collate_and_yield(batch), approx_progress, last_step
             batch = []
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ def eval_tactic_accuracy(model, leantree_batches, max_steps=None):
     total_full_correct = 0
     total_first_token_correct = 0
     
-    for x, y in leantree_batches if max_steps is None else islice(leantree_batches, max_steps):
+    for x, y, _, _ in leantree_batches if max_steps is None else islice(leantree_batches, max_steps):
         logits = model(x) # (B, T, V)
         predictions = torch.argmax(logits, dim=-1) # (B, T)
 
