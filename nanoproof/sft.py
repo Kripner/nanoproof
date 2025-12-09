@@ -10,6 +10,9 @@ torchrun --standalone --nproc_per_node=8 -m scripts.sft
 """
 
 import os
+
+import leantree.augmentations
+
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import random
 
@@ -74,6 +77,7 @@ model, tokenizer, meta = load_model(source, device, phase="train", model_tag=mod
 orig_model = model # original, uncompiled model
 # model = torch.compile(model, dynamic=True) # doesn't work super well because of variable lengths of inputs
 engine = Engine(model, tokenizer) # will be used for inline model evaluation only
+bos_token = tokenizer.get_bos_token_id()
 
 # -----------------------------------------------------------------------------
 # DataLoader
@@ -86,7 +90,12 @@ assert target_examples_per_step % examples_per_step == 0, "Target examples per s
 grad_accum_steps = target_examples_per_step // examples_per_step
 print0(f"=> Setting grad accum steps: {grad_accum_steps}")
 
-train_ds = list(iter_data(split="train"))
+augmentations = [
+    leantree.augmentations.ShuffleGoalsAndHypotheses(seed=seed),
+    leantree.augmentations.RandomRename(seed=seed),
+]
+
+train_ds = list(iter_data(split="train", augmentations=augmentations))
 random.Random(seed).shuffle(train_ds)
 val_ds = list(iter_data(split="val"))
 print0(f"Train dataset size: {len(train_ds)} | Val dataset size: {len(val_ds)}")
@@ -122,16 +131,18 @@ for opt in optimizers:
 #     lrm = 1.0 - it / num_iterations
 #     return lrm
 
-progress = 0 # will go from 0 to 1 over the course of the epoch
 
 # Learning rate scheduler
 def get_lr_multiplier(progress):
-    return max(0.0, 1.0 - progress)
+    # return max(0.0, 1.0 - progress)
+    global_progress = (epoch + progress) / num_epochs
+    return max(0.0, 1.0 - global_progress)
 
 # Go!
+progress = 0 # will go from 0 to 1 over the course of the epoch
 step = 0
-train_iter = iter(train_loader)
-x, y, approx_progress, last_step = next(train_iter) # prefetch the very first batch of data
+epoch = 0
+x, y, approx_progress, last_step = next(train_loader) # prefetch the very first batch of data
 while True:
     # Synchronize last_step across all ranks to avoid hangs in the distributed setting
     if ddp:
@@ -157,7 +168,7 @@ while True:
 
         with autocast_ctx:
             results = eval_tactic_accuracy(model, build_val_loader(), max_steps=eval_steps)
-        
+
         print0(f"Step {step:05d} | Validation loss: {val_loss:.6f} | Tactic full accuracy: {results['full_acc']:.4%} | Tactic first token accuracy: {results['first_token_acc']:.4%}")
 
         wandb_run.log({
@@ -227,21 +238,26 @@ hx0 : P x0
         ]
         engine = Engine(orig_model, tokenizer) # use orig_model to avoid recompilation
         for prompt in prompts:
-            # TODO: revert this!
-            # tokens = tokenizer(prompt, prepend="<|bos|>")
-            tokens = tokenizer(prompt, prepend="<|endoftext|>")
+            tokens = tokenizer(prompt, prepend=bos_token)
             with autocast_ctx:
                 sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
             print0(tokenizer.decode(sample[0]) + "\n---")
         model.train()
 
     if last_step:
-        break
+        if epoch < num_epochs - 1:
+            print0(f"Epoch {epoch} done, starting next one.")
+            epoch += 1
+            train_loader = sft_data_generator(train_ds, batch_size=device_batch_size)
+            progress = 0
+        else:
+            print0(f"Epoch {epoch} done, terminating.")
+            break
 
     # evaluate the gradient
     num_tokens = torch.tensor(0, device=device) # the number of "active" tokens of supervision seen
     for micro_step in range(grad_accum_steps):
-        train_inputs, train_targets, approx_progress, last_step = next(train_iter) # prefetch the next batch while the GPU is busy with forward/backward
+        train_inputs, train_targets, approx_progress, last_step = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
         progress = max(progress, approx_progress) # only increase progress monotonically
         with autocast_ctx:
             loss = model(train_inputs, train_targets)
@@ -276,7 +292,7 @@ hx0 : P x0
     # logging
     train_loss_item = train_loss.item()
     num_tokens_item = num_tokens.item()
-    print0(f"Step {step:05d} ({pct_done_str}) | Training loss: {train_loss_item:.6f}| lrm: {lrm:.6f}| num_tokens: {num_tokens_item:,}")
+    print0(f"Step {step:05d} ({pct_done_str}, ep {epoch:02d}/{num_epochs:02d}) | Training loss: {train_loss_item:.6f}| lrm: {lrm:.6f}| num_tokens: {num_tokens_item:,}")
     wandb_run.log({
         "step": step,
         "lrm": lrm,

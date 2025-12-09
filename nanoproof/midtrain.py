@@ -97,6 +97,7 @@ build_val_loader = lambda: iter_data(device_batch_size, max_seq_len, "val")
 
 progress = 0 # will go from 0 to 1 over the course of the epoch
 
+# TODO: try adding warmup (now, loss goes up first few steps)
 # Learning rate scheduler
 def get_lr_multiplier(progress):
     # first 80% of training: no decay, then linearly ramp down to 0.01

@@ -21,7 +21,7 @@ DATA_DIR = os.path.join(base_dir, "data", "leantree")
 HF_URL = "https://huggingface.co/datasets/ufal/leantree/resolve/main/leantree_mathlib.jsonl"
 
 
-def iter_data(split, eval_fraction=0.1):
+def iter_data(split, eval_fraction=0.1, augmentations=None):
     assert split in ["train", "val"]
     mathlib_file = os.path.join(DATA_DIR, "leantree_mathlib.jsonl")
     if not Path(mathlib_file).exists():
@@ -40,6 +40,9 @@ def iter_data(split, eval_fraction=0.1):
                 if isinstance(by_block.tree, leantree.StoredError):
                     continue
                 for node in by_block.tree.get_nodes():
+                    if augmentations:
+                        for aug in augmentations:
+                            node = aug.run(node)
                     yield str(node.state), str(node.tactic.tactic), node.proof_depth
 
 

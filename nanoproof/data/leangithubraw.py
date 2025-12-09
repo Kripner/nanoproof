@@ -33,7 +33,6 @@ URLS_FILE = os.path.join(os.path.dirname(__file__), "leangithub_urls.txt")
 BASE_DIR = get_base_dir()
 DATA_DIR = os.path.join(BASE_DIR, "data", "leangithubraw")
 
-# TODO: we should shuffle the rows so that the number of characters in groups are not too different
 def build_dataset():
     """
     Builds the dataset by cloning repos listed in leangithub_urls.txt and reading .lean files.

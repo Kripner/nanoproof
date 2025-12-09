@@ -41,43 +41,45 @@ def sft_data_generator(dataset, batch_size, device="cuda"):
     # iterates over the dataset in epochs, tokenizes
     batch = []
     last_step = False
-    for i in range(ddp_rank, len(dataset), ddp_world_size):
-        state, tactic, proof_depth = dataset[i]
-        state, tactic = state.strip(), tactic.strip()
-        assert len(state) != 0 and len(tactic) != 0 and proof_depth >= 1
+    while True:
+        for i in range(ddp_rank, len(dataset), ddp_world_size):
+            state, tactic, proof_depth = dataset[i]
+            state, tactic = state.strip(), tactic.strip()
+            assert len(state) != 0 and len(tactic) != 0 and proof_depth >= 1
 
-        state_toks = tokenizer.encode(state + "\n", prepend=bos_token)
+            state_toks = tokenizer.encode(state + "\n", prepend=bos_token)
 
-        tactic_delim_tok = tokenizer.encode_special("<|tactic|>")
-        tactic_toks = tokenizer.encode(tactic, append=eos_token)
+            tactic_delim_tok = tokenizer.encode_special("<|tactic|>")
+            tactic_toks = tokenizer.encode(tactic, append=eos_token)
 
-        value_delim_tok = tokenizer.encode_special("<|value|>")
-        value_toks = value_to_token_ids(tokenizer, proof_depth) + [eos_token]
+            value_delim_tok = tokenizer.encode_special("<|value|>")
+            value_toks = value_to_token_ids(tokenizer, proof_depth) + [eos_token]
 
-        # these are <0.1% of mathlib
-        if len(tactic_toks) > TACTIC_MAX_LEN:
-            continue
-        if len(state_toks) + 1 + len(tactic_toks) > 768:
-            continue
-        assert len(state_toks) + 1 + len(value_toks) <= 768
+            # these are <0.1% of mathlib
+            if len(tactic_toks) > TACTIC_MAX_LEN:
+                continue
+            if len(state_toks) + 1 + len(tactic_toks) > 768:
+                continue
+            assert len(state_toks) + 1 + len(value_toks) <= 768
 
-        batch.append((
-            state_toks + [tactic_delim_tok] + tactic_toks,
-            [0] * (len(state_toks) + 1) + [1] * len(tactic_toks)
-        ))
-        # TODO: uncomment this once we are using <|value|>
-        # TODO: we also need to change the dataset size calculation in SFT.py accordingly!
-        # TODO: we also need to change the tactic_eval script to distinguish between tactic and value samples
-        # batch.append((
-        #     state_toks + [value_delim_tok] + value_toks,
-        #     [0] * (len(state_toks) + 1) + [1] * len(value_toks)
-        # ))
+            batch.append((
+                state_toks + [tactic_delim_tok] + tactic_toks,
+                [0] * (len(state_toks) + 1) + [1] * len(tactic_toks)
+            ))
+            # TODO: uncomment this once we are using <|value|>
+            # TODO: we also need to change the dataset size calculation in SFT.py accordingly!
+            # TODO: we also need to change the tactic_eval script to distinguish between tactic and value samples
+            # batch.append((
+            #     state_toks + [value_delim_tok] + value_toks,
+            #     [0] * (len(state_toks) + 1) + [1] * len(value_toks)
+            # ))
 
-        approx_progress = i / len(dataset)
-        last_step = last_step or (i + ddp_world_size >= len(dataset))
-        if len(batch) == batch_size:
-            yield *collate_and_yield(batch), approx_progress, last_step
-            batch = []
+            approx_progress = i / len(dataset)
+            last_step = last_step or (i + ddp_world_size >= len(dataset))
+            if len(batch) == batch_size:
+                yield *collate_and_yield(batch), approx_progress, last_step
+                batch = []
+        print(f"Warning: Rank {ddp_rank} will loop again on leantree ({len(dataset)=}).", flush=True)
 
 if __name__ == "__main__":
     print("Loading dataset...")
