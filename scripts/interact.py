@@ -5,7 +5,6 @@ import torch
 from nanoproof.common import compute_init, compute_cleanup, get_base_dir, print0, DummyWandb, autodetect_device_type
 from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
-from nanoproof.data.minif2f import list_theorems, get_imports
 
 source = "sft" # which checkpoint to load the model from
 model_tag = "d26" # model tag to load the model from

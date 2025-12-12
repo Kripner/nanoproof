@@ -1,4 +1,5 @@
 import os
+import time
 from contextlib import nullcontext
 
 import torch
@@ -8,14 +9,14 @@ from leantree.repl_adapter.server import LeanClient
 from nanoproof.common import compute_init, compute_cleanup, get_base_dir, print0, DummyWandb, autodetect_device_type
 from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
-from nanoproof.data.minif2f import list_theorems, get_imports
+from nanoproof.data.leanworkbook import list_theorems
 
 """
 leanserver --project-path ~/troja/nanoproof/leantree_project/ --repl-exe ~/repos/leantree/lean-repl/.lake/build/bin/repl --imports Mathlib FormalConjectures.ForMathlib.Analysis.SpecialFunctions.NthRoot FormalConjectures.Util.Answer --max-processes 2 --address=<PUBLIC_IP> --log-level=DEBUG
 """
 
 source = "sft" # which checkpoint to load the model from
-model_tag = "d20" # model tag to load the model from
+model_tag = "d26" # model tag to load the model from
 device_type = "" # cuda|cpu|mps (empty => autodetect)
 dtype = "bfloat16"
 base_dir = get_base_dir()
@@ -48,7 +49,10 @@ model, tokenizer, meta = load_model(source, device, phase="eval", model_tag=mode
 engine = Engine(model, tokenizer)
 bos_token = tokenizer.get_bos_token_id()
 
-theorem = list_theorems("Valid")[0]
+time_start = time.time()
+theorems = list_theorems()
+print(f"Retrieved {len(theorems)} theorems in {time.time() - time_start} seconds")
+theorem = theorems[1]
 print(theorem + "\n-----")
 
 # We expect that the server has these imports:
@@ -82,9 +86,6 @@ open scoped Polynomial
         for retry_idx in range(10):
             print("Generating ..." + f" (retry {retry_idx})" if retry_idx != 0 else "")
             tokens = tokenizer(state_str + "\n<|tactic|>", prepend=bos_token)
-            # print(" ".join([tokenizer.id_to_token(token) for token in tokens]))
-            print(tokens)
-            print(tokenizer.decode(tokens))
             with autocast_ctx:
                 seed = torch.randint(torch.iinfo(torch.int32).max, (1,), device=device, generator=rng).item()
                 sample_toks, masks = engine.generate_batch(tokens, num_samples=1, min_tokens=1, max_tokens=64, seed=seed)
@@ -96,11 +97,11 @@ open scoped Polynomial
                 proof.append(tactic)
                 new_branches = new_branches.value
                 print(f"Got {len(new_branches)} new branch(es)!")
-                open_branches.extend(new_branches)
+                open_branches.extend([b for b in new_branches if not b.state.is_solved()])
                 break
             print(f"Error: '{new_branches.error}'\n")
         else:
             print("Could not generate a valid tactic, terminating.")
             break
     else:
-        print(f"Proof found!\n--{"\n".join(proof)}\n--")
+        print(f"Proof found!\n--\n{"\n".join(proof)}\n--")
