@@ -1,80 +1,90 @@
 import os
+from dataclasses import dataclass, field, Self
+import enum
 import time
 from contextlib import nullcontext
 
 import torch
-from leantree import LeanProject, LeanLibrary, LeanLibraries
-from leantree.repl_adapter.server import LeanClient
+from leantree import LeanProject, LeanLibrary, LeanLibraries, LeanProofState, LeanTactic
+from leantree.repl_adapter.server import LeanClient, LeanProofBranch
 
 from nanoproof.common import compute_init, compute_cleanup, get_base_dir, print0, DummyWandb, autodetect_device_type
 from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
 from nanoproof.data.leanworkbook import list_theorems
+from nanoproof.model import Transformer
+from nanoproof.tokenizer import HuggingFaceTokenizer
 
 """
 leanserver --project-path ~/troja/nanoproof/leantree_project/ --repl-exe ~/repos/leantree/lean-repl/.lake/build/bin/repl --imports Mathlib FormalConjectures.ForMathlib.Analysis.SpecialFunctions.NthRoot FormalConjectures.Util.Answer --max-processes 2 --address=<PUBLIC_IP> --log-level=DEBUG
 """
 
-source = "sft" # which checkpoint to load the model from
-model_tag = "d26" # model tag to load the model from
-device_type = "" # cuda|cpu|mps (empty => autodetect)
-dtype = "bfloat16"
-base_dir = get_base_dir()
-server_address = "10.10.25.40"
-server_port = 8000
 
-device_type = autodetect_device_type() if device_type == "" else device_type
-device = torch.device(device_type)
-ptdtype = torch.float32 if dtype == "float32" else torch.bfloat16
-autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
+class Player(enum.Enum):
+    OR = 1
+    AND = 2
 
-project_dir = os.path.join(base_dir, "leantree_project")
-if not os.path.exists(project_dir) or not os.listdir(project_dir):
-    # TODO: we need to add this to LeantreeProject.lean:
-    # """
-    # import FormalConjectures.ForMathlib.Analysis.SpecialFunctions.NthRoot
-    # import FormalConjectures.Util.Answer
-    # """
-    formal_conjectures = LeanLibrary(
-        name = "formal_conjectures",
-        scope = "google-deepmind",
-        git = "https://github.com/google-deepmind/formal-conjectures",
-        rev = "d3d568c9b6ba0b0609b8dd61d0019cd77462e96a",
-    )
-    project = LeanProject.create(project_dir, libraries=[LeanLibraries.MATHLIB, formal_conjectures])
-else:
-    project = LeanProject(project_dir)
 
-model, tokenizer, meta = load_model(source, device, phase="eval", model_tag=model_tag)
-engine = Engine(model, tokenizer)
-bos_token = tokenizer.get_bos_token_id()
+@dataclass
+class Node:
+    """Node in the search tree."""
+    # Action that was taken to reach this node.
+    action: LeanTactic | None
+    # Observation after the action has been applied.
+    observation: LeanProofState | None
+    # Prior probability of the node according to the policy.
+    prior: float | None
+    # Lean pointer after the action has been applied.
+    branch: LeanProofBranch
+    # Whether the node is an OR or AND node.
+    to_play: Player
+    # Per-step reward obtained after applying the action.
+    reward: float | None
+    is_solved: bool = False
 
-time_start = time.time()
-theorems = list_theorems()
-print(f"Retrieved {len(theorems)} theorems in {time.time() - time_start} seconds")
-theorem = theorems[1]
-print(theorem + "\n-----")
+    visit_count: int = 0
+    evaluations: int = 0
+    value_sum: float = 0
+    children: dict[LeanTactic, Self] = field(default_factory=dict)
 
-# We expect that the server has these imports:
-# import Mathlib
-# import FormalConjectures.ForMathlib.Analysis.SpecialFunctions.NthRoot
-# import FormalConjectures.Util.Answer
+    # Not used in search, but used as a regression target in RL.
+    value_target: float = 0
 
-client = LeanClient(server_address, server_port)
-print(f"Connected to server at {server_address}:{server_port}")
-print(f"Server status: {client.check_status()}")
-with client.get_process() as env:
-    print("Sending `open scoped` commands...")
-    env.send_command("""
-open scoped Real
-open scoped Nat
-open scoped Topology
-open scoped Polynomial
-""")
-    print("Starting proof...")
-    init_branch = env.proof_from_sorry(theorem)
-    print(f"Initial state:\n{init_branch.state}")
-    open_branches = [init_branch]
+    def expanded(self) -> bool:
+        return len(self.children) > 0
+
+    def value(self) -> float:
+        if self.visit_count == 0:
+            return 0
+        return self.value_sum / self.visit_count
+
+    def prior_sum(self) -> float:
+        return sum(child.prior for child in self.children.values())
+
+
+class Game:
+    """A single episode of interaction with the environment."""
+    def __init__(self, theorem: str, num_simulations: int | None = None):
+        self.theorem = theorem
+        # Number of simulations to run.
+        self.num_simulations = num_simulations
+        self.root = None
+
+
+@dataclass
+class TacticModel:
+    network: Transformer
+    tokenizer: HuggingFaceTokenizer
+    engine: Engine
+
+
+def run_bfs(game: Game, model: TacticModel):
+    device = model.network.get_device()
+    assert device.type == "cuda"
+    bos_token = model.tokenizer.get_bos_token_id()
+    autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
+
+    open_branches = [game.root.branch]
     proof = []
     rng = torch.Generator(device=device)
     rng.manual_seed(0)
@@ -85,12 +95,12 @@ open scoped Polynomial
         print(f"Solving state:\n{state_str}\n")
         for retry_idx in range(10):
             print("Generating ..." + f" (retry {retry_idx})" if retry_idx != 0 else "")
-            tokens = tokenizer(state_str + "\n<|tactic|>", prepend=bos_token)
+            tokens = model.tokenizer(state_str + "\n<|tactic|>", prepend=bos_token)
             with autocast_ctx:
                 seed = torch.randint(torch.iinfo(torch.int32).max, (1,), device=device, generator=rng).item()
-                sample_toks, masks = engine.generate_batch(tokens, num_samples=1, min_tokens=1, max_tokens=64, seed=seed)
+                sample_toks, masks = model.engine.generate_batch(tokens, num_samples=1, min_tokens=1, max_tokens=64, seed=seed)
             tactic_toks = [token for token, mask in zip(sample_toks[0], masks[0]) if mask == 1]
-            tactic = tokenizer.decode(tactic_toks)
+            tactic = model.tokenizer.decode(tactic_toks)
             print(f"Trying tactic:\n'{tactic}'")
             new_branches = branch.try_apply_tactic(tactic)
             if new_branches.is_success():
@@ -105,3 +115,72 @@ open scoped Polynomial
             break
     else:
         print(f"Proof found!\n--\n{"\n".join(proof)}\n--")
+
+
+def _main():
+    source = "sft"  # which checkpoint to load the model from
+    model_tag = "d26"  # model tag to load the model from
+    base_dir = get_base_dir()
+    server_address = "10.10.25.40"
+    server_port = 8000
+    device = torch.device("cuda")
+
+    project_dir = os.path.join(base_dir, "leantree_project")
+    if not os.path.exists(project_dir) or not os.listdir(project_dir):
+        # TODO: we need to add this to LeantreeProject.lean:
+        # """
+        # import FormalConjectures.ForMathlib.Analysis.SpecialFunctions.NthRoot
+        # import FormalConjectures.Util.Answer
+        # """
+        formal_conjectures = LeanLibrary(
+            name="formal_conjectures",
+            scope="google-deepmind",
+            git="https://github.com/google-deepmind/formal-conjectures",
+            rev="d3d568c9b6ba0b0609b8dd61d0019cd77462e96a",
+        )
+        LeanProject.create(project_dir, libraries=[LeanLibraries.MATHLIB, formal_conjectures])
+
+    model, tokenizer, _ = load_model(source, device, phase="eval", model_tag=model_tag)
+    engine = Engine(model, tokenizer)
+    bos_token = tokenizer.get_bos_token_id()
+
+    time_start = time.time()
+    theorems = list_theorems()
+    print(f"Retrieved {len(theorems)} theorems in {time.time() - time_start} seconds")
+    theorem = theorems[1]
+    print(theorem + "\n-----")
+
+    # We expect that the server has these imports:
+    # import Mathlib
+    # import FormalConjectures.ForMathlib.Analysis.SpecialFunctions.NthRoot
+    # import FormalConjectures.Util.Answer
+
+    client = LeanClient(server_address, server_port)
+    print(f"Connected to server at {server_address}:{server_port}")
+    print(f"Server status: {client.check_status()}")
+    with client.get_process() as env:
+        print("Sending `open scoped` commands...")
+        env.send_command("""
+    open scoped Real
+    open scoped Nat
+    open scoped Topology
+    open scoped Polynomial
+    """)
+        print("Starting proof...")
+        init_branch = env.proof_from_sorry(theorem)
+        print(f"Initial state:\n{init_branch.state}")
+
+        game = Game(theorem)
+        game.root = Node(
+            action=None,
+            observation=init_branch.state,
+            prior=None,
+            branch=init_branch,
+            to_play=Player.OR,
+            reward=None,
+        )
+        run_bfs(game, model)
+
+
+if __name__ == "__main__":
+    _main()
