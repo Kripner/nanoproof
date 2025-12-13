@@ -1,75 +1,57 @@
-from typing import Callable
 import random
+from dataclasses import dataclass, field
 
 import torch
-from leantree import LeanProject, LeanLibrary, LeanLibraries
 from leantree.repl_adapter.server import LeanClient
 
-from nanoproof.model import Transformer
-from nanoproof.search.bfs import Node, Player, Game, run_bfs, TacticModel
+from nanoproof.search.bfs import Node, Player, Game, run_bfs, TacticModel, Action, State
 from nanoproof.data.leanworkbook import list_theorems
 
 
+
+@dataclass
 class Config:
-    def __init__(
-            self,
-            num_simulations: int,
-            batch_size: int,
-            num_actors: int,
-            lr: float,
-    ):
-        # Acting
-        self.num_actors = num_actors
+    # Acting
+    num_simulations: int = 50
+    num_actors: int = 4
 
-        self.num_simulations = num_simulations
+    # UCB formula
+    pb_c_base: int = 3200
+    pb_c_init: float = 0.01
+    value_discount: float = 0.98
+    prior_temperature: float = 1.5
 
-        # UCB formula
-        self.pb_c_base = 3200
-        self.pb_c_init = 0.001
-        self.value_discount = 0.99
-        self.prior_temperature = 200
+    # Other MCTS parameters
+    no_legal_actions_value: float = -40.0
 
-        # Other MCTS parameters
-        self.no_legal_actions_value = -40
+    # Progressive sampling parameters
+    ps_c: float = 0.03
+    ps_alpha: float = 0.8
 
-        # Progressive sampling parameters
-        self.ps_c = 0.01
-        self.ps_alpha = 0.6
+    # Value predictions
+    num_value_bins: int = 64
 
-        # Value predictions
-        self.num_value_bins = 64
+    # Training
+    training_steps: int = int(500e3)
+    checkpoint_interval: int = int(2e3)
+    window_size: int = int(250e3)
+    batch_size: int = 64
+    sequence_length: int = 32
+    lr: float = 1e-4
+    value_weight: float = 0.002
 
-        # Training
-        self.training_steps = int(1000e3)
-        self.checkpoint_interval = int(1e3)
-        self.window_size = int(1e6)
-        self.batch_size = batch_size
-        self.sequence_length = 32
-        self.lr = lr
-        self.value_weight = 0.001
-
-        # Lean server
-        self.server_address = "10.10.25.40"
-        self.server_port = 8000
-
-
-class SharedModelStorage:
-    def __init__(self):
-        self._params = {}
-
-    def latest_params(self) -> dict:
-        return self._params[max(self._params.keys())]
-
-    def save_params(self, step: int, params: dict):
-        self._params[step] = params
-
+    # Lean server
+    server_address: str = "10.10.25.40"
+    server_port: int = 8000
 
 class TheoremsSampler:
-    def __init__(self):
+    def __init__(self, seed: int | None = 0):
         self.theorems = list_theorems()
+        self.rng = random.Random(seed)
 
     def sample_theorem(self) -> str:
-        return random.choice(self.theorems)
+        # return "theorem lean_workbook_42924 (h : 1 / 2 * 30 * 23 * 6 = 2070) : 1 / 2 * 30 * 23 * 6 = 2070  :=  by sorry"
+        return self.rng.choice(self.theorems)
 
 
 class ReplayBuffer:
@@ -79,14 +61,36 @@ class ReplayBuffer:
         self.sequence_length = config.sequence_length
         self.buffer = []
 
-    def save_game(self, game):
+    def save_game(self, game: Game):
         transitions = self._extract_transitions(game.root)
+        print("! New transitions !")
+        for transition in transitions:
+            print(transition)
+        print("--")
+
         self.buffer.extend(transitions)
         self.buffer = self.buffer[-self.window_size:]
 
-    def extract_transitions(self, node: Node) -> list[tuple[torch.Tensor, torch.Tensor, float]]:
-        """Extracts transitions from all proven nodes in the game."""
-        ...
+    def _extract_transitions(self, node: Node) -> list[tuple[torch.Tensor, torch.Tensor, float]]:
+        """Extracts transitions from a proof."""
+        assert node.to_play == Player.OR
+        if not node.is_solved:
+            return []
+        transitions = []
+        while node.to_play == Player.OR and not node.is_terminal:
+            assert len(node.state) == 1
+            action = self._select_optimal_action(node)
+            transitions.append((node.state[0].state, action, node.value_target))
+            node = node.children[action]
+        if node.to_play == Player.AND:
+            for _, child in node.children.items():
+                transitions.extend(self._extract_transitions(child))
+        return transitions
+
+    def _select_optimal_action(self, node: Node) -> Action:
+        assert node.to_play == Player.OR
+        [action] = [ action for action in node.children if node.children[action].is_solved ]
+        return action
 
     def sample_batch(self) -> list[tuple[torch.Tensor, torch.Tensor, float]]:
         return [self.sample_transition() for _ in range(self.batch_size)]
@@ -98,14 +102,13 @@ class ReplayBuffer:
 # Each acting job is independent of all others; it takes the latest network
 # snapshot, produces a game and makes it available to the learner by writing it
 # to a shared replay buffer.
-def run_actor(config: Config, storage: SharedModelStorage, replay_buffer: ReplayBuffer, theorems_sampler: TheoremsSampler):
-    network = Transformer(config)
-    model = TacticModel(network, tokenizer, engine)
+def run_actor(config: Config, model: TacticModel, replay_buffer: ReplayBuffer, theorems_sampler: TheoremsSampler):
     while True:
-        network.params = storage.latest_params()
         game = play_game(config, model, theorems_sampler)
         if game.root.is_solved:
             replay_buffer.save_game(game)
+        else:
+            print("pešek\n--")
 
 
 # Each game is produced by starting from the initial Lean state, and executing
@@ -114,6 +117,7 @@ def run_actor(config: Config, storage: SharedModelStorage, replay_buffer: Replay
 # buffer for training.
 def play_game(config: Config, model: TacticModel, theorems_sampler: TheoremsSampler) -> Game:
     theorem = theorems_sampler.sample_theorem()
+    print(f"Playing game for theorem:\n{theorem}\n")
 
     client = LeanClient(config.server_address, config.server_port)
     with client.get_process() as env:
@@ -122,17 +126,18 @@ def play_game(config: Config, model: TacticModel, theorems_sampler: TheoremsSamp
 
         game.root = Node(
             action=None,
-            observation=init_branch.state,
             prior=None,
-            branch=init_branch,
+            state=[init_branch],
             to_play=Player.OR,
             reward=None,
         )
 
-        run_bfs(game, model)
+        success = run_bfs(game, model)
         if game.root.is_solved:
             # TODO: Perform final check to ensure the proof is valid.
             # game.root.is_solved = final_check(game)
+
+            # TODO: try to remove each tactic from the proof and check if the proof is still valid
 
             # TODO: Compute value targets for the proof.
             # compute_value_target(game.root)
@@ -153,7 +158,11 @@ def play_game(config: Config, model: TacticModel, theorems_sampler: TheoremsSamp
 
 
 def _main():
-    pass
+    config = Config()
+    model = TacticModel.create()
+    replay_buffer = ReplayBuffer(config)
+    theorems_sampler = TheoremsSampler()
+    run_actor(config, model, replay_buffer, theorems_sampler)
 
 
 if __name__ == "__main__":
