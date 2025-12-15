@@ -14,15 +14,13 @@ from nanoproof.engine import Engine
 from nanoproof.data.leantree import iter_data
 from nanoproof.data.leantree_dataloader import rl_data_generator
 from nanoproof.experience_collection import ReplayBuffer, TheoremsSampler, Config, run_actor
+from nanoproof.search import TacticModel
+from scripts.minif2f_eval import eval_minif2f
 
 # -----------------------------------------------------------------------------
 # RL Hyperparameters
 run = "dummy" # wandb run name default ("dummy" is special - we won't log to wandb)
 seed = 0
-# input model options
-source = "mid" # base|mid , which checkpoint to load the model from (base model or midtrained model)
-model_tag = "d26" # model tag to load the model from (base model or midtrained model)
-step = None # step to load the model from (base model or midtrained model)
 # compute/precision
 device_type = "" # cuda|cpu|mps (empty => autodetect)
 dtype = "bfloat16"
@@ -64,12 +62,7 @@ autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if dev
 use_dummy_wandb = run == "dummy" or not master_process
 wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-rl", name=run, config=user_config, save_code=True)
 
-# Load the model and tokenizer
-model, tokenizer, meta = load_model(source, device, phase="train", model_tag=model_tag, step=step)
-orig_model = model # original, uncompiled model
-# model = torch.compile(model, dynamic=True) # doesn't work super well because of variable lengths of inputs
-engine = Engine(model, tokenizer) # will be used for inline model evaluation only
-bos_token = tokenizer.get_bos_token_id()
+tactic_model = TacticModel.create()
 
 # -----------------------------------------------------------------------------
 # DataLoader
@@ -87,7 +80,7 @@ mathlib_train = list(iter_data(split="train"))
 random.Random(rank_seed).shuffle(mathlib_train)
 
 config = Config()
-replay_buffer = ReplayBuffer(config)
+replay_buffer = ReplayBuffer(config, seed=rank_seed)
 theorems_sampler = TheoremsSampler(seed=rank_seed)
 
 def train_generator():
@@ -128,16 +121,22 @@ step = 0
 x, y = next(train_loader) # prefetch the very first batch of data
 while True:
     if step % collect_every == 0:
-        # TODO: make it so that processes communicate and collect proofs together
-        run_actor(collect_steps, config, model, replay_buffer, theorems_sampler)
+        # collect proofs
+        run_actor(collect_steps, config, tactic_model, replay_buffer, theorems_sampler)
+        replay_buffer.synchronize()
 
     if step % eval_every == 0:
+        # TODO: also evaluate on a val split of LeanWorkBook
         model.eval()
-        # TODO: eval success rate on minif2f
+        minif2f_results = eval_minif2f(tactic_model, max_theorems=eval_steps)
+        print0(f"Step {step:05d} | minif2f success rate: {minif2f_results['success_rate']:.4%} ({minif2f_results['solved']}/{minif2f_results['total']}) | error rate: {minif2f_results['error_rate']:.4%}")
+        wandb_run.log({
+            "step": step,
+            "minif2f": minif2f_results['success_rate'],
+        })
         model.train()
 
     if step > 0 and step % save_every == 0 and master_process:
-        # TODO: gather the weights
         base_dir = get_base_dir()
         depth = model.config.n_layer
         model_tag = f"d{depth}" # base the model tag on the depth of the base model
@@ -176,11 +175,12 @@ while True:
     # logging
     train_loss_item = train_loss.item()
     num_tokens_item = num_tokens.item()
-    print0(f"Step {step:05d} | Training loss: {train_loss_item:.6f}| num_tokens: {num_tokens_item:,}")
+    print0(f"Step {step:05d} | Training loss: {train_loss_item:.6f} | num_tokens: {num_tokens_item:,} | replay_buffer_size: {len(replay_buffer)}")
     wandb_run.log({
         "step": step,
         "train_loss": train_loss_item,
         "num_tokens": num_tokens_item,
+        "replay_buffer_size": len(replay_buffer),
     })
 
     step += 1

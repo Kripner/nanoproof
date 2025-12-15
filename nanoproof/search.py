@@ -24,7 +24,7 @@ leanserver --project-path ~/troja/nanoproof/leantree_project/ --repl-exe ~/repos
 @dataclass
 class Config:
     # Acting
-    num_simulations: int = 10
+    num_simulations: int = 50
     num_actors: int = 4
     num_sampled_tactics: int = 6
 
@@ -46,10 +46,9 @@ class Config:
 
     # Training
     training_steps: int = int(500e3)
-    checkpoint_interval: int = int(2e3)
-    window_size: int = int(250e3)
     batch_size: int = 64
     sequence_length: int = 32
+    window_size: int = 20000
     lr: float = 1e-4
     value_weight: float = 0.002
 

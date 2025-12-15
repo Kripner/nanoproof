@@ -1,5 +1,8 @@
 import random
+import torch
+import torch.distributed as dist
 
+from nanoproof.common import get_dist_info
 from leantree.repl_adapter.server import LeanClient
 
 from nanoproof.search import Node, Player, Game, run_bfs, run_mcts, TacticModel, Action, State, Config
@@ -17,11 +20,13 @@ class TheoremsSampler:
 
 
 class ReplayBuffer:
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, seed: int = 0):
         self.window_size = config.window_size
         self.batch_size = config.batch_size
         self.sequence_length = config.sequence_length
+        self.local_buffer = []
         self.buffer = []
+        self.rng = random.Random(seed)
 
     def save_game(self, game: Game):
         transitions = self._extract_transitions(game.root)
@@ -30,8 +35,21 @@ class ReplayBuffer:
             print(transition)
         print("--")
 
-        self.buffer.extend(transitions)
-        self.buffer = self.buffer[-self.window_size:]
+        self.local_buffer.extend(transitions)
+
+    def synchronize(self):
+        ddp, _, _, world_size = get_dist_info()
+        if ddp:
+            gathered_buffers = [None for _ in range(world_size)]
+            dist.all_gather_object(gathered_buffers, self.local_buffer)
+            for buffer in gathered_buffers:
+                self.buffer.extend(buffer)
+        else:
+            self.buffer.extend(self.local_buffer)
+        
+        self.local_buffer = []
+        if len(self.buffer) > self.window_size:
+            self.buffer = self.buffer[-self.window_size:]
 
     def _extract_transitions(self, node: Node) -> list[tuple[str, str, float]]:
         """Extracts transitions from a proof."""
@@ -42,7 +60,8 @@ class ReplayBuffer:
         while node.to_play == Player.OR and not node.is_terminal:
             assert len(node.state) == 1
             action = self._select_optimal_action(node)
-            transitions.append((node.state[0].state, action, node.value_target))
+            assert isinstance(action, str)
+            transitions.append((str(node.state[0].state), action, node.value_target))
             node = node.children[action]
         if node.to_play == Player.AND:
             for _, child in node.children.items():
@@ -57,15 +76,29 @@ class ReplayBuffer:
         return min(actions, key=lambda a: len(a))
 
     def sample_transition(self) -> tuple[str, str, float]:
-        ...
+        return self.rng.choice(self.buffer)
 
 
 # Each acting job is independent of all others; it takes the latest network
 # snapshot, produces a game and makes it available to the learner by writing it
 # to a shared replay buffer.
-def run_actor(to_collect: int, config: Config, model: TacticModel, replay_buffer: ReplayBuffer, theorems_sampler: TheoremsSampler):
+def run_actor(total_to_collect: int, config: Config, model: TacticModel, replay_buffer: ReplayBuffer, theorems_sampler: TheoremsSampler):
     collected = 0
+    ddp, _, _, world_size = get_dist_info()
+    
     while True:
+        # Check if we have collected enough proofs globally
+        if ddp:
+            # We use a tensor to aggregate the count across all processes
+            collected_tensor = torch.tensor([collected], dtype=torch.long, device=model.network.get_device())
+            dist.all_reduce(collected_tensor, op=dist.ReduceOp.SUM)
+            global_collected = collected_tensor.item()
+        else:
+            global_collected = collected
+
+        if global_collected >= total_to_collect:
+            return
+
         game = play_game(config, model, theorems_sampler)
         if game is None:
             print("Invalid theorem statement.")
@@ -73,8 +106,6 @@ def run_actor(to_collect: int, config: Config, model: TacticModel, replay_buffer
         if game.root.is_solved:
             replay_buffer.save_game(game)
             collected += 1
-            if collected >= to_collect:
-                return
 
 
 # Each game is produced by starting from the initial Lean state, and executing
