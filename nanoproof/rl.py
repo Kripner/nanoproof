@@ -4,10 +4,8 @@ from dataclasses import dataclass, field
 import torch
 from leantree.repl_adapter.server import LeanClient
 
-from nanoproof.search import Node, Player, Game, run_bfs, TacticModel, Action, State, Config
+from nanoproof.search import Node, Player, Game, run_bfs, run_mcts, TacticModel, Action, State, Config
 from nanoproof.data.leanworkbook import list_theorems
-
-
 
 
 class TheoremsSampler:
@@ -55,8 +53,10 @@ class ReplayBuffer:
 
     def _select_optimal_action(self, node: Node) -> Action:
         assert node.to_play == Player.OR
-        [action] = [ action for action in node.children if node.children[action].is_solved ]
-        return action
+        actions = [action for action in node.children if node.children[action].is_solved]
+        assert len(actions) > 0
+        # select the shortest tactic
+        return min(actions, key=lambda a: len(a))
 
     def sample_batch(self) -> list[tuple[torch.Tensor, torch.Tensor, float]]:
         return [self.sample_transition() for _ in range(self.batch_size)]
@@ -104,7 +104,8 @@ def play_game(config: Config, model: TacticModel, theorems_sampler: TheoremsSamp
             reward=None,
         )
 
-        success = run_bfs(game, model)
+        # success = run_bfs(game, model)
+        run_mcts(config, game, model)
         if game.root.is_solved:
             # TODO: Perform final check to ensure the proof is valid.
             # game.root.is_solved = final_check(game)

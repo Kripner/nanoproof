@@ -10,10 +10,12 @@ import urllib.request
 import gc
 from collections import Counter
 from filelock import FileLock
+from typing import Callable, TypeVar
 
 import torch
 import torch.distributed as dist
 import numpy as np
+from PrettyPrint import PrettyPrintTree
 
 class ColoredFormatter(logging.Formatter):
     """Custom formatter that adds colors to log messages."""
@@ -278,3 +280,35 @@ def strict_zip(a: list, b: list):
     if len(a) != len(b):
         raise Exception(f"List sizes differ ({len(a)} != {len(b)}).")
     return zip(a, b)
+
+TypeNode = TypeVar('TypeNode')
+def pretty_print_tree(
+        root: TypeNode,
+        get_children: Callable[[TypeNode], list[TypeNode]],
+        node_to_str: Callable[[TypeNode], str],
+        edge_to_str: Callable[[TypeNode], str | None] | None = None,
+        max_label_len=55,
+        max_edge_label_len=None,
+) -> str:
+    def trimmed_edge_to_str(e: TypeNode) -> str | None:
+        if edge_to_str is None:
+            return None
+        s = edge_to_str(e)
+        if max_edge_label_len is None:
+            return s
+        if s is None:
+            return s
+        if len(s) > max_edge_label_len:
+            dots = "..."
+            return s[:max_edge_label_len - len(dots)] + dots
+        return s
+
+    pt = PrettyPrintTree(
+        get_children=get_children,
+        get_val=node_to_str,
+        get_label=trimmed_edge_to_str,
+        return_instead_of_print=True,
+        # border=True,
+        trim=max_label_len,
+    )
+    return pt(root)

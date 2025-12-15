@@ -12,6 +12,7 @@
   - zero as per pseudocode (line 570) - that would be weird/wrong
   - parent minus "UCB unvisited children value penalty" (=32) as per paper
 - beta and gamma are the same? (as per code)
+- In the pseudocode, is_optimal is not set on the new children/grandchildren created when expanding a node, even if they are terminal.
 
 # Ideas
 

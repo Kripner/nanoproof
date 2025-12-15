@@ -18,6 +18,7 @@ dependencies = [
     "wandb>=0.21.3",
     "leantree",
     "termplotlib",
+    "PrettyPrintTree>=2.0.1",
 ]
 
 [build-system]
