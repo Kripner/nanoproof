@@ -1,5 +1,4 @@
 import random
-from dataclasses import dataclass, field
 
 import torch
 from leantree.repl_adapter.server import LeanClient
@@ -110,7 +109,7 @@ def play_game(config: Config, model: TacticModel, theorems_sampler: TheoremsSamp
             # TODO: Perform final check to ensure the proof is valid.
             # game.root.is_solved = final_check(game)
 
-            # TODO: try to remove each tactic from the proof and check if the proof is still valid
+            # TODO: try to remove each tactic from the proof and check if the proof is still valid (maybe even more iterations of this)
 
             # TODO: Compute value targets for the proof.
             # compute_value_target(game.root)

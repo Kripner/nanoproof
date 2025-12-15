@@ -212,8 +212,8 @@ def run_mcts(config: Config, game: Game, model: TacticModel):
             config,
         )
 
-        print(root.pp_tree())
-        print("-" * 80)
+        # print(root.pp_tree())
+        # print("-" * 80)
         if root.is_solved:
             break
 
@@ -286,6 +286,9 @@ def expand_node(
         new_branches = branch.try_apply_tactic(action)
         if not new_branches.is_success():
             # Invalid action encountered.
+            continue
+        if len(new_branches.value) == 1 and new_branches.value[0].state.semantic_equals(node.state[0].state):
+            # Tactic made no progress.
             continue
         new_branches = [b for b in new_branches.value if not b.state.is_solved()]
         child = Node(
