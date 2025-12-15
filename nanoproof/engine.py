@@ -141,7 +141,10 @@ class Engine:
         if min_tokens is not None and 0 < min_tokens:
             logits[:, eos] = float('-inf')
             logits[:, bos] = float('-inf')
-        next_ids = sample_next_token(logits, rng, temperature, top_k)  # (B, 1)
+        if num_samples > 1:
+            # Expand logits so that each initial token is sampled independently
+            logits = logits.expand(num_samples, -1)
+        next_ids = sample_next_token(logits, rng, temperature, top_k)  # (num_samples, 1)
         sampled_tokens = next_ids[:, 0].tolist()
 
         # 2) Replicate the KV cache for each sample/row
@@ -171,8 +174,6 @@ class Engine:
             # Get sampled tokens - either from prefill or from forward pass
             if first_iteration:
                 # Use the tokens we already sampled from prefill
-                sampled_tokens = [sampled_tokens[0]] * num_samples  # Broadcast first token to all rows
-                # TODO: we should sample a token for each row instead of broadcasting
                 first_iteration = False
             else:
                 # Forward the model and get the next token for each row

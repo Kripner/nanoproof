@@ -165,7 +165,7 @@ class TacticModel:
         device = self.network.get_device()
         assert device.type == "cuda"
 
-        state_str = str(state[0]).strip()
+        state_str = str(state[0].state).strip()
         tokens = self.tokenizer(state_str + "\n<|tactic|>", prepend=self.tokenizer.get_bos_token_id())
         seed = torch.randint(torch.iinfo(torch.int32).max, (1,), device=device, generator=self.rng).item()
         with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -360,13 +360,14 @@ def run_bfs(game: Game, model: TacticModel):
             # [tactic] = tactics
             # print(f"Trying tactic:\n'{tactic}'")
             options = []
-            selected_tactic = None
+            selected_tactic, selected_new_branches = None, None
             for tactic in tactics:
                 new_branches = branch.try_apply_tactic(tactic)
                 if new_branches.is_success():
                     new_branches = [b for b in new_branches.value if not b.state.is_solved()]
                     if selected_tactic is None or len(tactic) < len(selected_tactic):
                         selected_tactic = tactic
+                        selected_new_branches = new_branches
                         options.append((tactic, new_branches, True))
                     else:
                         options.append((tactic, new_branches, False))
@@ -375,8 +376,8 @@ def run_bfs(game: Game, model: TacticModel):
                     # print(f"Error: '{new_branches.error}'")
             for tactic, new_branches, is_selected in options:
                 print("✅" if new_branches is not None else "❌", tactic, "(SELECTED)" if is_selected else "")
-            if selected_tactic is not None:
-                [new_branches] = [new_branches for _, new_branches, is_selected in options if is_selected]
+            if selected_new_branches is not None:
+                new_branches = selected_new_branches
                 break
         else:
             print("Could not generate a valid tactic in 10 retries, terminating BFS.")
