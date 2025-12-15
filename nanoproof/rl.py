@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 import torch
 from leantree.repl_adapter.server import LeanClient
 
-from nanoproof.search.bfs import Node, Player, Game, run_bfs, TacticModel, Action, State, Config
+from nanoproof.search import Node, Player, Game, run_bfs, TacticModel, Action, State, Config
 from nanoproof.data.leanworkbook import list_theorems
 
 
