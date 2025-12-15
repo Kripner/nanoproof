@@ -33,7 +33,7 @@ class ReplayBuffer:
         print("! New transitions !")
         for transition in transitions:
             print(transition)
-        print("--")
+        print(f"Local buffer size: {len(self.local_buffer)}")
 
         self.local_buffer.extend(transitions)
 
@@ -82,6 +82,7 @@ class ReplayBuffer:
 # Each acting job is independent of all others; it takes the latest network
 # snapshot, produces a game and makes it available to the learner by writing it
 # to a shared replay buffer.
+@torch.inference_mode()
 def run_actor(total_to_collect: int, config: Config, model: TacticModel, replay_buffer: ReplayBuffer, theorems_sampler: TheoremsSampler):
     collected = 0
     ddp, _, _, world_size = get_dist_info()
@@ -114,8 +115,6 @@ def run_actor(total_to_collect: int, config: Config, model: TacticModel, replay_
 # buffer for training.
 def play_game(config: Config, model: TacticModel, theorems_sampler: TheoremsSampler) -> Game | None:
     theorem = theorems_sampler.sample_theorem()
-    print(f"Playing game for theorem:\n{theorem}\n")
-
     client = LeanClient(config.server_address, config.server_port)
     with client.get_process() as env:
         init_branch = env.proof_from_sorry(theorem)
@@ -142,6 +141,7 @@ def play_game(config: Config, model: TacticModel, theorems_sampler: TheoremsSamp
 
             # TODO: Compute value targets for the proof.
             # compute_value_target(game.root)
+            print(theorem)
             pass
 
         return game

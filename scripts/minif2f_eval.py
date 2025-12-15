@@ -12,6 +12,7 @@ from nanoproof.search import run_mcts, Config, Game, Node, Player, TacticModel
 from nanoproof.checkpoints import load_model
 from nanoproof.engine import Engine
 
+@torch.inference_mode()
 def eval_minif2f(tactic_model: TacticModel, max_theorems=None, split="Valid", use_tqdm=False):
     """
     Evaluates the success rate of the model on the MiniF2F benchmark.

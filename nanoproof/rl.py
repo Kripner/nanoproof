@@ -17,6 +17,12 @@ from nanoproof.experience_collection import ReplayBuffer, TheoremsSampler, Confi
 from nanoproof.search import TacticModel
 from scripts.minif2f_eval import eval_minif2f
 
+# TODO: log times to see where is the bottleneck
+# TODO: if tactic application results in a state that already is on the path from root, skip the tactic (otherwise we sometimes get stuck in loop of eg. rw [add_comm])
+# TODO: store all transitions in a file
+
+# TODO: (maybe) try removing each tactic and if the proof is still valid, do not add the transition to the replay buffer
+
 # -----------------------------------------------------------------------------
 # RL Hyperparameters
 run = "dummy" # wandb run name default ("dummy" is special - we won't log to wandb)
@@ -63,6 +69,7 @@ use_dummy_wandb = run == "dummy" or not master_process
 wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-rl", name=run, config=user_config, save_code=True)
 
 tactic_model = TacticModel.create()
+model = tactic_model.network
 
 # -----------------------------------------------------------------------------
 # DataLoader
@@ -87,7 +94,7 @@ def train_generator():
     rng = random.Random(rank_seed)
     mathlib_iter = iter(mathlib_train)
     while True:
-        assert len(replay_buffer) > 100
+        assert len(replay_buffer.buffer) > 100
         if rng.random() < fraction_sft:
             try:
                 yield next(mathlib_iter)
@@ -118,11 +125,12 @@ for opt in optimizers:
 
 # Go!
 step = 0
-x, y = next(train_loader) # prefetch the very first batch of data
 while True:
     if step % collect_every == 0:
         # collect proofs
+        model.eval()
         run_actor(collect_steps, config, tactic_model, replay_buffer, theorems_sampler)
+        model.train()
         replay_buffer.synchronize()
 
     if step % eval_every == 0:
@@ -152,7 +160,7 @@ while True:
                 "model_config": model_config_kwargs,
             }
         )
-        print(f"✅ Saved model checkpoint to {checkpoint_dir}")
+        print(f"Saved model checkpoint to {checkpoint_dir}")
 
     # evaluate the gradient
     num_tokens = torch.tensor(0, device=device) # the number of "active" tokens of supervision seen
