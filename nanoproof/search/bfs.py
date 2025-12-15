@@ -96,7 +96,7 @@ class Node:
 
     def value(self) -> float:
         if self.visit_count == 0:
-            return 0
+            return 0  # TODO: isn't this also weird?
         return self.value_sum / self.visit_count
 
     def prior_sum(self) -> float:
@@ -213,8 +213,8 @@ def select_child(config: Config, node: Node) -> tuple[Action, Node]:
 # the prior.
 def ucb_score(config: Config, parent: Node, child: Node) -> float:
     pb_c = (
-            math.log((parent.visit_count + config.pb_c_base + 1) / config.pb_c_base)
-            + config.pb_c_init
+        math.log((parent.visit_count + config.pb_c_base + 1) / config.pb_c_base)
+        + config.pb_c_init
     )
     pb_c *= math.sqrt(parent.visit_count) / (child.visit_count + 1)
 
@@ -266,7 +266,7 @@ def expand_node(
             prior=p,
             state=new_branches,
             to_play=Player.AND if len(new_branches) > 1 else Player.OR,
-            reward=None,  # TODO!!!
+            reward=-1.0,
         )
         node.is_solved |= len(new_branches) == 0
         node.children[action] = child
@@ -278,7 +278,7 @@ def expand_node(
                     prior=1.0 / len(new_branches),
                     state=[branch],
                     to_play=Player.OR,
-                    reward=None,  # TODO!!!
+                    reward=None,  # this reward is never used
                 )
                 child.children[i] = grandchild
 
