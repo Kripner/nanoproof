@@ -1,10 +1,10 @@
-from ast import Or
 import os
 from dataclasses import dataclass, field
 import enum
 import time
 from contextlib import nullcontext
 from typing import Self
+import math
 
 import torch
 from leantree import LeanProject, LeanLibrary, LeanLibraries, LeanProofState
@@ -22,6 +22,42 @@ leanserver --project-path ~/troja/nanoproof/leantree_project/ --repl-exe ~/repos
 """
 
 
+@dataclass
+class Config:
+    # Acting
+    num_simulations: int = 50
+    num_actors: int = 4
+
+    # UCB formula
+    pb_c_base: int = 3200
+    pb_c_init: float = 0.01
+    value_discount: float = 0.98
+    prior_temperature: float = 1.5
+
+    # Other MCTS parameters
+    no_legal_actions_value: float = -40.0
+
+    # Progressive sampling parameters
+    ps_c: float = 0.03
+    ps_alpha: float = 0.8
+
+    # Value predictions
+    num_value_bins: int = 64
+
+    # Training
+    training_steps: int = int(500e3)
+    checkpoint_interval: int = int(2e3)
+    window_size: int = int(250e3)
+    batch_size: int = 64
+    sequence_length: int = 32
+    lr: float = 1e-4
+    value_weight: float = 0.002
+
+    # Lean server
+    server_address: str = "10.10.25.40"
+    server_port: int = 8000
+
+
 class Player(enum.Enum):
     OR = 1
     AND = 2
@@ -30,6 +66,7 @@ class Player(enum.Enum):
 Action = str | int
 
 State = list[LeanProofBranch]
+
 
 @dataclass
 class Node:
@@ -81,8 +118,10 @@ class Node:
                 self.is_solved = all(child.calculate_solved() for child in self.children.values())
         return self.is_solved
 
+
 class Game:
     """A single episode of interaction with the environment."""
+
     def __init__(self, theorem: str, num_simulations: int | None = None):
         self.theorem = theorem
         # Number of simulations to run.
@@ -100,8 +139,9 @@ class TacticModel:
         self.rng = torch.Generator(device=self.network.get_device())
         self.rng.manual_seed(0)
 
-    def sample_tactic(self, state: State) -> str:
-        assert len(state) == 1, f"expected single branch in state when generating tactic, got {len(state)} - choose one goal first"
+    def sample_tactic(self, state: State) -> str | None:
+        assert len(
+            state) == 1, f"expected single branch in state when generating tactic, got {len(state)} - choose one goal first"
         device = self.network.get_device()
         assert device.type == "cuda"
 
@@ -109,9 +149,14 @@ class TacticModel:
         tokens = self.tokenizer(state_str + "\n<|tactic|>", prepend=self.tokenizer.get_bos_token_id())
         seed = torch.randint(torch.iinfo(torch.int32).max, (1,), device=device, generator=self.rng).item()
         with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-            sample_toks, masks = self.engine.generate_batch(tokens, num_samples=1, min_tokens=1, max_tokens=64, seed=seed)
+            sample_toks, masks = self.engine.generate_batch(
+                tokens, num_samples=1, min_tokens=1, max_tokens=64, seed=seed
+            )
         tactic_toks = [token for token, mask in zip(sample_toks[0], masks[0]) if mask == 1]
-        return self.tokenizer.decode(tactic_toks)
+        tactic = self.tokenizer.decode(tactic_toks)
+        if "sorry" in tactic or "admit" in tactic:
+            return None
+        return tactic
 
     @classmethod
     def create(cls) -> Self:
@@ -122,6 +167,153 @@ class TacticModel:
         model, tokenizer, _ = load_model(source, device, phase="eval", model_tag=model_tag)
         engine = Engine(model, tokenizer)
         return cls(model, tokenizer, engine)
+
+
+def run_mcts(config: Config, game: Game, model: TacticModel):
+    root = game.root
+    for i in range(game.num_simulations):
+        node = root
+        search_path = [node]
+
+        while node.expanded() and not progressive_sample(node, config):
+            _, node = select_child(config, node)
+            search_path.append(node)
+
+        assert node.state is not None
+        tactic = model.sample_tactic(node.state)  # TODO: sample more tactics
+        tactic_logprobs = [1.0]  # TODO: use the actual action logprobs
+        expand_node(node, [tactic], tactic_logprobs, config.prior_temperature)
+        backpropagate(
+            search_path,
+            1.0,  # TODO: use the actual value
+            config,
+        )
+        if root.is_optimal:
+            break
+
+
+def progressive_sample(node: Node, config: Config) -> bool:
+    """Whether to expand a node in the search tree again (progressive sampling)."""
+    return (
+        node.to_play == Player.OR
+        and node.evaluations <= config.ps_c * node.visit_count ** config.ps_alpha
+    )
+
+
+def select_child(config: Config, node: Node) -> tuple[Action, Node]:
+    """Selects the child with the highest UCB score."""
+    _, action, child = max(
+        (ucb_score(config, node, child), action, child)
+        for action, child in node.children.items()
+    )
+    return action, child
+
+
+# The score for a node is based on its value, plus an exploration bonus based on
+# the prior.
+def ucb_score(config: Config, parent: Node, child: Node) -> float:
+    pb_c = (
+            math.log((parent.visit_count + config.pb_c_base + 1) / config.pb_c_base)
+            + config.pb_c_init
+    )
+    pb_c *= math.sqrt(parent.visit_count) / (child.visit_count + 1)
+
+    # Due to progressive sampling, we normalise priors here.
+    prior_score = pb_c * child.prior / parent.prior_sum()
+    if child.visit_count > 0:
+        value = child.reward + child.value()
+        value_score = config.value_discount ** (- 1 - value)
+    else:
+        value_score = 0  # TODO: this is from the official pseudocode, but probably could be improved
+
+    if parent.to_play == Player.AND:
+        # Invert value score for AND nodes.
+        value_score = 1 - value_score
+        if child.is_optimal:
+            # Avoid re-selecting proven subgoals.
+            value_score = -1e9
+    return prior_score + value_score
+
+
+# We expand a node using the value and sampled actions obtained from the neural
+# network. Immediately attempt the actions in the environment.
+def expand_node(
+        node: Node,
+        actions: list[str],
+        action_logprobs: list[float],
+        temperature: float,
+):
+    node.evaluations += 1
+    policy = {
+        a: math.exp(logprob / temperature)
+        for a, logprob in zip(actions, action_logprobs)
+    }
+    for action, p in policy.items():
+        # Check if action is duplicate.
+        if action in node.children:
+            node.children[action].prior += p  # TODO: wtf is this?
+            continue
+        # Immediately apply the actions in the environment.
+        assert len(node.state) == 1
+        branch = node.state[0]
+        new_branches = branch.try_apply_tactic(action)
+        if not new_branches.is_success():
+            # Invalid action encountered.
+            continue
+        new_branches = [b for b in new_branches.value if not b.state.is_solved()]
+        child = Node(
+            action=action,
+            prior=p,
+            state=new_branches,
+            to_play=Player.AND if len(new_branches) > 1 else Player.OR,
+            reward=None,  # TODO!!!
+        )
+        node.is_solved |= len(new_branches) == 0
+        node.children[action] = child
+        if len(new_branches) > 1:
+            # For AND nodes, immediately add children with pseudo-actions to focus on each goal.
+            for i, branch in enumerate(new_branches):
+                grandchild = Node(
+                    action=i,
+                    prior=1.0 / len(new_branches),
+                    state=[branch],
+                    to_play=Player.OR,
+                    reward=None,  # TODO!!!
+                )
+                child.children[i] = grandchild
+
+# At the end of a simulation, we propagate the evaluation all the way up the
+# tree to the root.
+def backpropagate(
+        search_path: list[Node],
+        value: float,
+        config: Config,
+):
+    if len(search_path[-1].children) == 0:
+        value = config.no_legal_actions_value
+    is_solved = False
+    for ix, node in reversed(list(enumerate(search_path))):
+        node.value_sum += value
+        node.visit_count += 1
+        if node.to_play == Player.AND:
+            is_solved = all(child.is_solved for child in node.children.values())
+        else:
+            is_solved |= node.is_solved
+        node.is_solved = is_solved
+
+        if ix > 0 and search_path[ix - 1].to_play == Player.AND:
+            value = backprop_value_towards_min(search_path[ix - 1])
+        else:
+            value = node.reward + value
+
+
+def backprop_value_towards_min(node):
+    """Computes the value for an AND node by propagating the min value from children, corresponding to the longest/hardest unsolved proof branch."""
+    value = 1
+    for child in node.children.values():
+        if not child.is_solved and child.visit_count > 0:
+            value = min(value, child.value())
+    return value
 
 
 def run_bfs(game: Game, model: TacticModel):
@@ -136,6 +328,8 @@ def run_bfs(game: Game, model: TacticModel):
         for retry_idx in range(10):
             # print("Generating ..." + f" (retry {retry_idx})" if retry_idx != 0 else "")
             tactic = model.sample_tactic(node.state)
+            if tactic is None:
+                continue
             # print(f"Trying tactic:\n'{tactic}'")
             new_branches = branch.try_apply_tactic(tactic)
             if new_branches.is_success():

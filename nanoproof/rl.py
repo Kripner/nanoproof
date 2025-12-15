@@ -4,45 +4,11 @@ from dataclasses import dataclass, field
 import torch
 from leantree.repl_adapter.server import LeanClient
 
-from nanoproof.search.bfs import Node, Player, Game, run_bfs, TacticModel, Action, State
+from nanoproof.search.bfs import Node, Player, Game, run_bfs, TacticModel, Action, State, Config
 from nanoproof.data.leanworkbook import list_theorems
 
 
 
-@dataclass
-class Config:
-    # Acting
-    num_simulations: int = 50
-    num_actors: int = 4
-
-    # UCB formula
-    pb_c_base: int = 3200
-    pb_c_init: float = 0.01
-    value_discount: float = 0.98
-    prior_temperature: float = 1.5
-
-    # Other MCTS parameters
-    no_legal_actions_value: float = -40.0
-
-    # Progressive sampling parameters
-    ps_c: float = 0.03
-    ps_alpha: float = 0.8
-
-    # Value predictions
-    num_value_bins: int = 64
-
-    # Training
-    training_steps: int = int(500e3)
-    checkpoint_interval: int = int(2e3)
-    window_size: int = int(250e3)
-    batch_size: int = 64
-    sequence_length: int = 32
-    lr: float = 1e-4
-    value_weight: float = 0.002
-
-    # Lean server
-    server_address: str = "10.10.25.40"
-    server_port: int = 8000
 
 class TheoremsSampler:
     def __init__(self, seed: int | None = 0):
@@ -105,6 +71,9 @@ class ReplayBuffer:
 def run_actor(config: Config, model: TacticModel, replay_buffer: ReplayBuffer, theorems_sampler: TheoremsSampler):
     while True:
         game = play_game(config, model, theorems_sampler)
+        if game is None:
+            print("Invalid theorem statement.")
+            continue
         if game.root.is_solved:
             replay_buffer.save_game(game)
         else:
@@ -115,13 +84,16 @@ def run_actor(config: Config, model: TacticModel, replay_buffer: ReplayBuffer, t
 # BFS/MCTS to find a proof. If one is found, we extract from the search tree the
 # state-tactic-value transitions in the proof, which are added to a replay
 # buffer for training.
-def play_game(config: Config, model: TacticModel, theorems_sampler: TheoremsSampler) -> Game:
+def play_game(config: Config, model: TacticModel, theorems_sampler: TheoremsSampler) -> Game | None:
     theorem = theorems_sampler.sample_theorem()
     print(f"Playing game for theorem:\n{theorem}\n")
 
     client = LeanClient(config.server_address, config.server_port)
     with client.get_process() as env:
         init_branch = env.proof_from_sorry(theorem)
+        if not init_branch.is_success():
+            return None
+        init_branch = init_branch.value
         game = Game(theorem, config.num_simulations)
 
         game.root = Node(
