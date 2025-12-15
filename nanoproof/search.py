@@ -21,8 +21,6 @@ from nanoproof.tokenizer import HuggingFaceTokenizer
 leanserver --project-path ~/troja/nanoproof/leantree_project/ --repl-exe ~/repos/leantree/lean-repl/.lake/build/bin/repl --imports Mathlib FormalConjectures.ForMathlib.Analysis.SpecialFunctions.NthRoot FormalConjectures.Util.Answer --max-processes 2 --address=<PUBLIC_IP> --log-level=DEBUG
 """
 
-# TODO: when a tactic does not change the state, discard it
-
 @dataclass
 class Config:
     # Acting

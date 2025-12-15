@@ -1,6 +1,5 @@
 import random
 
-import torch
 from leantree.repl_adapter.server import LeanClient
 
 from nanoproof.search import Node, Player, Game, run_bfs, run_mcts, TacticModel, Action, State, Config
@@ -34,7 +33,7 @@ class ReplayBuffer:
         self.buffer.extend(transitions)
         self.buffer = self.buffer[-self.window_size:]
 
-    def _extract_transitions(self, node: Node) -> list[tuple[torch.Tensor, torch.Tensor, float]]:
+    def _extract_transitions(self, node: Node) -> list[tuple[str, str, float]]:
         """Extracts transitions from a proof."""
         assert node.to_play == Player.OR
         if not node.is_solved:
@@ -57,17 +56,15 @@ class ReplayBuffer:
         # select the shortest tactic
         return min(actions, key=lambda a: len(a))
 
-    def sample_batch(self) -> list[tuple[torch.Tensor, torch.Tensor, float]]:
-        return [self.sample_transition() for _ in range(self.batch_size)]
-
-    def sample_transition(self) -> tuple[torch.Tensor, torch.Tensor, float]:
+    def sample_transition(self) -> tuple[str, str, float]:
         ...
 
 
 # Each acting job is independent of all others; it takes the latest network
 # snapshot, produces a game and makes it available to the learner by writing it
 # to a shared replay buffer.
-def run_actor(config: Config, model: TacticModel, replay_buffer: ReplayBuffer, theorems_sampler: TheoremsSampler):
+def run_actor(to_collect: int, config: Config, model: TacticModel, replay_buffer: ReplayBuffer, theorems_sampler: TheoremsSampler):
+    collected = 0
     while True:
         game = play_game(config, model, theorems_sampler)
         if game is None:
@@ -75,8 +72,9 @@ def run_actor(config: Config, model: TacticModel, replay_buffer: ReplayBuffer, t
             continue
         if game.root.is_solved:
             replay_buffer.save_game(game)
-        else:
-            print("pešek\n--")
+            collected += 1
+            if collected >= to_collect:
+                return
 
 
 # Each game is produced by starting from the initial Lean state, and executing
@@ -116,17 +114,6 @@ def play_game(config: Config, model: TacticModel, theorems_sampler: TheoremsSamp
             pass
 
         return game
-
-
-# def train_network(config: Config, storage: SharedModelStorage, replay_buffer: ReplayBuffer):
-#     network = Network(config)
-
-#     for i in range(config.training_steps):
-#         if i % config.checkpoint_interval == 0:
-#             storage.save_params(i, network.params)
-#         batch = replay_buffer.sample_batch()
-#         network.update(batch)
-#     storage.save_params(config.training_steps, network.params)
 
 
 def _main():
