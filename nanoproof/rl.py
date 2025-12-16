@@ -34,7 +34,8 @@ device_batch_size = 8 # (maybe) max to avoid OOM (on A100 40GB)
 # data
 fraction_sft = 0.1  # 10% of data will come from Mathlib (leantree), 90% from replay buffer
 collect_every = 100  # how many steps to train between RL data collections
-collect_steps = 100  # how many proofs to collect per actor
+# collect_steps = 100  # how many proofs to collect per actor
+collect_steps = 2  # TODO
 # optimization
 num_epochs = 1
 num_iterations = -1 # override number of iterations (-1 = disable, use num_epochs to derive it)
@@ -46,7 +47,6 @@ weight_decay = 0.0
 init_lr_frac = 0.02
 # evaluation and logging there of
 eval_every = 100
-eval_steps = 100
 # eval_metrics_every = 200
 sample_every = 100
 eval_metrics_max_problems = 1024
@@ -94,7 +94,7 @@ def train_generator():
     rng = random.Random(rank_seed)
     mathlib_iter = iter(mathlib_train)
     while True:
-        assert len(replay_buffer.buffer) > 100
+        # assert len(replay_buffer.buffer) > 100  # TODO
         if rng.random() < fraction_sft:
             try:
                 yield next(mathlib_iter)
@@ -136,7 +136,8 @@ while True:
     if step % eval_every == 0:
         # TODO: also evaluate on a val split of LeanWorkBook
         model.eval()
-        minif2f_results = eval_minif2f(tactic_model, max_theorems=eval_steps)
+        minif2f_results = eval_minif2f(tactic_model, max_theorems=64)
+        # minif2f_results = eval_minif2f(tactic_model, max_theorems=2)  # TODO
         print0(f"Step {step:05d} | minif2f success rate: {minif2f_results['success_rate']:.4%} ({minif2f_results['solved']}/{minif2f_results['total']}) | error rate: {minif2f_results['error_rate']:.4%}")
         wandb_run.log({
             "step": step,
@@ -183,12 +184,12 @@ while True:
     # logging
     train_loss_item = train_loss.item()
     num_tokens_item = num_tokens.item()
-    print0(f"Step {step:05d} | Training loss: {train_loss_item:.6f} | num_tokens: {num_tokens_item:,} | replay_buffer_size: {len(replay_buffer)}")
+    print0(f"Step {step:05d} | Training loss: {train_loss_item:.6f} | num_tokens: {num_tokens_item:,} | replay_buffer_size: {len(replay_buffer.buffer)}")
     wandb_run.log({
         "step": step,
         "train_loss": train_loss_item,
         "num_tokens": num_tokens_item,
-        "replay_buffer_size": len(replay_buffer),
+        "replay_buffer_size": len(replay_buffer.buffer),
     })
 
     step += 1

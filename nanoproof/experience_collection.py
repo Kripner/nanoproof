@@ -11,7 +11,7 @@ from nanoproof.data.leanworkbook import list_theorems
 
 class TheoremsSampler:
     def __init__(self, seed: int | None = 0):
-        self.theorems = list_theorems()
+        self.theorems = list_theorems(split="train")
         self.rng = random.Random(seed)
 
     def sample_theorem(self) -> str:
@@ -102,11 +102,13 @@ def run_actor(total_to_collect: int, config: Config, model: TacticModel, replay_
 
         game = play_game(config, model, theorems_sampler)
         if game is None:
-            print("Invalid theorem statement.")
+            # print("Invalid theorem statement.")
             continue
         if game.root.is_solved:
             replay_buffer.save_game(game)
             collected += 1
+        else:
+            print("pešek")
 
 
 # Each game is produced by starting from the initial Lean state, and executing

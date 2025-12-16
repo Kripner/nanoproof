@@ -443,7 +443,7 @@ def _main():
     model = TacticModel.create()
 
     time_start = time.time()
-    theorems = list_theorems()
+    theorems = list_theorems(split="train")
     print(f"Retrieved {len(theorems)} theorems in {time.time() - time_start} seconds")
     theorem = theorems[1]
     print(theorem + "\n-----")

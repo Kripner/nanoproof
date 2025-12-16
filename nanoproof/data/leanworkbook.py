@@ -1,6 +1,7 @@
 import os
 import json
 import requests
+import random
 
 from tqdm import tqdm
 
@@ -47,18 +48,31 @@ def download_dataset():
                 os.remove(path)
         raise
 
-def list_theorems():
+def list_theorems(split: str):
+    assert split in ["train", "val"], f"Invalid split: {split}. Must be 'train' or 'val'."
+    
     json_path = os.path.join(DATA_DIR, "lean_workbook.json")
     if not os.path.exists(json_path):
         raise FileNotFoundError(f"Lean-Workbook dataset not found at {json_path}. Download it first.")
     with open(json_path, "r") as f:
         data = json.load(f)
-    # Select theorems that have been proven by InternLM Prover
-    return [item["formal_statement"] for item in data if item["proof"]]
-
+    # select theorems that have been proven by InternLM Prover
+    theorems = [item["formal_statement"] for item in data if item["proof"]]
+    
+    # shuffle with fixed seed and split into train/val
+    random.Random(0).shuffle(theorems)
+    
+    if split == "val":
+        return theorems[-500:]
+    else:  # train
+        return theorems[:-500]
 
 if __name__ == "__main__":
     download_dataset()
-    theorems = list_theorems()
-    print(f"Retrieved {len(theorems)} theorems")
-    print(theorems[0])
+    train_theorems = list_theorems(split="train")
+    val_theorems = list_theorems(split="val")
+    print(f"Retrieved {len(train_theorems)} train theorems")
+    print(train_theorems[0])
+    print()
+    print(f"Retrieved {len(val_theorems)} val theorems")
+    print(val_theorems[0])

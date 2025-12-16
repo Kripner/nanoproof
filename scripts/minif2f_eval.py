@@ -22,9 +22,9 @@ def eval_minif2f(tactic_model: TacticModel, max_theorems=None, split="Valid", us
     theorems = minif2f.list_theorems(split)
     if max_theorems is not None:
         theorems = theorems[:max_theorems]
+    print0(f"Evaluating on {len(theorems)} theorems from MiniF2F {split} (distributed across {ddp_world_size} ranks)")
     theorem_indices = list(range(ddp_rank, len(theorems), ddp_world_size))
     theorems = [theorems[i] for i in theorem_indices]
-    print0(f"Evaluating on {len(theorems)} theorems from MiniF2F {split} (distributed across {ddp_world_size} ranks)")
 
     config = Config()
     client = LeanClient(config.server_address, config.server_port)
@@ -42,6 +42,7 @@ def eval_minif2f(tactic_model: TacticModel, max_theorems=None, split="Valid", us
             init_branch = env.proof_from_sorry(theorem)
             if not init_branch.is_success():
                 error_count += 1
+                print0(f"Error on minif2f theorem: {theorem}\n... error: {init_branch.error}")
                 continue
             init_branch = init_branch.value
             
