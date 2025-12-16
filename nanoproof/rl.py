@@ -22,8 +22,6 @@ from nanoproof.data import minif2f
 from nanoproof.data import leanworkbook
 from scripts.prover_eval import eval_success_rate
 
-# TODO: log times (data collection, training, evaluation) to see where is the bottleneck
-#   + more detailed times (Lean time, model time)
 # TODO: make the search much more efficient via batching/async
 # TODO: if tactic application results in a state that already is on the path from root, skip the tactic (otherwise we sometimes get stuck in loop of eg. rw [add_comm])
 
@@ -42,13 +40,12 @@ dtype = "bfloat16"
 device_batch_size = 8 # (maybe) max to avoid OOM (on A100 40GB)
 # data
 fraction_sft = 0.1  # 10% of data will come from Mathlib (leantree), 90% from replay buffer
-collect_every = 10  # how many steps to train between RL data collections
-collect_transitions = -1  # how many proof transitions to collect in one collection  # TODO: 
+collect_every = 1  # how many steps to train between RL data collections
+collect_transitions = -1  # how many proof transitions to collect in one collection
 # optimization
 num_epochs = 1
 num_iterations = -1 # override number of iterations (-1 = disable, use num_epochs to derive it)
 target_examples_per_step = 512
-# 512 * 10 
 unembedding_lr = 0.004
 embedding_lr = 0.2
 matrix_lr = 0.02
@@ -107,9 +104,6 @@ print0(f"Collect every: {collect_every}")
 collect_transitions = target_examples_per_step * collect_every
 print0(f"=> Setting collect_transitions: {collect_transitions}")
 
-collect_transitions = 4  # TODO!!!
-
-
 # -----------------------------------------------------------------------------
 # DataLoader
 
@@ -133,7 +127,7 @@ def train_generator():
     rng = random.Random(rank_seed)
     mathlib_iter = iter(mathlib_train)
     while True:
-        # assert len(replay_buffer.buffer) > 100  # TODO
+        assert len(replay_buffer.buffer) > 100
         if rng.random() < fraction_sft:
             try:
                 yield next(mathlib_iter)
