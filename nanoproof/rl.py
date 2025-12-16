@@ -15,11 +15,14 @@ from nanoproof.data.leantree import iter_data
 from nanoproof.data.leantree_dataloader import rl_data_generator
 from nanoproof.experience_collection import ReplayBuffer, TheoremsSampler, Config, run_actor
 from nanoproof.search import TacticModel
-from scripts.minif2f_eval import eval_minif2f
+from nanoproof.data import minif2f
+from nanoproof.data import leanworkbook
+from scripts.prover_eval import eval_success_rate
 
-# TODO: log times to see where is the bottleneck
+# TODO: log times (data collection, training, evaluation) to see where is the bottleneck
+# TODO: save all proofs found during evaluation
 # TODO: if tactic application results in a state that already is on the path from root, skip the tactic (otherwise we sometimes get stuck in loop of eg. rw [add_comm])
-# TODO: store all transitions in a file
+# TODO: store all transitions in a file, allow resuming
 
 # TODO: (maybe) try removing each tactic and if the proof is still valid, do not add the transition to the replay buffer
 
@@ -34,8 +37,7 @@ device_batch_size = 8 # (maybe) max to avoid OOM (on A100 40GB)
 # data
 fraction_sft = 0.1  # 10% of data will come from Mathlib (leantree), 90% from replay buffer
 collect_every = 100  # how many steps to train between RL data collections
-# collect_steps = 100  # how many proofs to collect per actor
-collect_steps = 2  # TODO
+collect_steps = 100  # how many proofs to collect per actor
 # optimization
 num_epochs = 1
 num_iterations = -1 # override number of iterations (-1 = disable, use num_epochs to derive it)
@@ -94,7 +96,7 @@ def train_generator():
     rng = random.Random(rank_seed)
     mathlib_iter = iter(mathlib_train)
     while True:
-        # assert len(replay_buffer.buffer) > 100  # TODO
+        assert len(replay_buffer.buffer) > 100
         if rng.random() < fraction_sft:
             try:
                 yield next(mathlib_iter)
@@ -134,14 +136,23 @@ while True:
         replay_buffer.synchronize()
 
     if step % eval_every == 0:
-        # TODO: also evaluate on a val split of LeanWorkBook
         model.eval()
-        minif2f_results = eval_minif2f(tactic_model, max_theorems=64)
-        # minif2f_results = eval_minif2f(tactic_model, max_theorems=2)  # TODO
-        print0(f"Step {step:05d} | minif2f success rate: {minif2f_results['success_rate']:.4%} ({minif2f_results['solved']}/{minif2f_results['total']}) | error rate: {minif2f_results['error_rate']:.4%}")
+
+        minif2f_theorems = minif2f.list_theorems(split="Valid")
+        minif2f_theorems = minif2f_theorems[:64]
+        print0(f"Evaluating on {len(minif2f_theorems)} theorems from MiniF2F")
+        minif2f_results = eval_success_rate(tactic_model, minif2f_theorems)
+
+        leanworkbook_theorems = leanworkbook.list_theorems(split="val")
+        leanworkbook_theorems = leanworkbook_theorems[:64]
+        print0(f"Evaluating on {len(leanworkbook_theorems)} theorems from LeanWorkBook")
+        leanworkbook_results = eval_success_rate(tactic_model, leanworkbook_theorems)
+
+        print0(f"Step {step:05d} | minif2f: {minif2f_results['success_rate']:.4%} ({minif2f_results['solved']}/{minif2f_results['total']}, with {minif2f_results['errors']} errors) | leanworkbook: {leanworkbook_results['success_rate']:.4%} ({leanworkbook_results['solved']}/{leanworkbook_results['total']}, with {leanworkbook_results['errors']} errors)")
         wandb_run.log({
             "step": step,
-            "minif2f": minif2f_results['success_rate'],
+            "minif2f_val": minif2f_results['success_rate'],
+            "leanworkbook_val": leanworkbook_results['success_rate'],
         })
         model.train()
 

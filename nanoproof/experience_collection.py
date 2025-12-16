@@ -119,6 +119,12 @@ def play_game(config: Config, model: TacticModel, theorems_sampler: TheoremsSamp
     theorem = theorems_sampler.sample_theorem()
     client = LeanClient(config.server_address, config.server_port)
     with client.get_process() as env:
+        env.send_command("""
+            open scoped Real
+            open scoped Nat
+            open scoped Topology
+            open scoped Polynomial
+        """)
         init_branch = env.proof_from_sorry(theorem)
         if not init_branch.is_success():
             return None

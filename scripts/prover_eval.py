@@ -8,21 +8,18 @@ from leantree.repl_adapter.server import LeanClient
 
 from nanoproof.common import compute_init, compute_cleanup, print0, is_ddp, autodetect_device_type, get_dist_info
 from nanoproof.data import minif2f
+from nanoproof.data import leanworkbook
 from nanoproof.search import run_mcts, Config, Game, Node, Player, TacticModel
 from nanoproof.checkpoints import load_model
 from nanoproof.engine import Engine
 
 @torch.inference_mode()
-def eval_minif2f(tactic_model: TacticModel, max_theorems=None, split="Valid", use_tqdm=False):
+def eval_success_rate(tactic_model: TacticModel, theorems=None, use_tqdm=False):
     """
     Evaluates the success rate of the model on the MiniF2F benchmark.
     Returns a dictionary with 'success_rate', 'solved', and 'total'.
     """
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
-    theorems = minif2f.list_theorems(split)
-    if max_theorems is not None:
-        theorems = theorems[:max_theorems]
-    print0(f"Evaluating on {len(theorems)} theorems from MiniF2F {split} (distributed across {ddp_world_size} ranks)")
     theorem_indices = list(range(ddp_rank, len(theorems), ddp_world_size))
     theorems = [theorems[i] for i in theorem_indices]
 
@@ -34,6 +31,12 @@ def eval_minif2f(tactic_model: TacticModel, max_theorems=None, split="Valid", us
     
     device = tactic_model.network.get_device()
     with client.get_process() as env:
+        env.send_command("""
+            open scoped Real
+            open scoped Nat
+            open scoped Topology
+            open scoped Polynomial
+        """)
         iterator = zip(theorem_indices, theorems)
         if use_tqdm:
             iterator = tqdm(iterator, total=len(theorems), desc=f"Rank {ddp_rank}", position=ddp_rank)
@@ -42,7 +45,7 @@ def eval_minif2f(tactic_model: TacticModel, max_theorems=None, split="Valid", us
             init_branch = env.proof_from_sorry(theorem)
             if not init_branch.is_success():
                 error_count += 1
-                print0(f"Error on minif2f theorem: {theorem}\n... error: {init_branch.error}")
+                print0(f"Error on theorem: {theorem}\n... error: {init_branch.error}")
                 continue
             init_branch = init_branch.value
             
@@ -73,30 +76,38 @@ def eval_minif2f(tactic_model: TacticModel, max_theorems=None, split="Valid", us
         "success_rate": success_rate,
         "solved": global_solved,
         "total": global_total,
-        "error": global_error,
+        "errors": global_error,
         "error_rate": error_rate,
     }
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--split", type=str, default="Valid", choices=["Valid", "Test"], help="MiniF2F split to evaluate")
     parser.add_argument("--max-theorems", type=int, default=50, help="Max theorems to evaluate")
     args = parser.parse_args()
 
-
     device_type = autodetect_device_type()
-    ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+    compute_init(device_type)
 
     tactic_model = TacticModel.create()
-    results = eval_minif2f(tactic_model, max_theorems=args.max_theorems, split=args.split, use_tqdm=True)
-    
-    print0("-" * 80)
-    print0(f"Evaluation results for MiniF2F {args.split}")
-    print0(f"Total theorems evaluated: {results['total']}")
-    print0(f"Total solved: {results['solved']}")
-    print0(f"Success rate: {results['success_rate']:.2%}")
-    print0(f"Error rate: {results['error_rate']:.2%}")
-    print0("-" * 80)
+    minif2f_theorems = minif2f.list_theorems(split="Valid")
+    minif2f_theorems = minif2f_theorems[:args.max_theorems]
+    leanworkbook_theorems = leanworkbook.list_theorems(split="val")
+    leanworkbook_theorems = leanworkbook_theorems[:args.max_theorems]
+
+    def print_results(results, name):
+        print0("-" * 80)
+        print0(f"Evaluation results for {name}")
+        print0(f"Success rate: {results['success_rate']:.4%}")
+        print0(f"Solved: {results['solved']}/{results['total']}")
+        print0(f"Errors: {results['errors']}/{results['total']}")
+        print0(f"Error rate: {results['error_rate']:.4%}")
+        print0("-" * 80)
+
+    leanworkbook_results = eval_success_rate(tactic_model, leanworkbook_theorems, use_tqdm=True)
+    print_results(leanworkbook_results, "LeanWorkBook")
+
+    minif2f_results = eval_success_rate(tactic_model, minif2f_theorems, use_tqdm=True)
+    print_results(minif2f_results, "MiniF2F")
 
     compute_cleanup()
 
