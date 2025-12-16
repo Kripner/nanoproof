@@ -1,4 +1,7 @@
 import os
+from datetime import datetime
+import json
+import sys
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import random
@@ -8,7 +11,7 @@ import torch
 import torch.distributed as dist
 from contextlib import nullcontext
 
-from nanoproof.common import compute_init, compute_cleanup, get_base_dir, print0, DummyWandb, autodetect_device_type
+from nanoproof.common import compute_init, compute_cleanup, get_base_dir, print0, DummyWandb, autodetect_device_type, SimpleTimer
 from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
 from nanoproof.data.leantree import iter_data
@@ -20,11 +23,14 @@ from nanoproof.data import leanworkbook
 from scripts.prover_eval import eval_success_rate
 
 # TODO: log times (data collection, training, evaluation) to see where is the bottleneck
-# TODO: save all proofs found during evaluation
+#   + more detailed times (Lean time, model time)
+# TODO: make the search much more efficient via batching/async
 # TODO: if tactic application results in a state that already is on the path from root, skip the tactic (otherwise we sometimes get stuck in loop of eg. rw [add_comm])
-# TODO: store all transitions in a file, allow resuming
 
+# TODO: save all proofs found during evaluation
 # TODO: (maybe) try removing each tactic and if the proof is still valid, do not add the transition to the replay buffer
+#   ... however, then we need to be sure to update the proof states
+# TODO: matchmaker
 
 # -----------------------------------------------------------------------------
 # RL Hyperparameters
@@ -36,12 +42,13 @@ dtype = "bfloat16"
 device_batch_size = 8 # (maybe) max to avoid OOM (on A100 40GB)
 # data
 fraction_sft = 0.1  # 10% of data will come from Mathlib (leantree), 90% from replay buffer
-collect_every = 100  # how many steps to train between RL data collections
-collect_steps = 100  # how many proofs to collect per actor
+collect_every = 10  # how many steps to train between RL data collections
+collect_transitions = -1  # how many proof transitions to collect in one collection  # TODO: 
 # optimization
 num_epochs = 1
 num_iterations = -1 # override number of iterations (-1 = disable, use num_epochs to derive it)
 target_examples_per_step = 512
+# 512 * 10 
 unembedding_lr = 0.004
 embedding_lr = 0.2
 matrix_lr = 0.02
@@ -66,12 +73,42 @@ master_process = ddp_rank == 0
 ptdtype = torch.float32 if dtype == 'float32' else torch.bfloat16
 autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
+# Output directory init
+
+if master_process:
+    base_dir = get_base_dir()
+    timestamp = datetime.now().strftime("%y-%m-%d_%H-%M")
+    output_dirname = f"{timestamp}-{run}"
+    output_dir = os.path.join(base_dir, "rl", output_dirname)
+    if os.path.exists(output_dir):
+        print0(f"Error: Output directory {output_dir} already exists")
+        if ddp:
+            dist.destroy_process_group()
+        sys.exit(1)
+    os.makedirs(output_dir)
+    print0(f"Output directory: {output_dir}")
+else:
+    output_dir = None
+
+if ddp:
+    output_dir_list = [output_dir]
+    dist.broadcast_object_list(output_dir_list, src=0)
+    output_dir = output_dir_list[0]
+
 # wandb logging init
 use_dummy_wandb = run == "dummy" or not master_process
 wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-rl", name=run, config=user_config, save_code=True)
 
 tactic_model = TacticModel.create()
 model = tactic_model.network
+
+print0(f"Target examples per step: {target_examples_per_step}")
+print0(f"Collect every: {collect_every}")
+collect_transitions = target_examples_per_step * collect_every
+print0(f"=> Setting collect_transitions: {collect_transitions}")
+
+collect_transitions = 4  # TODO!!!
+
 
 # -----------------------------------------------------------------------------
 # DataLoader
@@ -96,7 +133,7 @@ def train_generator():
     rng = random.Random(rank_seed)
     mathlib_iter = iter(mathlib_train)
     while True:
-        assert len(replay_buffer.buffer) > 100
+        # assert len(replay_buffer.buffer) > 100  # TODO
         if rng.random() < fraction_sft:
             try:
                 yield next(mathlib_iter)
@@ -127,15 +164,24 @@ for opt in optimizers:
 
 # Go!
 step = 0
+timer = SimpleTimer()
 while True:
     if step % collect_every == 0:
         # collect proofs
+        timer.start("collect")
         model.eval()
-        run_actor(collect_steps, config, tactic_model, replay_buffer, theorems_sampler)
+        actor_timer = run_actor(collect_transitions, config, tactic_model, replay_buffer, theorems_sampler)
+        actor_timer = actor_timer.gather()
+        if master_process:
+            actor_timer.log_times()
         model.train()
+        timer.end("collect")
         replay_buffer.synchronize()
+        with open(os.path.join(output_dir, f"replay_buffer_{step:05d}.json"), "w") as f:
+            json.dump(replay_buffer.buffer, f)
 
     if step % eval_every == 0:
+        timer.start("eval")
         model.eval()
 
         minif2f_theorems = minif2f.list_theorems(split="Valid")
@@ -155,25 +201,26 @@ while True:
             "leanworkbook_val": leanworkbook_results['success_rate'],
         })
         model.train()
+        timer.end("eval")
 
     if step > 0 and step % save_every == 0 and master_process:
-        base_dir = get_base_dir()
-        depth = model.config.n_layer
-        model_tag = f"d{depth}" # base the model tag on the depth of the base model
-        checkpoint_dir = os.path.join(base_dir, "rl_checkpoints", model_tag)
+        checkpoint_dir = os.path.join(output_dir, "checkpoints")
         model_config_kwargs = model.config.__dict__ # slightly naughty, abusing the simplicity of GPTConfig, TODO nicer
         save_checkpoint(
             checkpoint_dir,
             step,
             model.state_dict(),
-            None, # note: we don't bother to save the optimizer state
+            [opt.state_dict() for opt in optimizers], # optimizer states
             {
                 "step": step,
                 "model_config": model_config_kwargs,
-            }
+                "minif2f_val": minif2f_results['success_rate'],
+                "leanworkbook_val": leanworkbook_results['success_rate'],
+            },
+            rank=ddp_rank,
         )
-        print(f"Saved model checkpoint to {checkpoint_dir}")
 
+    timer.start("train")
     # evaluate the gradient
     num_tokens = torch.tensor(0, device=device) # the number of "active" tokens of supervision seen
     for micro_step in range(grad_accum_steps):
@@ -191,16 +238,19 @@ while True:
     for opt in optimizers:
         opt.step()
     model.zero_grad(set_to_none=True)
+    timer.end("train")
 
     # logging
     train_loss_item = train_loss.item()
     num_tokens_item = num_tokens.item()
     print0(f"Step {step:05d} | Training loss: {train_loss_item:.6f} | num_tokens: {num_tokens_item:,} | replay_buffer_size: {len(replay_buffer.buffer)}")
+    timer.log_times()
     wandb_run.log({
         "step": step,
         "train_loss": train_loss_item,
         "num_tokens": num_tokens_item,
         "replay_buffer_size": len(replay_buffer.buffer),
+        **{f"time/{k}": v for k, v in timer.get_times().items()}
     })
 
     step += 1

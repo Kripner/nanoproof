@@ -3,6 +3,7 @@ Common utilities for nanochat.
 """
 
 import os
+import time
 import re
 import logging
 import math
@@ -10,7 +11,7 @@ import urllib.request
 import gc
 from collections import Counter
 from filelock import FileLock
-from typing import Callable, TypeVar
+from typing import Callable, TypeVar, Self
 
 import torch
 import torch.distributed as dist
@@ -312,3 +313,60 @@ def pretty_print_tree(
         trim=max_label_len,
     )
     return pt(root)
+
+class SimpleTimer:
+    def __init__(self):
+        self.times = {}
+        self.start_times = {}
+
+    def start(self, section: str):
+        self.start_times[section] = time.perf_counter()
+
+    def end(self, section: str):
+        if section not in self.start_times:
+            return
+        elapsed = time.perf_counter() - self.start_times.pop(section)
+        self.times[section] = self.times.get(section, 0.0) + elapsed
+
+    def get_times(self) -> dict[str, float]:
+        return self.times
+
+    def log_times(self):
+        if not self.times:
+            return
+        total = sum(self.times.values())
+        print0("Timer results:")
+        max_len = max(len(k) for k in self.times)
+        for k, v in sorted(self.times.items(), key=lambda x: x[1], reverse=True):
+            pct = (v / total * 100) if total > 0 else 0
+            print0(f"  {k:<{max_len}} : {v:.4f}s ({pct:.1f}%)")
+
+    def gather(self) -> Self:
+        """Gather data from all ranks and return a new SimpleTimer with the aggregated (summed) times."""
+        if not (dist.is_available() and dist.is_initialized()):
+            new_timer = SimpleTimer()
+            new_timer.times = self.times.copy()
+            return new_timer
+            
+        print0("Gathering timer data from all ranks...")
+        world_size = dist.get_world_size()
+        local_times = self.times
+        all_times_list = [None for _ in range(world_size)]
+        dist.all_gather_object(all_times_list, local_times)
+        
+        aggregated_times = {}
+        for rank_times in all_times_list:
+            if rank_times is None: continue
+            for k, v in rank_times.items():
+                aggregated_times[k] = aggregated_times.get(k, 0.0) + v
+        
+        new_timer = SimpleTimer()
+        new_timer.times = aggregated_times
+        return new_timer
+
+class DummyTimer(SimpleTimer):
+    def start(self, section: str): pass
+    def end(self, section: str): pass
+    def get_times(self) -> dict[str, float]: return {}
+    def log_times(self): pass
+    def gather(self) -> Self: return DummyTimer()

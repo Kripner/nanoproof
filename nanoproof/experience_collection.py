@@ -7,7 +7,7 @@ from leantree.repl_adapter.server import LeanClient
 
 from nanoproof.search import Node, Player, Game, run_bfs, run_mcts, TacticModel, Action, State, Config
 from nanoproof.data.leanworkbook import list_theorems
-
+from nanoproof.common import SimpleTimer
 
 class TheoremsSampler:
     def __init__(self, seed: int | None = 0):
@@ -28,14 +28,17 @@ class ReplayBuffer:
         self.buffer = []
         self.rng = random.Random(seed)
 
-    def save_game(self, game: Game):
+    def save_game(self, game: Game) -> int:
         transitions = self._extract_transitions(game.root)
         print("! New transitions !")
         for transition in transitions:
             print(transition)
-        print(f"Local buffer size: {len(self.local_buffer)}")
 
         self.local_buffer.extend(transitions)
+
+        print(f"Local buffer size: {len(self.local_buffer)}")
+
+        return len(transitions)
 
     def synchronize(self):
         ddp, _, _, world_size = get_dist_info()
@@ -83,39 +86,37 @@ class ReplayBuffer:
 # snapshot, produces a game and makes it available to the learner by writing it
 # to a shared replay buffer.
 @torch.inference_mode()
-def run_actor(total_to_collect: int, config: Config, model: TacticModel, replay_buffer: ReplayBuffer, theorems_sampler: TheoremsSampler):
+def run_actor(total_to_collect: int, config: Config, model: TacticModel, replay_buffer: ReplayBuffer, theorems_sampler: TheoremsSampler) -> SimpleTimer:
     collected = 0
     ddp, _, _, world_size = get_dist_info()
-    
+    timer = SimpleTimer()
+
     while True:
         # Check if we have collected enough proofs globally
         if ddp:
-            # We use a tensor to aggregate the count across all processes
             collected_tensor = torch.tensor([collected], dtype=torch.long, device=model.network.get_device())
             dist.all_reduce(collected_tensor, op=dist.ReduceOp.SUM)
             global_collected = collected_tensor.item()
         else:
             global_collected = collected
-
         if global_collected >= total_to_collect:
-            return
+            break
 
-        game = play_game(config, model, theorems_sampler)
+        game = play_game(config, model, theorems_sampler, timer)
         if game is None:
             # print("Invalid theorem statement.")
             continue
         if game.root.is_solved:
-            replay_buffer.save_game(game)
-            collected += 1
-        else:
-            print("pešek")
+            collected += replay_buffer.save_game(game)
+    
+    return timer
 
 
 # Each game is produced by starting from the initial Lean state, and executing
 # BFS/MCTS to find a proof. If one is found, we extract from the search tree the
 # state-tactic-value transitions in the proof, which are added to a replay
 # buffer for training.
-def play_game(config: Config, model: TacticModel, theorems_sampler: TheoremsSampler) -> Game | None:
+def play_game(config: Config, model: TacticModel, theorems_sampler: TheoremsSampler, timer: SimpleTimer) -> Game | None:
     theorem = theorems_sampler.sample_theorem()
     client = LeanClient(config.server_address, config.server_port)
     with client.get_process() as env:
@@ -140,7 +141,7 @@ def play_game(config: Config, model: TacticModel, theorems_sampler: TheoremsSamp
         )
 
         # success = run_bfs(game, model)
-        run_mcts(config, game, model)
+        run_mcts(config, game, model, timer)
         if game.root.is_solved:
             # TODO: Perform final check to ensure the proof is valid.
             # game.root.is_solved = final_check(game)
@@ -160,7 +161,8 @@ def _main():
     model = TacticModel.create()
     replay_buffer = ReplayBuffer(config)
     theorems_sampler = TheoremsSampler()
-    run_actor(config, model, replay_buffer, theorems_sampler)
+    timer = run_actor(config, model, replay_buffer, theorems_sampler)
+    timer.log_times()
 
 
 if __name__ == "__main__":

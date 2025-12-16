@@ -10,7 +10,7 @@ import torch
 from leantree import LeanProject, LeanLibrary, LeanLibraries, LeanProofState
 from leantree.repl_adapter.server import LeanClient, LeanProofBranch
 
-from nanoproof.common import compute_init, compute_cleanup, get_base_dir, print0, DummyWandb, autodetect_device_type, pretty_print_tree
+from nanoproof.common import compute_init, compute_cleanup, get_base_dir, print0, DummyWandb, autodetect_device_type, pretty_print_tree, SimpleTimer, DummyTimer
 from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
 from nanoproof.data.leanworkbook import list_theorems
@@ -53,7 +53,7 @@ class Config:
     value_weight: float = 0.002
 
     # Lean server
-    server_address: str = "10.10.25.39"
+    server_address: str = "10.10.25.34"
     server_port: int = 8000
 
 
@@ -189,7 +189,9 @@ class TacticModel:
         return cls(model, tokenizer, engine)
 
 
-def run_mcts(config: Config, game: Game, model: TacticModel):
+def run_mcts(config: Config, game: Game, model: TacticModel, timer: SimpleTimer | None = None):
+    if timer is None:
+        timer = DummyTimer()
     root = game.root
     for i in range(game.num_simulations):
         node = root
@@ -200,9 +202,14 @@ def run_mcts(config: Config, game: Game, model: TacticModel):
             search_path.append(node)
 
         assert node.state is not None
+        timer.start("sample")
         tactics = model.sample_tactic(node.state, config.num_sampled_tactics)
+        timer.end("sample")
         tactic_logprobs = [1.0] * len(tactics)  # TODO: use the actual action logprobs
+
+        timer.start("expand")
         expand_node(node, tactics, tactic_logprobs, config.prior_temperature)
+        timer.end("expand")
         backpropagate(
             search_path,
             1.0,  # TODO: use the actual value
