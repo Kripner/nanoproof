@@ -25,6 +25,12 @@ from scripts.prover_eval import eval_success_rate
 # TODO: make the search much more efficient via batching/async
 # TODO: if tactic application results in a state that already is on the path from root, skip the tactic (otherwise we sometimes get stuck in loop of eg. rw [add_comm])
 
+"""
+Timer results:                                                                                                                                                                   
+  expand : 5297.9417s (67.0%)                                                                                                                                                    
+  sample : 2612.2757s (33.0%)
+"""
+
 # TODO: save all proofs found during evaluation
 # TODO: (maybe) try removing each tactic and if the proof is still valid, do not add the transition to the replay buffer
 #   ... however, then we need to be sure to update the proof states

@@ -64,7 +64,7 @@ class ReplayBuffer:
             assert len(node.state) == 1
             action = self._select_optimal_action(node)
             assert isinstance(action, str)
-            transitions.append((str(node.state[0].state), action, node.value_target))
+            transitions.append((str(node.state[0].state).strip(), action.strip(), node.value_target))
             node = node.children[action]
         if node.to_play == Player.AND:
             for _, child in node.children.items():
