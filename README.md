@@ -10,7 +10,7 @@ official AlphaProof pseudocode (together with many open-source datasets and tool
 - a simple RL training loop
 - evaluation script for success rate on MiniF2F and Lean-Workbook
 
-The best score achieved so far is **32.8% on MiniF2F** (more precisely the subset of its first 64 theorems).
+The best score achieved so far is **32.8% on MiniF2F** (more precisely on the subset of its first 64 theorems).
 
 This project is in early stages and still a bit hard to work with. If you want to contribute, the best way to start is to write me an email!
 
@@ -35,7 +35,7 @@ This project is in early stages and still a bit hard to work with. If you want t
 # Ideas
 
 - try training on state_after as well, just to give the model more training signal (it was done in some paper, maybe GPT-f)
-- datasets: LEAN-Github (https://huggingface.co/datasets/internlm/Lean-Github), LeanUniverse (https://github.com/facebookresearch/LeanUniverse), Lean-Workbook, DeepSeek-Prover-V2 dataset
+- try proving the negation in each node (if critic deems it likely to succeed)
 
 # Setup
 
