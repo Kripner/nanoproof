@@ -47,7 +47,7 @@ device_batch_size = 8 # (maybe) max to avoid OOM (on A100 40GB)
 # data
 fraction_sft = 0.1  # 10% of data will come from Mathlib (leantree), 90% from replay buffer
 collect_every = 1  # how many steps to train between RL data collections
-collect_transitions = -1  # how many proof transitions to collect in one collection
+collect_transitions = 100  # how many proof transitions to collect in one collection
 # optimization
 num_epochs = 1
 num_iterations = -1 # override number of iterations (-1 = disable, use num_epochs to derive it)
@@ -58,7 +58,7 @@ matrix_lr = 0.02
 weight_decay = 0.0
 init_lr_frac = 0.02
 # evaluation and logging there of
-eval_every = 100
+eval_every = 2
 # eval_metrics_every = 200
 sample_every = 100
 eval_metrics_max_problems = 1024
@@ -105,10 +105,10 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-r
 tactic_model = TacticModel.create()
 model = tactic_model.network
 
-print0(f"Target examples per step: {target_examples_per_step}")
-print0(f"Collect every: {collect_every}")
-collect_transitions = target_examples_per_step * collect_every
-print0(f"=> Setting collect_transitions: {collect_transitions}")
+# print0(f"Target examples per step: {target_examples_per_step}")
+# print0(f"Collect every: {collect_every}")
+# collect_transitions = target_examples_per_step * collect_every
+# print0(f"=> Setting collect_transitions: {collect_transitions}")
 
 # -----------------------------------------------------------------------------
 # DataLoader

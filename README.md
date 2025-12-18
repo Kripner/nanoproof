@@ -1,3 +1,20 @@
+# nanoproof
+
+This is an attempt to replicate AlphaProof. It is based on [nanochat](https://github.com/karpathy/nanochat) and the
+official AlphaProof pseudocode (together with many open-source datasets and tools). So far, we have:
+- pretraining on Nemotron-CC-Math
+- midtraining on Lean code from GitHub
+- supervised fine-tuning on LeanTree (transitions extracted from Mathlib)
+- interaction with Lean using a LeanTree server
+- MCTS-based prover
+- a simple RL training loop
+- evaluation script for success rate on MiniF2F and Lean-Workbook
+
+The best score achieved so far is **32.8% on MiniF2F** (more precisely the subset of its first 64 theorems).
+
+This project is in early stages and still a bit hard to work with. If you want to contribute, the best way to start is to write me an email!
+
+
 # Questions
 
 - how is the action prob obtained from tokens probs?
@@ -39,6 +56,3 @@ or
 ```
 torchrun --standalone --nproc_per_node=2 -m nanoproof.pretrain
 ```
-
-
-OMP_NUM_THREADS=8 torchrun --standalone --nproc_per_node=2 -m -- nanoproof.pretrain --depth=20 --run="baseline"
