@@ -58,7 +58,7 @@ matrix_lr = 0.02
 weight_decay = 0.0
 init_lr_frac = 0.02
 # evaluation and logging there of
-eval_every = 2
+eval_every = 5  # TODO: when eval_every>1, we need some warmup (collect eval_every*collect_transitions)
 # eval_metrics_every = 200
 sample_every = 100
 eval_metrics_max_problems = 1024
