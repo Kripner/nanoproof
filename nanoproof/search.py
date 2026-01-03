@@ -2,24 +2,28 @@ import os
 from dataclasses import dataclass, field
 import enum
 import time
+import threading
 from contextlib import nullcontext
-from typing import Self
+from typing import Self, Protocol
 import math
 
 import torch
 from leantree import LeanProject, LeanLibrary, LeanLibraries, LeanProofState
 from leantree.repl_adapter.server import LeanClient, LeanProofBranch
 
-from nanoproof.common import compute_init, compute_cleanup, get_base_dir, print0, DummyWandb, autodetect_device_type, pretty_print_tree, SimpleTimer, DummyTimer
+from nanoproof.common import compute_init, compute_cleanup, get_base_dir, print0, DummyWandb, autodetect_device_type, \
+    pretty_print_tree, SimpleTimer, DummyTimer
 from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
 from nanoproof.data.leanworkbook import list_theorems
 from nanoproof.model import Transformer
 from nanoproof.tokenizer import HuggingFaceTokenizer
+from nanoproof.cli import get_monitor, log
 
 """
 leanserver --project-path ~/troja/nanoproof/leantree_project/ --repl-exe ~/repos/leantree/lean-repl/.lake/build/bin/repl --imports Mathlib FormalConjectures.ForMathlib.Analysis.SpecialFunctions.NthRoot FormalConjectures.Util.Answer --max-processes 2 --address=<PUBLIC_IP> --log-level=DEBUG
 """
+
 
 @dataclass
 class Config:
@@ -134,11 +138,13 @@ class Node:
             reward_str = f"r={node.reward:.2f}" if node.reward is not None else "r=None"
             return f"[{prior_str} {reward_str}] {str(node.action)}"
 
-        return pretty_print_tree(self, get_children, get_node_label, get_edge_label, max_label_len=200, max_edge_label_len=50)
+        return pretty_print_tree(self, get_children, get_node_label, get_edge_label, max_label_len=200,
+                                 max_edge_label_len=50)
 
 
 class Game:
     """A single episode of interaction with the environment."""
+
     def __init__(self, theorem: str, num_simulations: int | None = None):
         self.theorem = theorem
         # Number of simulations to run.
@@ -151,13 +157,14 @@ class TacticModel:
     network: Transformer
     tokenizer: HuggingFaceTokenizer
     engine: Engine
+    num_samples: int = 6
 
     def __post_init__(self):
         self.rng = torch.Generator(device=self.network.get_device())
         self.rng.manual_seed(0)
 
-    def sample_tactic(self, state: State, num_samples: int) -> list[str]:
-        assert len(state) == 1,\
+    def sample_tactic(self, state: State) -> list[str]:
+        assert len(state) == 1, \
             f"expected single branch in state when generating tactic, got {len(state)} - choose one goal first"
         device = self.network.get_device()
         assert device.type == "cuda"
@@ -167,10 +174,10 @@ class TacticModel:
         seed = torch.randint(torch.iinfo(torch.int32).max, (1,), device=device, generator=self.rng).item()
         with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
             sample_toks, masks = self.engine.generate_batch(
-                tokens, num_samples=num_samples, min_tokens=1, max_tokens=64, seed=seed
+                tokens, num_samples=self.num_samples, min_tokens=1, max_tokens=64, seed=seed
             )
         tactics = []
-        for i in range(num_samples):
+        for i in range(self.num_samples):
             tactic_toks = [token for token, mask in zip(sample_toks[i], masks[i]) if mask == 1]
             tactic = self.tokenizer.decode(tactic_toks)
             if "sorry" in tactic or "admit" in tactic:
@@ -178,20 +185,202 @@ class TacticModel:
             tactics.append(tactic)
         return tactics
 
+    def sample_tactic_batch(self, states: list[State]) -> list[list[str]]:
+        """Batched version of sample_tactic for multiple states at once."""
+        device = self.network.get_device()
+        assert device.type == "cuda"
+
+        # Prepare tokenized prompts
+        prompts = []
+        for state in states:
+            assert len(state) == 1, \
+                f"expected single branch in state when generating tactic, got {len(state)} - choose one goal first"
+            state_str = str(state[0].state).strip()
+            tokens = self.tokenizer(state_str + "\n<|tactic|>", prepend=self.tokenizer.get_bos_token_id())
+            prompts.append(tokens)
+
+        seed = torch.randint(torch.iinfo(torch.int32).max, (1,), device=device, generator=self.rng).item()
+        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+            # prompts is list[list[int]], which triggers batched generation
+            sample_toks_batch, masks_batch = self.engine.generate_batch(
+                prompts, num_samples=self.num_samples, min_tokens=1, max_tokens=64, seed=seed
+            )
+
+        # sample_toks_batch shape: (num_prompts, num_samples, seq_len)
+        results = []
+        for prompt_idx in range(len(states)):
+            tactics = []
+            for sample_idx in range(self.num_samples):
+                tactic_toks = [
+                    token for token, mask in zip(
+                        sample_toks_batch[prompt_idx][sample_idx],
+                        masks_batch[prompt_idx][sample_idx]
+                    ) if mask == 1
+                ]
+                tactic = self.tokenizer.decode(tactic_toks)
+                if "sorry" in tactic or "admit" in tactic:
+                    continue
+                tactics.append(tactic)
+            results.append(tactics)
+        return results
+
     @classmethod
-    def create(cls) -> Self:
+    def create(cls, num_samples: int = 6) -> Self:
         source = "sft"  # which checkpoint to load the model from
         model_tag = "d26"  # model tag to load the model from
         device = torch.device("cuda")
 
         model, tokenizer, _ = load_model(source, device, phase="eval", model_tag=model_tag)
         engine = Engine(model, tokenizer)
-        return cls(model, tokenizer, engine)
+        return cls(model, tokenizer, engine, num_samples=num_samples)
 
 
-def run_mcts(config: Config, game: Game, model: TacticModel, timer: SimpleTimer | None = None):
-    if timer is None:
-        timer = DummyTimer()
+class BatchedTacticModel:
+    """
+    Thread-safe wrapper around TacticModel that batches LLM calls from multiple threads.
+    
+    When sample_tactic is called, it blocks until either:
+    1. batch_size inputs have been accumulated, or
+    2. timeout_seconds has elapsed since the first pending request
+    
+    Then a single batched LLM call is made and results are distributed to waiting threads.
+    """
+
+    def __init__(self, inner_model: TacticModel, batch_size: int = 32, timeout_seconds: float = 0.1):
+        self.inner_model = inner_model
+        self.batch_size = batch_size
+        self.timeout_seconds = timeout_seconds
+
+        # Synchronization primitives
+        self._lock = threading.Lock()
+        self._batch_ready = threading.Condition(self._lock)
+
+        # Pending requests: list of (state, result_event, result_slot)
+        self._pending: list[tuple[State, threading.Event, list]] = []
+        self._first_request_time: float | None = None
+        self._batch_in_progress = False
+
+        # Stats for logging
+        self._total_requests = 0
+        self._total_batches = 0
+        log(f"Initialized with batch_size={batch_size}, timeout={timeout_seconds}s", component="BatchedTacticModel")
+
+    @property
+    def network(self):
+        """Expose network for compatibility with code that accesses model.network."""
+        return self.inner_model.network
+
+    def sample_tactic(self, state: State) -> list[str]:
+        """
+        Thread-safe sample_tactic that batches calls from multiple threads.
+        Blocks until result is available.
+        """
+        wait_start = time.time()
+        result_event = threading.Event()
+        result_slot: list[list[str]] = []  # Will hold the result
+
+        with self._lock:
+            self._total_requests += 1
+            request_num = self._total_requests
+            pending_count = len(self._pending) + 1
+
+            # Add this request to the pending batch
+            self._pending.append((state, result_event, result_slot))
+
+            if self._first_request_time is None:
+                self._first_request_time = time.time()
+                log(f"Request #{request_num}: first in batch", component="BatchedTacticModel")
+
+            # Log every 10th request or when batch is full
+            if request_num % 10 == 0 or pending_count >= self.batch_size:
+                log(f"Request #{request_num}: pending={pending_count}/{self.batch_size}",
+                    component="BatchedTacticModel")
+
+            # Check if we should trigger the batch
+            should_process = len(self._pending) >= self.batch_size
+
+            if should_process and not self._batch_in_progress:
+                self._process_batch_locked()
+
+        # If not processing immediately, wait for batch to be ready or timeout
+        if not result_event.is_set():
+            self._wait_for_batch_or_timeout(result_event)
+
+        # Wait for the result
+        result_event.wait()
+
+        # Record wait time for monitoring
+        wait_time = time.time() - wait_start
+        monitor = get_monitor()
+        if monitor is not None:
+            monitor.record_batch_wait(wait_time)
+
+        return result_slot[0]
+
+    def _wait_for_batch_or_timeout(self, my_event: threading.Event):
+        """Wait until batch is ready or timeout, then potentially trigger processing."""
+        while not my_event.is_set():
+            with self._lock:
+                if my_event.is_set():
+                    return
+
+                if self._first_request_time is None:
+                    # Already processed
+                    return
+
+                elapsed = time.time() - self._first_request_time
+                remaining = self.timeout_seconds - elapsed
+
+                if remaining <= 0 or len(self._pending) >= self.batch_size:
+                    # Time to process
+                    if not self._batch_in_progress and len(self._pending) > 0:
+                        self._process_batch_locked()
+                    return
+
+                # Wait with timeout
+                self._batch_ready.wait(timeout=remaining)
+
+    def _process_batch_locked(self):
+        """Process the current batch. Must be called with lock held."""
+        if len(self._pending) == 0:
+            return
+
+        self._batch_in_progress = True
+        self._total_batches += 1
+        batch_num = self._total_batches
+
+        # Grab the current batch
+        batch = self._pending[:]
+        self._pending = []
+        self._first_request_time = None
+
+        log(f"Batch #{batch_num}: processing {len(batch)} requests", component="BatchedTacticModel")
+
+        # Release lock during LLM inference
+        self._lock.release()
+        try:
+            states = [item[0] for item in batch]
+            inference_start = time.time()
+            results = self.inner_model.sample_tactic_batch(states)
+            inference_time = time.time() - inference_start
+            log(f"Batch #{batch_num}: LLM inference took {inference_time:.2f}s", component="BatchedTacticModel")
+        finally:
+            self._lock.acquire()
+
+        self._batch_in_progress = False
+
+        # Distribute results to waiting threads
+        for i, (_, result_event, result_slot) in enumerate(batch):
+            result_slot.append(results[i])
+            result_event.set()
+
+        log(f"Batch #{batch_num}: results distributed to {len(batch)} threads", component="BatchedTacticModel")
+
+        # Notify any threads waiting for this batch
+        self._batch_ready.notify_all()
+
+
+def run_mcts(config: Config, game: Game, model: TacticModel | BatchedTacticModel):
     root = game.root
     for i in range(game.num_simulations):
         node = root
@@ -202,14 +391,16 @@ def run_mcts(config: Config, game: Game, model: TacticModel, timer: SimpleTimer 
             search_path.append(node)
 
         assert node.state is not None
-        timer.start("sample")
-        tactics = model.sample_tactic(node.state, config.num_sampled_tactics)
-        timer.end("sample")
+        tactics = model.sample_tactic(node.state)
         tactic_logprobs = [1.0] * len(tactics)  # TODO: use the actual action logprobs
 
-        timer.start("expand")
         expand_node(node, tactics, tactic_logprobs, config.prior_temperature)
-        timer.end("expand")
+
+        # Record expansion for monitoring
+        monitor = get_monitor()
+        if monitor is not None:
+            monitor.record_expansion()
+
         backpropagate(
             search_path,
             1.0,  # TODO: use the actual value
@@ -225,8 +416,8 @@ def run_mcts(config: Config, game: Game, model: TacticModel, timer: SimpleTimer 
 def progressive_sample(node: Node, config: Config) -> bool:
     """Whether to expand a node in the search tree again (progressive sampling)."""
     return (
-        node.to_play == Player.OR
-        and node.evaluations <= config.ps_c * node.visit_count ** config.ps_alpha
+            node.to_play == Player.OR
+            and node.evaluations <= config.ps_c * node.visit_count ** config.ps_alpha
     )
 
 
@@ -243,8 +434,8 @@ def select_child(config: Config, node: Node) -> tuple[Action, Node]:
 # the prior.
 def ucb_score(config: Config, parent: Node, child: Node) -> float:
     pb_c = (
-        math.log((parent.visit_count + config.pb_c_base + 1) / config.pb_c_base)
-        + config.pb_c_init
+            math.log((parent.visit_count + config.pb_c_base + 1) / config.pb_c_base)
+            + config.pb_c_init
     )
     pb_c *= math.sqrt(parent.visit_count) / (child.visit_count + 1)
 
@@ -319,6 +510,7 @@ def expand_node(
                 )
                 child.children[i] = grandchild
 
+
 # At the end of a simulation, we propagate the evaluation all the way up the
 # tree to the root.
 def backpropagate(
@@ -344,6 +536,7 @@ def backpropagate(
             else:
                 value = node.reward + value
 
+
 def backprop_value_towards_min(node):
     """Computes the value for an AND node by propagating the min value from children, corresponding to the longest/hardest unsolved proof branch."""
     value = 1
@@ -363,7 +556,7 @@ def run_bfs(game: Game, model: TacticModel):
         print("-" * 80 + f"Solving state:\n{branch.state}\n")
         for retry_idx in range(10):
             print("Generating ..." + f" (retry {retry_idx})" if retry_idx != 0 else "")
-            tactics = model.sample_tactic(node.state, num_samples=10)
+            tactics = model.sample_tactic(node.state)
             # [tactic] = tactics
             # print(f"Trying tactic:\n'{tactic}'")
             options = []
