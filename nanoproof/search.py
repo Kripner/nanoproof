@@ -18,7 +18,7 @@ from nanoproof.engine import Engine
 from nanoproof.data.leanworkbook import list_theorems
 from nanoproof.model import Transformer
 from nanoproof.tokenizer import HuggingFaceTokenizer
-from nanoproof.cli import get_monitor, log
+from nanoproof.cli import get_monitor, log, log_tactic
 
 """
 leanserver --project-path ~/troja/nanoproof/leantree_project/ --repl-exe ~/repos/leantree/lean-repl/.lake/build/bin/repl --imports Mathlib FormalConjectures.ForMathlib.Analysis.SpecialFunctions.NthRoot FormalConjectures.Util.Answer --max-processes 2 --address=<PUBLIC_IP> --log-level=DEBUG
@@ -224,6 +224,10 @@ class TacticModel:
             results.append(tactics)
         return results
 
+    def shutdown(self):
+        """No-op for non-batched model. Exists for API compatibility with BatchedTacticModel."""
+        pass
+
     @classmethod
     def create(cls, num_samples: int = 6) -> Self:
         source = "sft"  # which checkpoint to load the model from
@@ -259,6 +263,9 @@ class BatchedTacticModel:
         self._pending: list[tuple[State, threading.Event, list]] = []
         self._first_request_time: float | None = None
         self._batch_in_progress = False
+        
+        # Shutdown flag to unblock waiting threads
+        self._shutdown = False
 
         # Stats for logging
         self._total_requests = 0
@@ -270,16 +277,39 @@ class BatchedTacticModel:
         """Expose network for compatibility with code that accesses model.network."""
         return self.inner_model.network
 
+    def shutdown(self):
+        """
+        Signal shutdown to unblock all waiting threads.
+        Waiting threads will raise RuntimeError.
+        """
+        with self._lock:
+            self._shutdown = True
+            # Set all pending result events to unblock waiting threads
+            for _, result_event, result_slot in self._pending:
+                result_slot.append([])  # Empty result
+                result_event.set()
+            self._pending = []
+            self._batch_ready.notify_all()
+        log("Shutdown initiated, all waiting threads unblocked", component="BatchedTacticModel")
+
     def sample_tactic(self, state: State) -> list[str]:
         """
         Thread-safe sample_tactic that batches calls from multiple threads.
         Blocks until result is available.
+        
+        Returns empty list if shutdown is in progress.
         """
+        if self._shutdown:
+            return []
+            
         wait_start = time.time()
         result_event = threading.Event()
         result_slot: list[list[str]] = []  # Will hold the result
 
         with self._lock:
+            if self._shutdown:
+                return []
+                
             self._total_requests += 1
             request_num = self._total_requests
             pending_count = len(self._pending) + 1
@@ -306,8 +336,20 @@ class BatchedTacticModel:
         if not result_event.is_set():
             self._wait_for_batch_or_timeout(result_event)
 
-        # Wait for the result
-        result_event.wait()
+        # Wait for the result with timeout to avoid hanging forever
+        # Use a loop with short timeouts to stay responsive to shutdown
+        max_wait = 60.0  # Maximum total wait time
+        wait_interval = 1.0  # Check for shutdown every second
+        total_waited = 0.0
+        while not result_event.is_set() and total_waited < max_wait:
+            if self._shutdown:
+                return []
+            result_event.wait(timeout=wait_interval)
+            total_waited += wait_interval
+        
+        if not result_event.is_set():
+            log(f"Request timed out after {max_wait}s", component="BatchedTacticModel")
+            return []
 
         # Record wait time for monitoring
         wait_time = time.time() - wait_start
@@ -315,18 +357,26 @@ class BatchedTacticModel:
         if monitor is not None:
             monitor.record_batch_wait(wait_time)
 
-        return result_slot[0]
+        return result_slot[0] if result_slot else []
 
     def _wait_for_batch_or_timeout(self, my_event: threading.Event):
         """Wait until batch is ready or timeout, then potentially trigger processing."""
-        while not my_event.is_set():
+        max_iterations = 100  # Prevent infinite loop
+        iterations = 0
+        while not my_event.is_set() and iterations < max_iterations:
+            iterations += 1
             with self._lock:
+                if self._shutdown:
+                    return
+                    
                 if my_event.is_set():
                     return
 
                 if self._first_request_time is None:
-                    # Already processed
-                    return
+                    # Batch was already processed, but our event should be set
+                    # Wait briefly and check again (handles race condition)
+                    self._batch_ready.wait(timeout=0.1)
+                    continue
 
                 elapsed = time.time() - self._first_request_time
                 remaining = self.timeout_seconds - elapsed
@@ -338,7 +388,7 @@ class BatchedTacticModel:
                     return
 
                 # Wait with timeout
-                self._batch_ready.wait(timeout=remaining)
+                self._batch_ready.wait(timeout=min(remaining, 0.5))  # Cap wait to check shutdown
 
     def _process_batch_locked(self):
         """Process the current batch. Must be called with lock held."""
@@ -470,6 +520,7 @@ def expand_node(
         for a, logprob in zip(actions, action_logprobs)
     }
     node.children = {}
+    state_str = str(node.state[0].state).strip() if len(node.state) == 1 else "<multi-branch>"
     for action, p in policy.items():
         # Check if action is duplicate.
         if action in node.children:
@@ -481,10 +532,13 @@ def expand_node(
         new_branches = branch.try_apply_tactic(action)
         if not new_branches.is_success():
             # Invalid action encountered.
+            log_tactic(state_str, action, success=False)
             continue
         if len(new_branches.value) == 1 and new_branches.value[0].state.semantic_equals(node.state[0].state):
             # Tactic made no progress.
+            log_tactic(state_str, action, success=False)
             continue
+        log_tactic(state_str, action, success=True)
         new_branches = [b for b in new_branches.value if not b.state.is_solved()]
         child = Node(
             action=action,

@@ -38,13 +38,13 @@ class ReplayBuffer:
 
     def save_game(self, game: Game) -> int:
         transitions = self._extract_transitions(game.root)
-        print("! New transitions !")
+        log(f"New transitions: {len(transitions)}", component="ReplayBuffer")
         for transition in transitions:
-            print(transition)
+            log(f"  {transition}", component="ReplayBuffer")
 
         with self._lock:
             self.local_buffer.extend(transitions)
-            print(f"Local buffer size: {len(self.local_buffer)}")
+            log(f"Local buffer size: {len(self.local_buffer)}", component="ReplayBuffer")
 
         return len(transitions)
 
@@ -143,9 +143,33 @@ def run_actor(total_to_collect: int, config: Config, model: BatchedTacticModel, 
         log(f"Ready, starting game loop", actor_id=actor_id)
 
         games_played = 0
+        consecutive_errors = 0
+        max_consecutive_errors = 5
         while not stop_flag.is_set():
             log(f"Starting game {games_played + 1}", actor_id=actor_id)
-            game = play_game_with_client(config, model, local_theorems_sampler, client)
+            try:
+                game = play_game_with_client(config, model, local_theorems_sampler, client)
+                consecutive_errors = 0  # Reset on success
+            except ConnectionResetError:
+                consecutive_errors += 1
+                log(f"Game {games_played + 1} connection reset by Lean server ({consecutive_errors}/{max_consecutive_errors})", actor_id=actor_id)
+                if consecutive_errors >= max_consecutive_errors:
+                    log(f"Too many consecutive connection errors, stopping actor", actor_id=actor_id)
+                    break
+                # Try to reconnect
+                try:
+                    client = LeanClient(config.server_address, config.server_port)
+                    log(f"Reconnected to Lean server", actor_id=actor_id)
+                except Exception as e:
+                    log(f"Failed to reconnect: {e}", actor_id=actor_id)
+                continue
+            except Exception as e:
+                consecutive_errors += 1
+                log(f"Game {games_played + 1} unexpected error ({consecutive_errors}/{max_consecutive_errors}): {type(e).__name__}: {e}", actor_id=actor_id)
+                if consecutive_errors >= max_consecutive_errors:
+                    log(f"Too many consecutive errors, stopping actor", actor_id=actor_id)
+                    break
+                continue
             games_played += 1
 
             if game is None:
@@ -230,6 +254,9 @@ def run_actor(total_to_collect: int, config: Config, model: BatchedTacticModel, 
 
         log(f"Stopping actors and waiting for them to finish...", component="Collection")
 
+        # Shutdown the batched model to unblock any waiting threads
+        model.shutdown()
+
         # Wait for all threads to finish
         for i, future in enumerate(futures):
             try:
@@ -237,6 +264,9 @@ def run_actor(total_to_collect: int, config: Config, model: BatchedTacticModel, 
                 log(f"Actor {i} finished cleanly", component="Collection")
             except FuturesTimeoutError:
                 log(f"Actor {i} timed out on shutdown", component="Collection")
+            except ConnectionResetError:
+                # Connection reset is expected during shutdown - the Lean server may close connections
+                log(f"Actor {i} connection reset during shutdown (this is OK)", component="Collection")
             except Exception as e:
                 log_error(f"Actor {i} exception on join", exception=e, component="Collection")
 
@@ -353,7 +383,7 @@ def play_game(config: Config, model: TacticModel | BatchedTacticModel,
 
             # TODO: Compute value targets for the proof.
             # compute_value_target(game.root)
-            print(theorem)
+            log(f"Proof found: {theorem[:80]}...", component="MCTS")
             pass
 
         return game

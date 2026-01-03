@@ -21,10 +21,9 @@ from nanoproof.experience_collection import ReplayBuffer, TheoremsSampler, Confi
 from nanoproof.search import TacticModel, BatchedTacticModel
 from nanoproof.data import minif2f
 from nanoproof.data import leanworkbook
-from nanoproof.cli import create_monitor
+from nanoproof.cli import create_monitor, configure_logging, log
 from scripts.prover_eval import eval_success_rate
 
-# TODO: make the search much more efficient via batching/async
 # TODO: if tactic application results in a state that already is on the path from root, skip the tactic (otherwise we sometimes get stuck in loop of eg. rw [add_comm])
 
 """
@@ -104,10 +103,13 @@ if ddp:
     dist.broadcast_object_list(output_dir_list, src=0)
     output_dir = output_dir_list[0]
 
+# Configure file-based logging (only on master process to avoid duplicate writes)
+if master_process:
+    configure_logging(output_dir)
+
 # wandb logging init
 use_dummy_wandb = run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-rl", name=run, config=user_config,
-                                                            save_code=True)
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-rl", name=run, config=user_config, save_code=True)
 
 # Create the tactic model with batching support for parallel actors
 inner_tactic_model = TacticModel.create(num_samples=num_sampled_tactics)
@@ -127,12 +129,12 @@ model = tactic_model.network
 # DataLoader
 
 examples_per_step = device_batch_size * ddp_world_size
-print0(f"Target examples per step: {target_examples_per_step}")
-print0(f"Device batch size: {device_batch_size}")
-print0(f"Examples per step is device_batch_size * ddp_world_size: {examples_per_step}")
+log(f"Target examples per step: {target_examples_per_step}", component="Config")
+log(f"Device batch size: {device_batch_size}", component="Config")
+log(f"Examples per step is device_batch_size * ddp_world_size: {examples_per_step}", component="Config")
 assert target_examples_per_step % examples_per_step == 0, "Target examples per step must be divisible by examples per step"
 grad_accum_steps = target_examples_per_step // examples_per_step
-print0(f"=> Setting grad accum steps: {grad_accum_steps}")
+log(f"=> Setting grad accum steps: {grad_accum_steps}", component="Config")
 
 rank_seed = seed + ddp_rank
 mathlib_train = list(iter_data(split="train"))
@@ -206,7 +208,7 @@ while True:
 
         minif2f_theorems = minif2f.list_theorems(split="Valid")
         minif2f_theorems = minif2f_theorems[:64]
-        print0(f"Evaluating on {len(minif2f_theorems)} theorems from MiniF2F")
+        log(f"Evaluating on {len(minif2f_theorems)} theorems from MiniF2F", component="Eval")
         # Use inner model for evaluation (sequential, no batching needed)
         minif2f_results = eval_success_rate(inner_tactic_model, minif2f_theorems)
         rl_monitor.record_eval(step, "MiniF2F", minif2f_results['success_rate'],
@@ -214,14 +216,13 @@ while True:
 
         leanworkbook_theorems = leanworkbook.list_theorems(split="val")
         leanworkbook_theorems = leanworkbook_theorems[:64]
-        print0(f"Evaluating on {len(leanworkbook_theorems)} theorems from LeanWorkBook")
+        log(f"Evaluating on {len(leanworkbook_theorems)} theorems from LeanWorkBook", component="Eval")
         leanworkbook_results = eval_success_rate(inner_tactic_model, leanworkbook_theorems)
         rl_monitor.record_eval(step, "LeanWorkBook", leanworkbook_results['success_rate'],
                                leanworkbook_results['solved'], leanworkbook_results['total'],
                                leanworkbook_results['errors'])
 
-        print0(
-            f"Step {step:05d} | minif2f: {minif2f_results['success_rate']:.4%} ({minif2f_results['solved']}/{minif2f_results['total']}, with {minif2f_results['errors']} errors) | leanworkbook: {leanworkbook_results['success_rate']:.4%} ({leanworkbook_results['solved']}/{leanworkbook_results['total']}, with {leanworkbook_results['errors']} errors)")
+        log(f"Step {step:05d} | minif2f: {minif2f_results['success_rate']:.4%} ({minif2f_results['solved']}/{minif2f_results['total']}, errors={minif2f_results['errors']}) | leanworkbook: {leanworkbook_results['success_rate']:.4%} ({leanworkbook_results['solved']}/{leanworkbook_results['total']}, errors={leanworkbook_results['errors']})", component="Eval")
         wandb_run.log({
             "step": step,
             "minif2f_val": minif2f_results['success_rate'],
@@ -275,9 +276,7 @@ while True:
     num_tokens_item = num_tokens.item()
     rl_monitor.update_training(step, train_loss_item, num_tokens_item)
     rl_monitor.display()
-    print0(
-        f"Step {step:05d} | Training loss: {train_loss_item:.6f} | num_tokens: {num_tokens_item:,} | replay_buffer_size: {len(replay_buffer.buffer)}")
-    timer.log_times()
+    log(f"Step {step:05d} | Training loss: {train_loss_item:.6f} | num_tokens: {num_tokens_item:,} | replay_buffer_size: {len(replay_buffer.buffer)}", component="Train")
     wandb_run.log({
         "step": step,
         "train_loss": train_loss_item,
