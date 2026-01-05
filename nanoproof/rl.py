@@ -2,14 +2,15 @@ import os
 from datetime import datetime
 import json
 import sys
+from contextlib import nullcontext
+import random
+import time
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-import random
 
 import wandb
 import torch
 import torch.distributed as dist
-from contextlib import nullcontext
 
 from nanoproof.common import compute_init, compute_cleanup, get_base_dir, print0, DummyWandb, autodetect_device_type, \
     SimpleTimer
@@ -22,6 +23,7 @@ from nanoproof.search import TacticModel, BatchedTacticModel
 from nanoproof.data import minif2f
 from nanoproof.data import leanworkbook
 from nanoproof.cli import create_monitor, configure_logging, log
+from nanoproof.rl_server import distributed_collect, InferenceHandler, start_inference_server
 from scripts.prover_eval import eval_success_rate
 
 # TODO: if tactic application results in a state that already is on the path from root, skip the tactic (otherwise we sometimes get stuck in loop of eg. rw [add_comm])
@@ -45,11 +47,15 @@ seed = 0
 device_type = ""  # cuda|cpu|mps (empty => autodetect)
 dtype = "bfloat16"
 device_batch_size = 8  # (maybe) max to avoid OOM (on A100 40GB)
+# distributed mode
+distributed = False  # enable distributed mode (provers on separate nodes)
+inference_server_port = 5000  # port for inference server (distributed mode only)
+poll_interval = 3.0  # how often to poll provers for transitions (seconds)
 # data
 fraction_sft = 0.1  # 10% of data will come from Mathlib (leantree), 90% from replay buffer
 collect_every = 1  # how many steps to train between RL data collections
 collect_transitions = 100  # how many proof transitions to collect in one collection
-# parallel experience collection
+# parallel experience collection (local mode only)
 num_actors = 32  # number of parallel actor threads for experience collection
 num_sampled_tactics = 6  # number of tactics to sample per state in MCTS
 batch_timeout = 0.1  # timeout in seconds for batching LLM calls
@@ -179,8 +185,17 @@ for opt in optimizers:
     for group in opt.param_groups:
         group["lr"] = group["lr"] * init_lr_frac
 
+
 # -----------------------------------------------------------------------------
 # Training loop
+# -----------------------------------------------------------------------------
+
+# Start inference server if in distributed mode (master process only)
+if distributed and master_process:
+    inference_handler = InferenceHandler(inner_tactic_model)
+    inference_server_thread = start_inference_server(inference_handler, inference_server_port)
+    # Give server time to start
+    time.sleep(1.0)
 
 # Go!
 step = 0
@@ -192,7 +207,18 @@ while True:
         model.eval()
         rl_monitor.start_collection(target_samples=collect_transitions, num_actors=num_actors)
         rl_monitor.set_step(step)
-        run_actor(collect_transitions, config, tactic_model, replay_buffer, theorems_sampler)
+        
+        if distributed and master_process:
+            # Distributed mode: coordinate remote provers
+            distributed_collect(
+                collect_transitions,
+                poll_interval,
+                replay_buffer,
+            )
+        elif not distributed:
+            # Local mode: run actors locally
+            run_actor(collect_transitions, config, tactic_model, replay_buffer, theorems_sampler)
+        
         model.train()
         timer.end("collect")
         replay_buffer.synchronize()

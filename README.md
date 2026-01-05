@@ -57,3 +57,132 @@ or
 ```
 torchrun --standalone --nproc_per_node=2 -m nanoproof.pretrain
 ```
+
+# Running the RL Loop
+
+The RL loop alternates between collecting proof transitions using MCTS and training the model.
+
+## Web Monitor
+
+When the RL loop starts, it launches a web monitor on port 5050. Open `http://localhost:5050` in your browser to see:
+- Training stats (loss, step, samples collected)
+- Prover server status with thread-level indicators
+- GPU utilization and memory
+- Evaluation history
+- Live log stream
+
+To build the React frontend (optional, a fallback HTML is included):
+
+```bash
+cd nanoproof/web
+npm install
+npm run build
+```
+
+To test the monitor without running actual training:
+
+```bash
+python tests/test_cli.py
+```
+
+## Prerequisites
+
+Before running RL, you need a Lean server running (provides proof verification):
+
+```bash
+leanserver --project-path /path/to/leantree_project/ \
+    --repl-exe /path/to/leantree/lean-repl/.lake/build/bin/repl \
+    --imports Mathlib \
+    --max-processes 32 \
+    --address=0.0.0.0 \
+    --port=8000
+```
+
+## Local Mode (Single Node)
+
+For development or single-GPU training, run everything on one machine:
+
+```bash
+# Single GPU
+python -m nanoproof.rl
+
+# Multi-GPU with DDP
+torchrun --standalone --nproc_per_node=2 -m nanoproof.rl
+```
+
+Configuration can be passed via command line:
+
+```bash
+python -m nanoproof.rl --run=my_experiment --num_actors=16 --collect_transitions=200
+```
+
+## Distributed Mode (Multiple Nodes)
+
+For scaling across multiple nodes, the system is split into:
+- RL server (GPU nodes): handles inference and training
+- Prover servers (CPU nodes): run MCTS proof search
+
+Prover servers automatically register with the RL server on startup and unregister on shutdown.
+
+### Step 1: Start RL Training (on GPU node)
+
+```bash
+# Single GPU
+python -m nanoproof.rl --distributed=True
+
+# Multi-GPU with DDP
+torchrun --standalone --nproc_per_node=2 -m nanoproof.rl --distributed=True
+```
+
+The RL server will wait for prover agents to register before starting collection.
+
+### Step 2: Start Prover Servers (on CPU nodes)
+
+On each CPU node, start a prover server pointing to the RL server:
+
+```bash
+python -m nanoproof.prover_server \
+    --rl-server <GPU_NODE_IP>:5000 \
+    --lean-server <LEAN_SERVER_IP>:8000 \
+    --port 5001 \
+    --num-actors 8
+```
+
+The prover will automatically register itself with the RL server. You can start/stop prover servers at any time - collection will continue with available provers.
+
+### Architecture Overview
+
+```
++-------------------+       +-------------------+
+|   RL Server       |       |  Prover Server 1  |
+|   (GPU Node)      |<----->|  (CPU Node)       |
+|                   |       +-------------------+
+| - Training (DDP)  |       +-------------------+
+| - Inference API   |<----->|  Prover Server 2  |
+| - Coordination    |       |  (CPU Node)       |
+| - Registry        |       +-------------------+
++-------------------+       +-------------------+
+        ^                   |  Prover Server N  |
+        +------------------>|  (CPU Node)       |
+                            +-------------------+
+                                    ^
+                                    |
+                            +-------------------+
+                            |   Lean Server     |
+                            +-------------------+
+```
+
+The RL server:
+- Exposes an inference endpoint at `/generate` (port 5000)
+- Maintains a registry of prover servers (`/register`, `/unregister`)
+- Instructs provers to start/pause collection
+- Polls provers for found transitions
+- Aggregates transitions into a global replay buffer
+- Trains the model using DDP
+
+Each prover server:
+- Registers itself on startup, unregisters on shutdown
+- Runs multiple MCTS actors in parallel
+- Calls the RL server for tactic generation
+- Calls the Lean server for proof verification
+- Buffers found transitions until polled

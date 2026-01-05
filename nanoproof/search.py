@@ -57,7 +57,7 @@ class Config:
     value_weight: float = 0.002
 
     # Lean server
-    server_address: str = "10.10.25.34"
+    server_address: str = "10.10.25.40"
     server_port: int = 8000
 
 
@@ -187,15 +187,25 @@ class TacticModel:
 
     def sample_tactic_batch(self, states: list[State]) -> list[list[str]]:
         """Batched version of sample_tactic for multiple states at once."""
+        state_strs = []
+        for state in states:
+            assert len(state) == 1, \
+                f"expected single branch in state when generating tactic, got {len(state)} - choose one goal first"
+            state_strs.append(str(state[0].state).strip())
+        return self.sample_tactic_from_str_batch(state_strs)
+
+    def sample_tactic_from_str(self, state_str: str) -> list[str]:
+        """Generate tactics from a state string directly (no State object needed)."""
+        return self.sample_tactic_from_str_batch([state_str])[0]
+
+    def sample_tactic_from_str_batch(self, state_strs: list[str]) -> list[list[str]]:
+        """Batched tactic generation from state strings directly."""
         device = self.network.get_device()
         assert device.type == "cuda"
 
         # Prepare tokenized prompts
         prompts = []
-        for state in states:
-            assert len(state) == 1, \
-                f"expected single branch in state when generating tactic, got {len(state)} - choose one goal first"
-            state_str = str(state[0].state).strip()
+        for state_str in state_strs:
             tokens = self.tokenizer(state_str + "\n<|tactic|>", prepend=self.tokenizer.get_bos_token_id())
             prompts.append(tokens)
 
@@ -208,7 +218,7 @@ class TacticModel:
 
         # sample_toks_batch shape: (num_prompts, num_samples, seq_len)
         results = []
-        for prompt_idx in range(len(states)):
+        for prompt_idx in range(len(state_strs)):
             tactics = []
             for sample_idx in range(self.num_samples):
                 tactic_toks = [
