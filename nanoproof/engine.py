@@ -154,6 +154,7 @@ class Engine:
 
         # Create attention masks if padding is needed
         decode_mask = None
+        decode_mask_len = max_prompt_len  # tracks current valid length in pre-allocated decode_mask
         prefill_attn_mask = None
         if any(length != max_prompt_len for length in prompt_lengths):
             # prompt_mask[b, t] = True if position t is a real token (not padding) for prompt b
@@ -165,8 +166,11 @@ class Engine:
             # prefill_attn_mask combines prompt_mask and causal_mask: attend only to non-padding keys before the query position
             # shape: (num_prompts, 1, max_prompt_len, max_prompt_len) - the 1 broadcasts across heads
             prefill_attn_mask = (causal_mask.unsqueeze(0) & prompt_mask.unsqueeze(1)).unsqueeze(1)
-            # decode_mask tracks which positions are valid for each row during generation (will be updated after each step)
-            decode_mask = prompt_mask.repeat_interleave(num_samples, dim=0)
+            # decode_mask tracks which positions are valid for each row during generation
+            # Pre-allocate to max size to avoid repeated concatenation in the loop
+            decode_max_len = max_prompt_len + (max_tokens if max_tokens is not None else 1024)
+            decode_mask = torch.zeros((total_rows, decode_max_len), dtype=torch.bool, device=device)
+            decode_mask[:, :max_prompt_len] = prompt_mask.repeat_interleave(num_samples, dim=0)
 
         # 2) Run batched prefill
         m = self.model.config
@@ -189,12 +193,11 @@ class Engine:
             **kv_model_kwargs,
         )
         # Initialize the decode cache from prefill cache, replicating for each sample
+        # Use repeat_interleave for efficient GPU-side replication (single kernel vs nested loop)
         dtype, dev = kv_cache_prefill.kv_cache.dtype, kv_cache_prefill.kv_cache.device
         kv_cache_decode.kv_cache = torch.empty(kv_cache_decode.kv_shape, dtype=dtype, device=dev)
-        for i in range(num_prompts):
-            src = kv_cache_prefill.kv_cache[:, :, i:i + 1, :, :max_prompt_len, :]
-            for j in range(num_samples):
-                kv_cache_decode.kv_cache[:, :, i * num_samples + j:i * num_samples + j + 1, :, :max_prompt_len, :] = src
+        kv_cache_decode.kv_cache[:, :, :, :, :max_prompt_len, :] = \
+            kv_cache_prefill.kv_cache[:, :, :, :, :max_prompt_len, :].repeat_interleave(num_samples, dim=2)
         kv_cache_decode.pos = max_prompt_len
         del kv_cache_prefill  # no need to keep this memory around
 
@@ -245,16 +248,14 @@ class Engine:
             # Prepare logits for next iteration
             ids = torch.tensor(token_column, dtype=torch.long, device=device).unsqueeze(1)
 
-
             if decode_mask is not None:
-                # Extend decode_mask with True for the new tokens
-                decode_mask = torch.cat(
-                    [decode_mask, torch.ones((total_rows, 1), dtype=torch.bool, device=device)], dim=1
-                )
+                # Mark the new token position as valid (pre-allocated, no concatenation needed)
+                decode_mask[:, decode_mask_len] = True
+                decode_mask_len += 1
                 logits = self.model.forward(
                     ids,
                     kv_cache=kv_cache_decode,
-                    attention_mask=decode_mask.unsqueeze(1).unsqueeze(1),  # (B, 1, 1, T)
+                    attention_mask=decode_mask[:, :decode_mask_len].unsqueeze(1).unsqueeze(1),  # (B, 1, 1, T)
                 )
             else:
                 logits = self.model.forward(ids, kv_cache=kv_cache_decode)
