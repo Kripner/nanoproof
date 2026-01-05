@@ -1,5 +1,5 @@
 import argparse
-import os
+from typing import Protocol, Optional, runtime_checkable
 
 import torch
 import torch.distributed as dist
@@ -13,23 +13,56 @@ from nanoproof.search import run_mcts, Config, Game, Node, Player, TacticModel
 from nanoproof.checkpoints import load_model
 from nanoproof.engine import Engine
 
+
+#  TODO: parallelize this eval (similarly to experience collection)
+
+@runtime_checkable
+class EvalProgressCallback(Protocol):
+    """Protocol for receiving evaluation progress updates."""
+    
+    def on_start(self, dataset: str, total: int) -> None:
+        """Called when evaluation starts."""
+        ...
+    
+    def on_update(self, current: int, solved: int, errors: int) -> None:
+        """Called after each theorem is evaluated with exact global counts."""
+        ...
+
+
 @torch.inference_mode()
-def eval_success_rate(tactic_model: TacticModel, theorems=None, use_tqdm=False):
+def eval_success_rate(
+    tactic_model: TacticModel,
+    theorems=None,
+    use_tqdm=False,
+    progress: Optional[EvalProgressCallback] = None,
+):
     """
-    Evaluates the success rate of the model on the MiniF2F benchmark.
+    Evaluates the success rate of the model on the given theorems.
     Returns a dictionary with 'success_rate', 'solved', and 'total'.
+    
+    Args:
+        tactic_model: The model to evaluate
+        theorems: List of theorems to evaluate
+        use_tqdm: Whether to show tqdm progress bar
+        progress: Optional callback object for progress updates
     """
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     theorem_indices = list(range(ddp_rank, len(theorems), ddp_world_size))
-    theorems = [theorems[i] for i in theorem_indices]
+    theorems_subset = [theorems[i] for i in theorem_indices]
 
     config = Config()
     client = LeanClient(config.server_address, config.server_port)
     
     solved_count = 0
     error_count = 0
+    processed_count = 0
     
     device = tactic_model.network.get_device()
+    
+    # Notify start
+    if progress is not None and ddp_rank == 0:
+        progress.on_start("", len(theorems))
+    
     with client.get_process() as env:
         env.send_command("""
             open scoped Real
@@ -37,31 +70,49 @@ def eval_success_rate(tactic_model: TacticModel, theorems=None, use_tqdm=False):
             open scoped Topology
             open scoped Polynomial
         """)
-        iterator = zip(theorem_indices, theorems)
+        iterator = zip(theorem_indices, theorems_subset)
         if use_tqdm:
-            iterator = tqdm(iterator, total=len(theorems), desc=f"Rank {ddp_rank}", position=ddp_rank)
+            iterator = tqdm(iterator, total=len(theorems_subset), desc=f"Rank {ddp_rank}", position=ddp_rank)
             
-        for i, theorem in iterator:
+        for idx, (i, theorem) in enumerate(iterator):
             init_branch = env.proof_from_sorry(theorem)
             if not init_branch.is_success():
                 error_count += 1
+                processed_count += 1
                 print0(f"Error on theorem: {theorem}\n... error: {init_branch.error}")
-                continue
-            init_branch = init_branch.value
+            else:
+                init_branch = init_branch.value
+                
+                game = Game(theorem, num_simulations=config.num_simulations)
+                game.root = Node(
+                    action=None,
+                    prior=None,
+                    state=[init_branch],
+                    to_play=Player.OR,
+                    reward=None,
+                )
+                
+                run_mcts(config, game, tactic_model)
+                
+                if game.root.is_solved:
+                    solved_count += 1
+                processed_count += 1
             
-            game = Game(theorem, num_simulations=config.num_simulations)
-            game.root = Node(
-                action=None,
-                prior=None,
-                state=[init_branch],
-                to_play=Player.OR,
-                reward=None,
-            )
-            
-            run_mcts(config, game, tactic_model)
-            
-            if game.root.is_solved:
-                solved_count += 1
+            # Update progress with exact global counts (using all_reduce)
+            if progress is not None:
+                local_stats = torch.tensor(
+                    [processed_count, solved_count, error_count],
+                    dtype=torch.long, device=device
+                )
+                if ddp:
+                    dist.all_reduce(local_stats, op=dist.ReduceOp.SUM)
+                
+                if ddp_rank == 0:
+                    progress.on_update(
+                        current=local_stats[0].item(),
+                        solved=local_stats[1].item(),
+                        errors=local_stats[2].item(),
+                    )
 
     local_metrics = torch.tensor([solved_count, error_count, len(theorem_indices)], dtype=torch.long, device=device)
     if ddp:
@@ -79,6 +130,7 @@ def eval_success_rate(tactic_model: TacticModel, theorems=None, use_tqdm=False):
         "errors": global_error,
         "error_rate": error_rate,
     }
+
 
 def main():
     parser = argparse.ArgumentParser()
