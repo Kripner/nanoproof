@@ -121,6 +121,16 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-r
 
 # Create the tactic model with batching support for parallel actors
 inner_tactic_model = TacticModel.create(num_samples=num_sampled_tactics)
+
+# Compile the model for faster forward passes (10-30% speedup on modern GPUs)
+# Using "reduce-overhead" mode which is optimized for variable batch sizes
+if device_type == "cuda":
+    compiled_network = torch.compile(inner_tactic_model.network, mode="reduce-overhead")
+    # Update all references to use the compiled model
+    inner_tactic_model.network = compiled_network
+    inner_tactic_model.engine.model = compiled_network
+    log("Model compiled with torch.compile (reduce-overhead mode)", component="Config")
+
 tactic_model = BatchedTacticModel(
     inner_model=inner_tactic_model,
     batch_size=num_actors,

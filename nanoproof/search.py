@@ -534,8 +534,10 @@ def progressive_sample(node: Node, config: Config) -> bool:
 
 def select_child(config: Config, node: Node) -> tuple[Action, Node]:
     """Selects the child with the highest UCB score."""
+    # Cache prior_sum once for all children (avoids O(children^2) recomputation)
+    prior_sum = node.prior_sum()
     _, action, child = max(
-        (ucb_score(config, node, child), action, child)
+        (ucb_score(config, node, child, prior_sum), action, child)
         for action, child in node.children.items()
     )
     return action, child
@@ -543,7 +545,7 @@ def select_child(config: Config, node: Node) -> tuple[Action, Node]:
 
 # The score for a node is based on its value, plus an exploration bonus based on
 # the prior.
-def ucb_score(config: Config, parent: Node, child: Node) -> float:
+def ucb_score(config: Config, parent: Node, child: Node, prior_sum: float) -> float:
     pb_c = (
             math.log((parent.visit_count + config.pb_c_base + 1) / config.pb_c_base)
             + config.pb_c_init
@@ -551,7 +553,7 @@ def ucb_score(config: Config, parent: Node, child: Node) -> float:
     pb_c *= math.sqrt(parent.visit_count) / (child.visit_count + 1)
 
     # Due to progressive sampling, we normalise priors here.
-    prior_score = pb_c * child.prior / parent.prior_sum()
+    prior_score = pb_c * child.prior / prior_sum
     if child.visit_count > 0:
         value = child.reward + child.value()
         value_score = config.value_discount ** (- 1 - value)
