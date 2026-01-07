@@ -2,31 +2,39 @@
 RL Server - coordinates distributed RL training.
 
 This module provides:
-- Inference servers that run on each DDP rank (one per GPU)
-- Inference proxy that load-balances across inference servers
+- TheoremDispatcher: supplies theorems to provers and collects results
 - Dynamic prover registration/unregistration
-- Prover coordination (start/pause/poll)
-- Distributed collection of transitions
+- Coordinator endpoints for theorem dispatch and result collection
 
-Architecture (with 2 GPUs):
-    prover_server → Coordinator (port 5000) → Inference servers
-                                               ├─ Rank 0 (port 5001, GPU 0)
-                                               └─ Rank 1 (port 5002, GPU 1)
+Architecture:
+    Coordinator:
+      - /get_theorem: supplies next theorem to prove
+      - /submit_result: receives proof results
+      - /generate: proxies to inference servers
+    
+    Prover:
+      - Requests theorems from coordinator
+      - Submits results (proof tree or error)
+
+The inference server is started using nanoproof.inference module.
+Provers connect to the coordinator for both theorem supply and inference.
 
 Used by rl.py when distributed=True.
 """
 
+import logging
+import queue
 import threading
 import time
+from dataclasses import dataclass
+from typing import Optional
 
 import requests
-import torch
 from flask import Flask, request as flask_request, jsonify
 
-from nanoproof.search import TacticModel
-from nanoproof.experience_collection import ReplayBuffer
-from nanoproof.cli import log
-from nanoproof.cli import get_monitor
+from nanoproof.search import Node, extract_transitions
+from nanoproof.experience_collection import TheoremsSampler
+from nanoproof.cli import log, get_monitor
 
 
 # -----------------------------------------------------------------------------
@@ -87,123 +95,195 @@ def get_registry() -> ProverRegistry:
 
 
 # -----------------------------------------------------------------------------
-# Inference Handler (runs on each DDP rank)
+# Theorem Dispatcher
 # -----------------------------------------------------------------------------
 
-class InferenceHandler:
+@dataclass
+class ProofResult:
+    """Result of a proof attempt."""
+    theorem_id: str
+    theorem: str
+    proof_tree: Optional[dict]  # Serialized Node tree, None if not proven
+    error: Optional[str] = None  # Error message, None if no error
+    
+    @property
+    def is_solved(self) -> bool:
+        return self.proof_tree is not None and self.error is None
+
+
+class TheoremDispatcher:
     """
-    Handles inference requests locally using a TacticModel.
-    Thread-safe wrapper around TacticModel.
-    Each DDP rank runs one of these on its GPU.
+    Dispatches theorems to provers and collects results.
+    
+    Two modes:
+    - Training: start_training(sampler) - infinite theorems from sampler
+    - Eval: start_eval(theorems) - fixed list, done when all processed
     """
     
-    def __init__(self, tactic_model: TacticModel):
-        self.tactic_model = tactic_model
+    def __init__(self):
+        self._queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        self._results: list[ProofResult] = []
         self._lock = threading.Lock()
+        self._done = threading.Event()
+        
+        # Mode state
+        self._mode: str = "idle"  # "idle", "training", "eval"
+        self._sampler: Optional[TheoremsSampler] = None
+        self._expected: Optional[int] = None
+        self._theorem_counter = 0
     
-    @torch.no_grad()
-    def generate_tactics_batch(self, state_strs: list[str]) -> list[list[str]]:
-        """Generate tactics for a batch of states."""
+    def _clear(self):
+        """Clear queue and results."""
+        self._results = []
+        self._done.clear()
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
+    
+    def start_training(self, sampler: TheoremsSampler):
+        """Start training mode with infinite theorems from sampler."""
         with self._lock:
-            return self.tactic_model.sample_tactic_from_str_batch(state_strs)
+            self._clear()
+            self._mode = "training"
+            self._sampler = sampler
+            self._expected = None
+        log("Dispatcher: training mode started", component="Dispatcher")
+    
+    def start_eval(self, theorems: list[str]):
+        """Start eval mode with fixed theorem list. Done when all processed."""
+        with self._lock:
+            self._clear()
+            self._mode = "eval"
+            self._sampler = None
+            self._expected = len(theorems)
+            for i, theorem in enumerate(theorems):
+                self._queue.put((f"eval_{i}", theorem))
+        log(f"Dispatcher: eval mode started with {len(theorems)} theorems", component="Dispatcher")
+    
+    def stop(self):
+        """Stop dispatching (provers will get None from get_theorem)."""
+        with self._lock:
+            self._mode = "idle"
+            self._sampler = None
+    
+    def get_theorem(self) -> Optional[tuple[str, str]]:
+        """Get next theorem. Returns None if idle or eval queue exhausted."""
+        if self._mode == "idle":
+            return None
+        
+        # In training mode, refill from sampler
+        if self._mode == "training" and self._sampler:
+            if self._queue.qsize() < 10:
+                for _ in range(50):
+                    theorem = self._sampler.sample_theorem()
+                    self._theorem_counter += 1
+                    self._queue.put((f"train_{self._theorem_counter}", theorem))
+        
+        try:
+            return self._queue.get_nowait()
+        except queue.Empty:
+            return None
+    
+    def submit_result(self, result: ProofResult):
+        """Submit a proof result."""
+        with self._lock:
+            self._results.append(result)
+            n = len(self._results)
+            solved = sum(1 for r in self._results if r.is_solved)
+            
+            if n % 10 == 0:
+                log(f"Progress: {n} results, {solved} solved", component="Dispatcher")
+            
+            # In eval mode, signal done when all results received
+            if self._mode == "eval" and self._expected and n >= self._expected:
+                self._done.set()
+    
+    def wait(self, timeout: float = None) -> bool:
+        """Wait for eval completion. Returns True if done, False on timeout."""
+        return self._done.wait(timeout=timeout)
+    
+    @property
+    def results(self) -> list[ProofResult]:
+        """Get all collected results."""
+        with self._lock:
+            return list(self._results)
+    
+    def metrics(self) -> dict:
+        """Get summary metrics."""
+        with self._lock:
+            total = len(self._results)
+            solved = sum(1 for r in self._results if r.is_solved)
+            errors = sum(1 for r in self._results if r.error)
+            return {
+                "success_rate": solved / total if total > 0 else 0.0,
+                "solved": solved,
+                "total": total,
+                "errors": errors,
+            }
+    
+    def get_transitions(self) -> list[tuple[str, str, float]]:
+        """Extract all transitions from solved proof trees."""
+        transitions = []
+        with self._lock:
+            for result in self._results:
+                if result.is_solved:
+                    root = Node.deserialize(result.proof_tree)
+                    transitions.extend(extract_transitions(root))
+        return transitions
 
 
-def create_inference_only_app(handler: InferenceHandler, rank: int):
-    """Create Flask app for inference-only server (no registration, just /generate)."""
-    app = Flask(__name__)
-    
-    @app.route("/health", methods=["GET"])
-    def health():
-        return jsonify({"status": "ok", "rank": rank})
-    
-    @app.route("/generate", methods=["POST"])
-    def generate():
-        data = flask_request.get_json()
-        states = data.get("states", [])
-        if len(states) == 0:
-            return jsonify({"tactics": []})
-        tactics = handler.generate_tactics_batch(states)
-        return jsonify({"tactics": tactics})
-    
-    return app
+# Global dispatcher instance
+_dispatcher = TheoremDispatcher()
 
 
-def start_inference_only_server(handler: InferenceHandler, port: int, rank: int):
-    """Start inference-only server in background thread."""
-    app = create_inference_only_app(handler, rank)
-    
-    def run_server():
-        import logging
-        log_handler = logging.getLogger('werkzeug')
-        log_handler.setLevel(logging.ERROR)
-        app.run(host="0.0.0.0", port=port, threaded=True)
-    
-    thread = threading.Thread(target=run_server, daemon=True)
-    thread.start()
-    log(f"Inference server started on port {port} (rank {rank})", component="InferenceServer")
-    return thread
+def get_dispatcher() -> TheoremDispatcher:
+    """Get the global theorem dispatcher."""
+    return _dispatcher
 
 
 # -----------------------------------------------------------------------------
-# Inference Proxy (load-balances across inference servers)
+# Inference Router (round-robin across inference servers)
 # -----------------------------------------------------------------------------
 
-class InferenceProxy:
-    """
-    Proxies inference requests to multiple inference servers in round-robin.
-    Used by the coordinator to distribute load across GPUs.
-    """
+class InferenceRouter:
+    """Routes inference requests to backend servers in round-robin fashion."""
     
     def __init__(self, inference_ports: list[int], host: str = "127.0.0.1"):
         self.endpoints = [f"http://{host}:{port}" for port in inference_ports]
         self._next_idx = 0
         self._lock = threading.Lock()
-        self._requests_per_endpoint = [0] * len(self.endpoints)
-        log(f"Inference proxy initialized with endpoints: {self.endpoints}", component="InferenceProxy")
     
-    def _get_next_endpoint(self) -> tuple[int, str]:
-        """Get the next endpoint in round-robin order."""
+    def forward_request(self, states: list[str]) -> list[list[str]]:
+        """Forward inference request to next backend server."""
+        if len(states) == 0:
+            return []
+        
         with self._lock:
             idx = self._next_idx
             self._next_idx = (self._next_idx + 1) % len(self.endpoints)
-            self._requests_per_endpoint[idx] += 1
-            return idx, self.endpoints[idx]
-    
-    def generate_tactics_batch(self, state_strs: list[str]) -> list[list[str]]:
-        """Forward request to next inference server."""
-        if len(state_strs) == 0:
-            return []
-        
-        idx, endpoint = self._get_next_endpoint()
+            endpoint = self.endpoints[idx]
         
         try:
             response = requests.post(
                 f"{endpoint}/generate",
-                json={"states": state_strs},
-                timeout=30.0
+                json={"states": states},
+                timeout=60.0
             )
             response.raise_for_status()
             return response.json().get("tactics", [])
         except Exception as e:
-            log(f"Inference request to {endpoint} failed: {e}", component="InferenceProxy")
-            # Return empty tactics on failure
-            return [[] for _ in state_strs]
-    
-    def get_stats(self) -> dict:
-        """Get load-balancing stats."""
-        with self._lock:
-            return {
-                "endpoints": self.endpoints,
-                "requests_per_endpoint": self._requests_per_endpoint.copy(),
-            }
+            log(f"Inference request to {endpoint} failed: {e}", component="Coordinator")
+            return [[] for _ in states]
 
 
 # -----------------------------------------------------------------------------
 # Coordinator Flask App (prover registration + inference proxy)
 # -----------------------------------------------------------------------------
 
-def create_coordinator_app(proxy: InferenceProxy, registry: ProverRegistry):
-    """Create Flask app for coordinator (handles registration and proxies inference)."""
+def create_coordinator_app(registry: ProverRegistry, router: InferenceRouter, dispatcher: TheoremDispatcher):
+    """Create Flask app for coordinator (handles registration, inference, and theorem dispatch)."""
     app = Flask(__name__)
     
     @app.route("/health", methods=["GET"])
@@ -212,7 +292,8 @@ def create_coordinator_app(proxy: InferenceProxy, registry: ProverRegistry):
             "status": "ok",
             "provers": registry.count(),
             "collecting": registry.is_collecting(),
-            "inference_stats": proxy.get_stats(),
+            "queue_size": dispatcher.queue_size,
+            "results": len(dispatcher.results),
         })
     
     @app.route("/generate", methods=["POST"])
@@ -220,10 +301,45 @@ def create_coordinator_app(proxy: InferenceProxy, registry: ProverRegistry):
         """Proxy inference request to backend servers."""
         data = flask_request.get_json()
         states = data.get("states", [])
-        if len(states) == 0:
-            return jsonify({"tactics": []})
-        tactics = proxy.generate_tactics_batch(states)
+        tactics = router.forward_request(states)
         return jsonify({"tactics": tactics})
+    
+    @app.route("/get_theorem", methods=["GET"])
+    def get_theorem():
+        """
+        Get next theorem to prove.
+        
+        Response:
+            {"id": "train_123", "theorem": "..."} or {"done": true}
+        """
+        result = dispatcher.get_theorem()
+        if result is None:
+            return jsonify({"done": True})
+        theorem_id, theorem = result
+        return jsonify({"id": theorem_id, "theorem": theorem})
+    
+    @app.route("/submit_result", methods=["POST"])
+    def submit_result():
+        """
+        Submit proof result.
+        
+        Request body:
+            {
+                "id": "train_123",
+                "theorem": "...",
+                "proof_tree": {...} or null,
+                "error": "..." or null
+            }
+        """
+        data = flask_request.get_json()
+        result = ProofResult(
+            theorem_id=data["id"],
+            theorem=data["theorem"],
+            proof_tree=data.get("proof_tree"),
+            error=data.get("error"),
+        )
+        dispatcher.submit_result(result)
+        return jsonify({"status": "ok"})
     
     @app.route("/register", methods=["POST"])
     def register():
@@ -253,28 +369,23 @@ def create_coordinator_app(proxy: InferenceProxy, registry: ProverRegistry):
     return app
 
 
-def start_coordinator(inference_ports: list[int], coordinator_port: int):
+def start_coordinator(coordinator_port: int, inference_ports: list[int]):
     """Start coordinator server in background thread."""
     registry = get_registry()
-    proxy = InferenceProxy(inference_ports)
-    app = create_coordinator_app(proxy, registry)
+    router = InferenceRouter(inference_ports)
+    dispatcher = get_dispatcher()
+    app = create_coordinator_app(registry, router, dispatcher)
     
     def run_server():
-        import logging
         log_handler = logging.getLogger('werkzeug')
         log_handler.setLevel(logging.ERROR)
         app.run(host="0.0.0.0", port=coordinator_port, threaded=True)
     
     thread = threading.Thread(target=run_server, daemon=True)
     thread.start()
-    log(f"Coordinator started on port {coordinator_port}", component="Coordinator")
+    log(f"Coordinator started on port {coordinator_port}, proxying to {len(inference_ports)} inference server(s)", 
+        component="Coordinator")
     return thread
-
-
-# Legacy function for backward compatibility
-def start_inference_server(handler: InferenceHandler, port: int):
-    """Start inference server in background thread (legacy, single-GPU mode)."""
-    return start_inference_only_server(handler, port, rank=0)
 
 
 # -----------------------------------------------------------------------------
@@ -314,70 +425,31 @@ def pause_all_provers(prover_addresses: list[str]):
             log(f"Failed to pause prover at {addr}: {e}", component="Coordinator")
 
 
-def poll_all_provers(prover_addresses: list[str]) -> tuple[list, list, int, int, int]:
-    """
-    Poll all prover servers for transitions.
-    Also updates the monitor with prover status.
-    Returns (transitions, tactics, games_played, games_solved, expansions).
-    """
-    from nanoproof.cli import get_monitor
-    
-    all_transitions = []
-    all_tactics = []
-    total_games_played = 0
-    total_games_solved = 0
-    total_expansions = 0
-    monitor = get_monitor()
-    
-    for addr in prover_addresses:
-        try:
-            response = requests.get(f"http://{addr}/poll", timeout=30.0)
-            response.raise_for_status()
-            data = response.json()
-            all_transitions.extend(data.get("transitions", []))
-            all_tactics.extend(data.get("tactics", []))
-            total_games_played += data.get("games_played", 0)
-            total_games_solved += data.get("games_solved", 0)
-            total_expansions += data.get("expansions", 0)
-            
-            # Update monitor with prover status
-            if monitor:
-                monitor.update_prover_server(
-                    address=addr,
-                    games_played=data.get("games_played", 0),
-                    games_solved=data.get("games_solved", 0),
-                    transitions=len(data.get("transitions", [])),
-                    num_threads=data.get("num_threads", 0),
-                    thread_states=data.get("thread_states"),
-                )
-        except Exception as e:
-            log(f"Failed to poll prover at {addr}: {e}", component="Coordinator")
-            # Mark prover as disconnected in monitor
-            if monitor:
-                monitor.update_prover_server(address=addr, num_threads=0, thread_states=[])
-    
-    return all_transitions, all_tactics, total_games_played, total_games_solved, total_expansions
-
-
 def distributed_collect(
+    sampler: TheoremsSampler,
     target_transitions: int,
     poll_interval: float,
-    replay_buffer: ReplayBuffer,
+    replay_buffer,  # ReplayBuffer
 ) -> int:
     """
     Collect transitions from distributed provers.
     
-    Uses the global prover registry. If no provers are registered,
-    waits until at least one is available.
+    Args:
+        sampler: TheoremsSampler for generating training theorems
+        target_transitions: Target number of transitions to collect
+        poll_interval: How often to check progress
+        replay_buffer: Buffer to add extracted transitions to
     
-    Returns the number of transitions collected.
+    Returns:
+        Number of transitions collected.
     """
-    
     registry = get_registry()
+    dispatcher = get_dispatcher()
     monitor = get_monitor()
+    
     log(f"Starting distributed collection, target={target_transitions}", component="Coordinator")
     
-    # Mark collection as running (new provers will be started automatically)
+    dispatcher.start_training(sampler)
     registry.set_collecting(True)
     
     try:
@@ -387,63 +459,98 @@ def distributed_collect(
             time.sleep(poll_interval)
         
         # Start all currently registered provers
-        prover_addresses = registry.get_all()
-        start_all_provers(prover_addresses)
+        start_all_provers(registry.get_all())
         
         collected = 0
-        total_games_played = 0
-        total_games_solved = 0
-        total_expansions = 0
         
         while collected < target_transitions:
             time.sleep(poll_interval)
             
-            # Get current list of provers (may have changed)
-            prover_addresses = registry.get_all()
-            if not prover_addresses:
-                log("No provers registered, waiting...", component="Coordinator")
-                continue
+            # Get current transitions
+            transitions = dispatcher.get_transitions()
+            new_transitions = transitions[collected:]
             
-            transitions, tactics, games_played, games_solved, expansions = poll_all_provers(prover_addresses)
+            if new_transitions:
+                # Add to replay buffer
+                replay_buffer.local_buffer.extend(new_transitions)
+                collected = len(transitions)
+                
+                # Update monitor with transitions
+                if monitor:
+                    monitor.record_transitions(new_transitions)
+                    monitor.set_replay_buffer_size(len(replay_buffer.local_buffer))
+                
+                log(f"Transitions: {collected}/{target_transitions}", component="Coordinator")
             
-            # Add transitions to replay buffer
-            for t in transitions:
-                replay_buffer.local_buffer.append(t)
-            
-            collected += len(transitions)
-            total_games_played += games_played
-            total_games_solved += games_solved
-            total_expansions += expansions
-            
-            # Update monitor with collection stats
-            if monitor and (games_played > 0 or len(transitions) > 0 or expansions > 0):
-                # Record proof attempts (successful ones have transitions)
-                for _ in range(games_solved):
-                    monitor.record_proof_attempt(successful=True, transitions=0)
-                for _ in range(games_played - games_solved):
-                    monitor.record_proof_attempt(successful=False, transitions=0)
-                # Record expansions
-                for _ in range(expansions):
-                    monitor.record_expansion()
-                # Add live transitions for web display
-                if transitions:
-                    monitor.record_transitions(transitions)
-                # Record tactics for web display
-                if tactics:
-                    monitor.record_tactics(tactics)
-                # Update replay buffer size
-                monitor.set_replay_buffer_size(len(replay_buffer.local_buffer))
-            
-            if len(transitions) > 0:
-                log(f"Collected {len(transitions)} transitions (total: {collected}/{target_transitions})", 
-                    component="Coordinator")
+            # Update monitor with proof stats from dispatcher
+            if monitor:
+                metrics = dispatcher.metrics()
+                monitor.update_collection_stats(
+                    proofs_attempted=metrics['total'],
+                    proofs_successful=metrics['solved'],
+                )
         
-        # Pause all provers
-        prover_addresses = registry.get_all()
-        pause_all_provers(prover_addresses)
-        
+        pause_all_provers(registry.get_all())
+        dispatcher.stop()
         log(f"Distributed collection complete: {collected} transitions", component="Coordinator")
         return collected
     finally:
-        # Mark collection as stopped
         registry.set_collecting(False)
+
+
+def distributed_eval(theorems: list[str], dataset_name: str = "eval") -> dict:
+    """
+    Evaluate theorems using distributed provers.
+    
+    Args:
+        theorems: List of theorem strings to evaluate
+        dataset_name: Name of the dataset for monitor display
+    
+    Returns:
+        Dict with 'success_rate', 'solved', 'total', 'errors'.
+    """
+    registry = get_registry()
+    dispatcher = get_dispatcher()
+    monitor = get_monitor()
+    
+    log(f"Starting distributed evaluation on {len(theorems)} theorems", component="Coordinator")
+    
+    # Update monitor to show eval is starting
+    if monitor:
+        monitor.start_eval(dataset_name, len(theorems))
+    
+    # Wait for at least one prover
+    while registry.count() == 0:
+        log("Waiting for provers to register...", component="Coordinator")
+        time.sleep(1.0)
+    
+    dispatcher.start_eval(theorems)
+    
+    # Start provers
+    start_all_provers(registry.get_all())
+    
+    # Poll for results with progress updates (10 min overall timeout)
+    poll_interval = 2.0
+    max_wait_time = 600.0
+    start_time = time.time()
+    
+    while not dispatcher.wait(timeout=poll_interval):
+        # Update monitor with current progress
+        if monitor:
+            metrics = dispatcher.metrics()
+            monitor.update_eval_progress(
+                current=metrics['total'],
+                solved=metrics['solved'],
+                errors=metrics['errors']
+            )
+        
+        # Check overall timeout
+        if time.time() - start_time > max_wait_time:
+            log("Eval timed out", component="Coordinator")
+            break
+    
+    metrics = dispatcher.metrics()
+    pause_all_provers(registry.get_all())
+    
+    log(f"Eval complete: {metrics['solved']}/{metrics['total']} solved", component="Coordinator")
+    return metrics

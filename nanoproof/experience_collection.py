@@ -1,11 +1,11 @@
 """
 Experience collection for RL training.
 
-When distributed=False, this module uses ProverWorker from prover_server.py
-to run actors locally. When distributed=True, the rl_server.py handles 
-remote prover coordination.
+When distributed=False, this module uses local actors to run proofs.
+When distributed=True, the rl_server.py handles remote prover coordination.
 """
 
+import asyncio
 import random
 import threading
 import time
@@ -13,13 +13,26 @@ import time
 import torch
 import torch.distributed as dist
 
+from leantree.repl_adapter.server import LeanClient
 from nanoproof.common import get_dist_info
-from nanoproof.prover_server import ProverWorker, TheoremsSampler
-from nanoproof.search import Node, Player, Config, BatchedTacticModel
+from nanoproof.search import Node, Player, Config, Game, run_mcts, extract_transitions
+from nanoproof.inference import BlockingTacticModel, TacticModel
 from nanoproof.cli import get_monitor, log
+from nanoproof.data.leanworkbook import list_theorems
 
 # Re-export for backwards compatibility
-__all__ = ['ReplayBuffer', 'TheoremsSampler', 'Config', 'run_actor']
+__all__ = ['ReplayBuffer', 'TheoremsSampler', 'ProverWorker', 'Config', 'run_actor']
+
+
+class TheoremsSampler:
+    """Samples theorems for local experience collection."""
+    
+    def __init__(self, seed: int | None = 0):
+        self.theorems = list_theorems(split="train")
+        self.rng = random.Random(seed)
+    
+    def sample_theorem(self) -> str:
+        return self.rng.choice(self.theorems)
 
 
 class ReplayBuffer:
@@ -56,56 +69,203 @@ class ReplayBuffer:
         return self.rng.choice(self.buffer)
 
 
-class _ReplayBufferAdapter:
+from typing import Callable, Optional
+
+
+class ProverWorker:
     """
-    Adapts ReplayBuffer to the LocalBuffer interface expected by ProverWorker.
+    Runs prover threads that play proof games.
     
-    This allows ProverWorker to write transitions directly into a ReplayBuffer.
+    Configurable with callbacks for:
+    - get_theorem: returns (id, theorem) or None
+    - on_result: called with (id, theorem, game_or_none, error_or_none)
+    
+    Used by both local mode (with TheoremsSampler) and distributed mode (with coordinator).
     """
-    def __init__(self, replay_buffer: ReplayBuffer):
-        self._replay_buffer = replay_buffer
-        self._lock = threading.Lock()
+    
+    def __init__(
+        self,
+        config: Config,
+        tactic_model,  # TacticModel or RemoteTacticModel
+        lean_address: str,
+        lean_port: int,
+        get_theorem: Callable[[], Optional[tuple[str, str]]],
+        on_result: Callable[[str, str, Optional[Game], Optional[str]], None],
+        num_actors: Optional[int] = None,
+        paused: bool = False,
+    ):
+        self.config = config
+        self.tactic_model = tactic_model
+        self.lean_address = lean_address
+        self.lean_port = lean_port
+        self.get_theorem = get_theorem
+        self.on_result = on_result
+        self.num_actors = num_actors or config.num_actors
+        
+        self._running = False
+        self._paused = paused
+        self._stop_flag = threading.Event()
+        self._threads: list[threading.Thread] = []
+        self._thread_states: dict[int, str] = {}
+        self._thread_states_lock = threading.Lock()
+        
         self.games_played = 0
         self.games_solved = 0
         self.expansions = 0
+        self._stats_lock = threading.Lock()
     
-    def add_transitions(self, transitions: list, solved: bool):
-        """Add transitions to the replay buffer."""
-        with self._lock:
-            if transitions:
-                self._replay_buffer.local_buffer.extend(transitions)
-                # Record to monitor for real-time display
-                monitor = get_monitor()
-                if monitor is not None:
-                    monitor.record_transitions(transitions)
-            self.games_played += 1
-            if solved:
-                self.games_solved += 1
+    def start(self):
+        """Start the actor threads."""
+        if self._running:
+            return
+        
+        self._running = True
+        self._paused = False
+        self._stop_flag.clear()
+        
+        for i in range(self.num_actors):
+            t = threading.Thread(target=self._actor_loop, args=(i,), daemon=True)
+            t.start()
+            self._threads.append(t)
     
-    def add_tactic(self, state: str, tactic: str, success: bool):
-        """Record a tactic application (for web UI display)."""
-        pass  # Not needed for RL training
+    def stop(self):
+        """Stop all actor threads."""
+        self._stop_flag.set()
+        self._running = False
+        for t in self._threads:
+            t.join(timeout=5.0)
+        self._threads = []
     
-    def add_expansion(self):
-        """Record an MCTS expansion."""
-        with self._lock:
-            self.expansions += 1
+    def pause(self):
+        """Pause collection (actors will finish current game then wait)."""
+        self._paused = True
     
-    def get_stats(self) -> dict:
-        with self._lock:
-            return {
-                "transitions_pending": len(self._replay_buffer.local_buffer),
-                "games_played": self.games_played,
-                "games_solved": self.games_solved,
-                "expansions": self.expansions,
-            }
+    def resume(self):
+        """Resume collection."""
+        self._paused = False
+    
+    def _set_thread_state(self, actor_id: int, state: str):
+        with self._thread_states_lock:
+            self._thread_states[actor_id] = state
+    
+    def get_thread_states(self) -> list[str]:
+        with self._thread_states_lock:
+            return [self._thread_states.get(i, "idle") for i in range(self.num_actors)]
+    
+    def has_started_actors(self) -> bool:
+        return len(self._threads) > 0 and self._running
+    
+    def all_actors_exited(self) -> bool:
+        return all(not t.is_alive() for t in self._threads)
+    
+    def _actor_loop(self, actor_id: int):
+        """Main loop for a single actor thread."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Connect to Lean server
+        self._set_thread_state(actor_id, "blocked")
+        client = LeanClient(self.lean_address, self.lean_port)
+        self._set_thread_state(actor_id, "idle")
+        
+        consecutive_errors = 0
+        max_consecutive_errors = 5
+        
+        while not self._stop_flag.is_set():
+            # Check if paused
+            if self._paused:
+                self._set_thread_state(actor_id, "idle")
+                time.sleep(0.5)
+                continue
+            
+            # Get theorem
+            theorem_data = self.get_theorem()
+            if theorem_data is None:
+                self._set_thread_state(actor_id, "idle")
+                time.sleep(0.5)
+                continue
+            
+            theorem_id, theorem = theorem_data
+            self._set_thread_state(actor_id, "running")
+            
+            # Try to prove it
+            try:
+                game = self._play_game(client, theorem)
+                consecutive_errors = 0
+                
+                if game is not None and game.root is not None:
+                    with self._stats_lock:
+                        self.games_played += 1
+                        if game.root.is_solved:
+                            self.games_solved += 1
+                
+                # Report result
+                self.on_result(theorem_id, theorem, game, None)
+                
+            except ConnectionResetError:
+                consecutive_errors += 1
+                self._set_thread_state(actor_id, "error")
+                self.on_result(theorem_id, theorem, None, "Connection reset")
+                if consecutive_errors >= max_consecutive_errors:
+                    break
+                try:
+                    self._set_thread_state(actor_id, "blocked")
+                    client = LeanClient(self.lean_address, self.lean_port)
+                except Exception:
+                    pass
+            except Exception as e:
+                consecutive_errors += 1
+                self._set_thread_state(actor_id, "error")
+                self.on_result(theorem_id, theorem, None, str(e))
+                log(f"[Actor {actor_id}] Error: {e}", component="Collection")
+                if consecutive_errors >= max_consecutive_errors:
+                    break
+        
+        self._set_thread_state(actor_id, "idle")
+    
+    def _play_game(self, client, theorem: str):
+        """Play a single proof game."""
+        process = client.get_process()
+        if process is None:
+            return None
+        
+        with process as env:
+            env.send_command("""
+                open scoped Real
+                open scoped Nat
+                open scoped Topology
+                open scoped Polynomial
+            """)
+            init_branch = env.proof_from_sorry(theorem)
+            if not init_branch.is_success():
+                return None
+            init_branch = init_branch.value
+            
+            game = Game(theorem, self.config.num_simulations)
+            game.root = Node(
+                action=None,
+                prior=None,
+                state=[init_branch],
+                to_play=Player.OR,
+                reward=None,
+            )
+            
+            def on_expansion():
+                with self._stats_lock:
+                    self.expansions += 1
+            
+            run_mcts(
+                self.config, game, self.tactic_model,
+                expansion_callback=on_expansion,
+            )
+            return game
 
 
 @torch.no_grad()
 def run_actor(
     total_to_collect: int,
     config: Config,
-    model: BatchedTacticModel,
+    model: BlockingTacticModel,
     replay_buffer: ReplayBuffer,
     theorems_sampler: TheoremsSampler
 ):
@@ -113,27 +273,50 @@ def run_actor(
     Run parallel actors to collect proofs locally.
     
     Uses ProverWorker to manage actor threads. LLM calls are automatically
-    batched via the BatchedTacticModel.
+    batched via the BlockingTacticModel.
     """
-    ddp, _, _, world_size = get_dist_info()
+    ddp, rank, _, world_size = get_dist_info()
+    master_process = rank == 0
     device = model.network.get_device()
     num_actors = config.num_actors
-
-    log(f"Starting collection with {num_actors} actors, target={total_to_collect} transitions", 
-        component="Collection")
-
-    # Create adapter for the replay buffer
-    buffer_adapter = _ReplayBufferAdapter(replay_buffer)
     
+    # Counter for generating theorem IDs
+    theorem_counter = [0]
+
+    if master_process:
+        log(f"Starting collection with {num_actors} actors/rank, target={total_to_collect} transitions", 
+            component="Collection")
+
+    def get_theorem():
+        """Sample a theorem from the local sampler."""
+        theorem = theorems_sampler.sample_theorem()
+        theorem_counter[0] += 1
+        return (f"local_{theorem_counter[0]}", theorem)
+    
+    def on_result(theorem_id: str, theorem: str, game, error: str | None):
+        """Handle proof result by extracting transitions."""
+        if error is not None or game is None or game.root is None:
+            return
+        if not game.root.is_solved:
+            return
+        # Extract transitions and add to buffer
+        transitions = extract_transitions(game.root)
+        with replay_buffer._lock:
+            replay_buffer.local_buffer.extend(transitions)
+        # Update monitor
+        monitor = get_monitor()
+        if monitor is not None:
+            monitor.record_transitions(transitions)
+
     # Create the prover worker
     worker = ProverWorker(
         config=config,
         tactic_model=model,
-        lean_server_address=config.server_address,
-        lean_server_port=config.server_port,
-        buffer=buffer_adapter,
+        lean_address=config.server_address,
+        lean_port=config.server_port,
+        get_theorem=get_theorem,
+        on_result=on_result,
         num_actors=num_actors,
-        theorems_seed=theorems_sampler.rng.randint(0, 2**31),
     )
     
     # Start collection
@@ -157,8 +340,9 @@ def run_actor(
         while True:
             global_collected = check_global_collected()
             if global_collected >= total_to_collect:
-                log(f"Target reached: {global_collected}/{total_to_collect} transitions collected",
-                    component="Collection")
+                if master_process:
+                    log(f"Target reached: {global_collected}/{total_to_collect} transitions collected",
+                        component="Collection")
                 break
             
             # Update monitor with actor status
@@ -172,16 +356,17 @@ def run_actor(
                 log("WARNING: All actors have exited unexpectedly", component="Collection")
                 break
             
-            # Periodic status update
+            # Periodic status update (master only)
             loop_count += 1
-            if loop_count % 50 == 0:  # Every 5 seconds
+            if loop_count % 50 == 0 and master_process:  # Every 5 seconds
                 log(f"Progress: {global_collected}/{total_to_collect} transitions", 
                     component="Collection")
             
             time.sleep(0.1)
     finally:
         # Shutdown
-        log(f"Stopping actors...", component="Collection")
+        if master_process:
+            log(f"Stopping actors...", component="Collection")
         model.shutdown()  # Unblock any waiting threads
         worker.stop()
         
@@ -189,19 +374,19 @@ def run_actor(
         if monitor is not None:
             monitor.clear_local_actors()
 
-    log(f"Collection complete: {len(replay_buffer.local_buffer)} local transitions", 
-        component="Collection")
+    if master_process:
+        log(f"Collection complete: {len(replay_buffer.local_buffer)} local transitions", 
+            component="Collection")
 
 
 def _main():
     config = Config()
-    from nanoproof.search import TacticModel
     model = TacticModel.create(num_samples=config.num_sampled_tactics)
     replay_buffer = ReplayBuffer(config)
     theorems_sampler = TheoremsSampler()
     
-    # For testing, use BatchedTacticModel
-    batched_model = BatchedTacticModel(
+    # For testing, use BlockingTacticModel
+    batched_model = BlockingTacticModel(
         inner_model=model,
         batch_size=config.num_actors,
         timeout_seconds=0.1

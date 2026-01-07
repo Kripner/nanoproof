@@ -137,7 +137,7 @@ function App() {
 
         <GPUPanel gpus={state.gpus} />
 
-        <LeanServerPanel server={state.lean_server} />
+        <LeanServerPanel server={state.lean_server} servers={state.lean_servers} />
         
         <EvalHistory history={state.eval_history} />
 

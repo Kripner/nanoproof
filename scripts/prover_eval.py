@@ -14,7 +14,8 @@ from leantree.repl_adapter.server import LeanClient
 from nanoproof.common import compute_init, compute_cleanup, print0, autodetect_device_type, get_dist_info
 from nanoproof.data import minif2f
 from nanoproof.data import leanworkbook
-from nanoproof.search import run_mcts, Config, Game, Node, Player, TacticModel, BatchedTacticModel
+from nanoproof.search import run_mcts, Config, Game, Node, Player
+from nanoproof.inference import TacticModel, BlockingTacticModel
 from nanoproof.cli import log
 
 
@@ -64,7 +65,7 @@ def evaluate_theorem(
     theorem: str,
     env,
     config: Config,
-    model: Union[TacticModel, BatchedTacticModel],
+    model: Union[TacticModel, BlockingTacticModel],
 ) -> tuple[bool, bool]:
     """
     Evaluate a single theorem using MCTS.
@@ -154,7 +155,7 @@ def broadcast_progress(
 
 @torch.inference_mode()
 def eval_success_rate(
-    tactic_model: Union[TacticModel, BatchedTacticModel],
+    tactic_model: Union[TacticModel, BlockingTacticModel],
     theorems=None,
     use_tqdm=False,
     progress: Optional[EvalProgressCallback] = None,
@@ -165,13 +166,13 @@ def eval_success_rate(
     Returns a dictionary with 'success_rate', 'solved', and 'total'.
     
     Args:
-        tactic_model: The model to evaluate (TacticModel or BatchedTacticModel)
+        tactic_model: The model to evaluate (TacticModel or BlockingTacticModel)
         theorems: List of theorems to evaluate
         use_tqdm: Whether to show tqdm progress bar
         progress: Optional callback object for progress updates
         num_actors: Number of parallel actors for evaluation. If >1, uses parallel evaluation.
                     When num_actors > 1 and tactic_model is a TacticModel, it will be wrapped
-                    in a BatchedTacticModel automatically.
+                    in a BlockingTacticModel automatically.
     """
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     theorems_subset = theorems[ddp_rank::ddp_world_size]
@@ -186,7 +187,7 @@ def eval_success_rate(
 
 
 def _eval_sequential(
-    tactic_model: Union[TacticModel, BatchedTacticModel],
+    tactic_model: Union[TacticModel, BlockingTacticModel],
     theorems_subset: list[str],
     use_tqdm: bool,
     progress: Optional[EvalProgressCallback],
@@ -227,7 +228,7 @@ def _eval_sequential(
 
 
 def _eval_parallel(
-    tactic_model: Union[TacticModel, BatchedTacticModel],
+    tactic_model: Union[TacticModel, BlockingTacticModel],
     theorems: list[str],
     theorems_subset: list[str],
     progress: Optional[EvalProgressCallback],
@@ -237,9 +238,9 @@ def _eval_parallel(
     ddp, ddp_rank, _, _ = get_dist_info()
     config = Config()
     
-    # Wrap in BatchedTacticModel if necessary
+    # Wrap in BlockingTacticModel if necessary
     if isinstance(tactic_model, TacticModel):
-        model = BatchedTacticModel(tactic_model, batch_size=num_actors, timeout_seconds=0.1)
+        model = BlockingTacticModel(tactic_model, batch_size=num_actors, timeout_seconds=0.1)
         owns_model = True
     else:
         model = tactic_model

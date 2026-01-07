@@ -91,7 +91,7 @@ def log(msg: str, component: str | None = None, actor_id: int | None = None):
     
     Args:
         msg: The message to log
-        component: Component name (e.g., "BatchedTacticModel", "Collection")
+        component: Component name (e.g., "TacticModel", "Collection")
         actor_id: Actor thread ID if applicable
     """
     if actor_id is not None:
@@ -386,13 +386,17 @@ class WebMonitor:
         # GPU status
         self.gpus: list[GPUStatus] = []
 
-        # Lean server status
+        # Lean server status (single server for local mode)
         self.lean_server: LeanServerStatus = LeanServerStatus()
+        
+        # Multiple lean servers (for distributed mode monitoring)
+        self.lean_servers: list[LeanServerStatus] = []
 
         # Server thread
         self._server_thread: threading.Thread | None = None
         self._gpu_monitor_thread: threading.Thread | None = None
         self._lean_monitor_thread: threading.Thread | None = None
+        self._lean_servers_monitor_thread: threading.Thread | None = None
         self._stop_monitors = threading.Event()
         self._app: Flask | None = None
 
@@ -490,6 +494,75 @@ class WebMonitor:
         # Start the Lean server monitor if not already running
         if self._lean_monitor_thread is None and self.enabled:
             self._start_lean_monitor()
+
+    def set_lean_servers(self, server_urls: list[str]):
+        """
+        Configure multiple Lean servers for monitoring (distributed mode).
+        
+        Args:
+            server_urls: List of server URLs in format "host:port"
+        """
+        with self._lock:
+            self.lean_servers = []
+            for url in server_urls:
+                if ":" in url:
+                    host, port = url.rsplit(":", 1)
+                    try:
+                        port_int = int(port)
+                    except ValueError:
+                        port_int = 8080
+                else:
+                    host = url
+                    port_int = 8080
+                
+                server = LeanServerStatus(address=host, port=port_int)
+                self.lean_servers.append(server)
+        
+        # Start the multi-server monitor if not already running
+        if self._lean_servers_monitor_thread is None and self.enabled:
+            self._start_lean_servers_monitor()
+
+    def _start_lean_servers_monitor(self):
+        """Start a background thread to monitor multiple Lean servers."""
+        def monitor_lean_servers():
+            import urllib.request
+            import json as json_lib
+            
+            while not self._stop_monitors.wait(timeout=3.0):
+                with self._lock:
+                    servers = self.lean_servers[:]
+                
+                for server in servers:
+                    if not server.address or not server.port:
+                        continue
+                    
+                    try:
+                        url = f"http://{server.address}:{server.port}/status"
+                        req = urllib.request.Request(url, method="GET")
+                        req.add_header("Accept", "application/json")
+                        
+                        with urllib.request.urlopen(req, timeout=5.0) as response:
+                            data = json_lib.loads(response.read().decode())
+                        
+                        with self._lock:
+                            server.connected = True
+                            server.available_processes = data.get("available_processes", 0)
+                            server.used_processes = data.get("used_processes", 0)
+                            server.max_processes = data.get("max_processes", 0)
+                            server.cpu_percent = data.get("cpu_percent_per_core", [])
+                            ram = data.get("ram", {})
+                            server.ram_percent = ram.get("percent", 0.0)
+                            server.ram_used_gb = ram.get("used_bytes", 0) / (1024**3)
+                            server.ram_total_gb = ram.get("total_bytes", 0) / (1024**3)
+                            server.last_update = time.time()
+                            server.error = ""
+                    except Exception as e:
+                        with self._lock:
+                            server.connected = False
+                            server.error = str(e)
+        
+        self._lean_servers_monitor_thread = threading.Thread(target=monitor_lean_servers, daemon=True)
+        self._lean_servers_monitor_thread.start()
 
     def _start_lean_monitor(self):
         """Start a background thread to monitor Lean server status."""
@@ -900,6 +973,22 @@ class WebMonitor:
                     "ram_total_gb": self.lean_server.ram_total_gb,
                     "error": self.lean_server.error,
                 },
+                "lean_servers": [
+                    {
+                        "address": s.address,
+                        "port": s.port,
+                        "connected": s.connected,
+                        "available_processes": s.available_processes,
+                        "used_processes": s.used_processes,
+                        "max_processes": s.max_processes,
+                        "cpu_percent": s.cpu_percent,
+                        "ram_percent": s.ram_percent,
+                        "ram_used_gb": s.ram_used_gb,
+                        "ram_total_gb": s.ram_total_gb,
+                        "error": s.error,
+                    }
+                    for s in self.lean_servers
+                ],
             }
 
     # --- State update methods ---
@@ -965,6 +1054,14 @@ class WebMonitor:
 
     def record_batch_wait(self, wait_time: float):
         self.collection.record_wait_time(wait_time)
+
+    def update_collection_stats(self, proofs_attempted: int = 0, proofs_successful: int = 0, expansions: int = 0):
+        """Update collection stats from distributed mode metrics."""
+        with self._lock:
+            self.collection.proofs_attempted = proofs_attempted
+            self.collection.proofs_successful = proofs_successful
+            if expansions > 0:
+                self.collection.expansions = expansions
 
     def update_training(self, step: int, loss: float, num_tokens: int = 0, lr: float = 0.0):
         with self._lock:

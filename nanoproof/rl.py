@@ -20,11 +20,12 @@ from nanoproof.engine import Engine
 from nanoproof.data.leantree import iter_data
 from nanoproof.data.leantree_dataloader import rl_data_generator
 from nanoproof.experience_collection import ReplayBuffer, TheoremsSampler, Config, run_actor
-from nanoproof.search import TacticModel, BatchedTacticModel
+from nanoproof.inference import TacticModel, BlockingTacticModel
 from nanoproof.data import minif2f
 from nanoproof.data import leanworkbook
 from nanoproof.cli import create_monitor, configure_logging, log
-from nanoproof.rl_server import distributed_collect, InferenceHandler, start_inference_only_server, start_coordinator
+from nanoproof.rl_server import distributed_collect, distributed_eval, start_coordinator
+from nanoproof.inference import start_inference_server
 from scripts.prover_eval import eval_success_rate
 
 # TODO: if tactic application results in a state that already is on the path from root, skip the tactic (otherwise we sometimes get stuck in loop of eg. rw [add_comm])
@@ -46,6 +47,7 @@ device_batch_size = 8  # (maybe) max to avoid OOM (on A100 40GB)
 distributed = True  # enable distributed mode (provers on separate nodes)
 inference_server_port = 5000  # port for inference server (distributed mode only)
 poll_interval = 3.0  # how often to poll provers for transitions (seconds)
+lean_servers = "10.10.25.40:8000,10.10.25.36:8000"  # comma-separated list of lean server URLs for monitoring (e.g., "host1:8080,host2:8080") - just for monitoring
 # data
 fraction_sft = 0.5  # 50% of data will come from Mathlib (leantree), 50% from replay buffer
 collect_every = 1  # how many steps to train between RL data collections  # TODO: when collect_every>1, we need some warmup (collect collect_every*collect_transitions)
@@ -107,14 +109,23 @@ if master_process:
 use_dummy_wandb = run == "dummy" or not master_process
 wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-rl", name=run, config=user_config, save_code=True)
 
-# Create the tactic model with batching support for parallel actors
+# Create the tactic model
+# In distributed mode, we use BlockingTacticModel for inference servers (started later)
+# In local mode, we use BlockingTacticModel for parallel actors
+log(f"Distributed mode: {distributed}", component="Config")
 inner_tactic_model = TacticModel.create(num_samples=num_sampled_tactics)
-tactic_model = BatchedTacticModel(
-    inner_model=inner_tactic_model,
-    batch_size=num_actors,
-    timeout_seconds=batch_timeout
-)
-model = tactic_model.network
+if distributed:
+    # In distributed mode, we don't need BlockingTacticModel here - 
+    # inference servers are started later with their own BlockingTacticModel
+    tactic_model = None
+    model = inner_tactic_model.network
+else:
+    tactic_model = BlockingTacticModel(
+        inner_model=inner_tactic_model,
+        batch_size=num_actors,
+        timeout_seconds=batch_timeout
+    )
+    model = tactic_model.network
 
 # print0(f"Target examples per step: {target_examples_per_step}")
 # print0(f"Collect every: {collect_every}")
@@ -144,6 +155,11 @@ theorems_sampler = TheoremsSampler(seed=rank_seed)
 rl_monitor = create_monitor(num_actors=num_actors, enabled=master_process)
 rl_monitor.set_output_dir(output_dir)
 rl_monitor.set_lean_server(config.server_address, config.server_port)
+
+# In distributed mode, set up monitoring for multiple lean servers
+if distributed and lean_servers:
+    lean_server_list = [s.strip() for s in lean_servers.split(",") if s.strip()]
+    rl_monitor.set_lean_servers(lean_server_list)
 
 
 def train_generator():
@@ -184,19 +200,24 @@ for opt in optimizers:
 
 # Start inference servers in distributed mode (each rank runs one)
 if distributed:
+    # Create BlockingTacticModel for the inference server
+    inference_model = BlockingTacticModel(
+        inner_model=inner_tactic_model,
+        batch_size=num_actors,
+        timeout_seconds=batch_timeout
+    )
     # Each rank starts an inference server on its own port
     inference_port = inference_server_port + 1 + ddp_rank  # ports 5001, 5002, ...
-    inference_handler = InferenceHandler(inner_tactic_model)
-    inference_server_thread = start_inference_only_server(inference_handler, inference_port, ddp_rank)
+    inference_server_thread = start_inference_server(inference_model, inference_port)
     
     # Sync to ensure all inference servers are up before coordinator starts
     if ddp:
         dist.barrier()
     
-    # Master also starts the coordinator that proxies to all inference servers
+    # Master also starts the coordinator (proxies inference + handles registration)
     if master_process:
         inference_ports = [inference_server_port + 1 + r for r in range(ddp_world_size)]
-        coordinator_thread = start_coordinator(inference_ports, inference_server_port)
+        coordinator_thread = start_coordinator(inference_server_port, inference_ports)
         # Give coordinator time to start
         time.sleep(0.5)
     
@@ -215,6 +236,8 @@ def cleanup():
     # Shutdown the batched tactic model to unblock any waiting threads
     if tactic_model is not None:
         tactic_model.shutdown()
+    if distributed and 'inference_model' in dir():
+        inference_model.shutdown()
     log("Shutdown complete", component="Main")
 
 atexit.register(cleanup)
@@ -231,9 +254,10 @@ while True:
             if master_process:
                 # Distributed mode: coordinate remote provers (only master does this)
                 distributed_collect(
-                    collect_transitions,
-                    poll_interval,
-                    replay_buffer,
+                    sampler=theorems_sampler,
+                    target_transitions=collect_transitions,
+                    poll_interval=poll_interval,
+                    replay_buffer=replay_buffer,
                 )
                 # Signal completion to other ranks via store (avoid NCCL timeout)
                 dist.get_rank()  # Ensure distributed is initialized
@@ -270,44 +294,70 @@ while True:
         model.eval()
         rl_monitor.set_phase("evaluating")
 
-        # Progress callback that reports to the monitor
-        class MonitorProgress:
-            def __init__(self, dataset_name: str):
-                self.dataset_name = dataset_name
-            
-            def on_start(self, dataset: str, total: int):
-                rl_monitor.start_eval(self.dataset_name, total)
-            
-            def on_update(self, current: int, solved: int, errors: int):
-                rl_monitor.update_eval_progress(current, solved, errors)
-
+        # Load eval theorems
         minif2f_theorems = minif2f.list_theorems(split="Valid")
-        log(f"Evaluating on {len(minif2f_theorems)} theorems from MiniF2F", component="Eval")
-        # Use parallel evaluation with batched model for speed
-        minif2f_results = eval_success_rate(
-            inner_tactic_model, minif2f_theorems, progress=MonitorProgress("MiniF2F"),
-            num_actors=num_actors
-        )
-        rl_monitor.record_eval(step, "MiniF2F", minif2f_results['success_rate'],
-                               minif2f_results['solved'], minif2f_results['total'], minif2f_results['errors'])
+        leanworkbook_theorems = leanworkbook.list_theorems(split="val")[:128]
 
-        leanworkbook_theorems = leanworkbook.list_theorems(split="val")
-        leanworkbook_theorems = leanworkbook_theorems[:128]
-        log(f"Evaluating on {len(leanworkbook_theorems)} theorems from LeanWorkBook", component="Eval")
-        leanworkbook_results = eval_success_rate(
-            inner_tactic_model, leanworkbook_theorems, progress=MonitorProgress("LeanWorkBook"),
-            num_actors=num_actors
-        )
-        rl_monitor.record_eval(step, "LeanWorkBook", leanworkbook_results['success_rate'],
-                               leanworkbook_results['solved'], leanworkbook_results['total'],
-                               leanworkbook_results['errors'])
+        if distributed:
+            # Distributed mode: use prover servers for evaluation (master only)
+            if master_process:
+                log(f"Evaluating on {len(minif2f_theorems)} theorems from MiniF2F (distributed)", component="Eval")
+                minif2f_results = distributed_eval(minif2f_theorems, dataset_name="MiniF2F")
+                rl_monitor.record_eval(step, "MiniF2F", minif2f_results['success_rate'],
+                                       minif2f_results['solved'], minif2f_results['total'], minif2f_results['errors'])
 
-        log(f"Step {step:05d} | minif2f: {minif2f_results['success_rate']:.4%} ({minif2f_results['solved']}/{minif2f_results['total']}, errors={minif2f_results['errors']}) | leanworkbook: {leanworkbook_results['success_rate']:.4%} ({leanworkbook_results['solved']}/{leanworkbook_results['total']}, errors={leanworkbook_results['errors']})", component="Eval")
-        wandb_run.log({
-            "step": step,
-            "minif2f_val": minif2f_results['success_rate'],
-            "leanworkbook_val": leanworkbook_results['success_rate'],
-        })
+                log(f"Evaluating on {len(leanworkbook_theorems)} theorems from LeanWorkBook (distributed)", component="Eval")
+                leanworkbook_results = distributed_eval(leanworkbook_theorems, dataset_name="LeanWorkBook")
+                rl_monitor.record_eval(step, "LeanWorkBook", leanworkbook_results['success_rate'],
+                                       leanworkbook_results['solved'], leanworkbook_results['total'],
+                                       leanworkbook_results['errors'])
+
+                log(f"Step {step:05d} | minif2f: {minif2f_results['success_rate']:.4%} ({minif2f_results['solved']}/{minif2f_results['total']}, errors={minif2f_results['errors']}) | leanworkbook: {leanworkbook_results['success_rate']:.4%} ({leanworkbook_results['solved']}/{leanworkbook_results['total']}, errors={leanworkbook_results['errors']})", component="Eval")
+                wandb_run.log({
+                    "step": step,
+                    "minif2f_val": minif2f_results['success_rate'],
+                    "leanworkbook_val": leanworkbook_results['success_rate'],
+                })
+            
+            # Wait for master to finish evaluation
+            if ddp:
+                dist.barrier()
+        else:
+            # Local mode: use local model
+            class MonitorProgress:
+                def __init__(self, dataset_name: str):
+                    self.dataset_name = dataset_name
+                
+                def on_start(self, dataset: str, total: int):
+                    rl_monitor.start_eval(self.dataset_name, total)
+                
+                def on_update(self, current: int, solved: int, errors: int):
+                    rl_monitor.update_eval_progress(current, solved, errors)
+
+            log(f"Evaluating on {len(minif2f_theorems)} theorems from MiniF2F", component="Eval")
+            minif2f_results = eval_success_rate(
+                inner_tactic_model, minif2f_theorems, progress=MonitorProgress("MiniF2F"),
+                num_actors=num_actors
+            )
+            rl_monitor.record_eval(step, "MiniF2F", minif2f_results['success_rate'],
+                                   minif2f_results['solved'], minif2f_results['total'], minif2f_results['errors'])
+
+            log(f"Evaluating on {len(leanworkbook_theorems)} theorems from LeanWorkBook", component="Eval")
+            leanworkbook_results = eval_success_rate(
+                inner_tactic_model, leanworkbook_theorems, progress=MonitorProgress("LeanWorkBook"),
+                num_actors=num_actors
+            )
+            rl_monitor.record_eval(step, "LeanWorkBook", leanworkbook_results['success_rate'],
+                                   leanworkbook_results['solved'], leanworkbook_results['total'],
+                                   leanworkbook_results['errors'])
+
+            log(f"Step {step:05d} | minif2f: {minif2f_results['success_rate']:.4%} ({minif2f_results['solved']}/{minif2f_results['total']}, errors={minif2f_results['errors']}) | leanworkbook: {leanworkbook_results['success_rate']:.4%} ({leanworkbook_results['solved']}/{leanworkbook_results['total']}, errors={leanworkbook_results['errors']})", component="Eval")
+            wandb_run.log({
+                "step": step,
+                "minif2f_val": minif2f_results['success_rate'],
+                "leanworkbook_val": leanworkbook_results['success_rate'],
+            })
+
         model.train()
         timer.end("eval")
         rl_monitor.display()

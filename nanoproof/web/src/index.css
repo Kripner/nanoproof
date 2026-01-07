@@ -202,70 +202,79 @@ body {
   gap: 8px;
 }
 
-.gpu-item {
-  background: var(--bg-tertiary);
-  border-radius: 6px;
-  padding: 10px;
-}
-
-.gpu-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 6px;
-}
-
-.gpu-name {
-  font-weight: 600;
-  font-size: 12px;
-}
-
-.gpu-metrics {
-  display: flex;
-  flex-direction: column;
+.gpu-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
   gap: 8px;
 }
 
-.gpu-metric {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+.gpu-item-compact {
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+  padding: 8px 10px;
 }
 
-.gpu-metric-header {
+.gpu-header-compact {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 6px;
 }
 
-.gpu-metric-label {
+.gpu-name-compact {
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--text-primary);
+}
+
+.gpu-subname {
   font-size: 10px;
   color: var(--text-muted);
-  text-transform: uppercase;
-}
-
-.gpu-metric-value {
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.gpu-metric-value.low { color: var(--accent-green); }
-.gpu-metric-value.medium { color: var(--accent-yellow); }
-.gpu-metric-value.high { color: var(--accent-red); }
-
-.gpu-stats {
-  display: flex;
-  gap: 16px;
-  font-size: 11px;
-  color: var(--text-secondary);
-  margin-top: 8px;
-}
-
-.gpu-bar {
-  height: 6px;
-  background: var(--bg-primary);
-  border-radius: 3px;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gpu-metric-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.gpu-metric-label-inline {
+  font-size: 9px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  width: 24px;
+  flex-shrink: 0;
+}
+
+.gpu-bar-inline {
+  flex: 1;
+  height: 5px;
+  background: var(--bg-primary);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.gpu-metric-value-inline {
+  font-size: 10px;
+  font-weight: 600;
+  min-width: 48px;
+  text-align: right;
+}
+
+.gpu-metric-value-inline.low { color: var(--accent-green); }
+.gpu-metric-value-inline.medium { color: var(--accent-yellow); }
+.gpu-metric-value-inline.high { color: var(--accent-red); }
+
+.gpu-stats-compact {
+  display: flex;
+  gap: 10px;
+  font-size: 9px;
+  color: var(--text-muted);
+  margin-top: 4px;
 }
 
 .gpu-bar-fill {
@@ -595,15 +604,42 @@ body {
   gap: 8px;
 }
 
-.lean-server-card .card-title {
+.lean-servers-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.lean-server-item {
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+  padding: 10px;
+}
+
+.lean-server-item.compact {
+  padding: 8px;
+}
+
+.lean-server-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  margin-bottom: 6px;
+}
+
+.lean-server-url {
+  font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .lean-status {
   font-size: 11px;
   font-weight: 500;
+  flex-shrink: 0;
 }
 
 .lean-status.connected {
@@ -614,20 +650,48 @@ body {
   color: var(--accent-red);
 }
 
-.lean-error {
-  background: rgba(248, 81, 73, 0.1);
-  border: 1px solid var(--accent-red);
-  border-radius: 4px;
-  padding: 8px;
-  font-size: 11px;
+.lean-error-compact {
+  font-size: 9px;
   color: var(--accent-red);
-  word-break: break-word;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.lean-address {
-  font-family: 'SF Mono', 'Consolas', monospace;
-  font-size: 12px;
-  color: var(--text-secondary);
+.lean-compact-stats {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.lean-compact-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 1;
+}
+
+.lean-compact-label {
+  font-size: 8px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.lean-compact-value {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-cyan);
+}
+
+.lean-compact-bars {
+  margin-top: 4px;
+}
+
+.lean-bar-tiny {
+  height: 3px;
+  background: var(--bg-primary);
+  border-radius: 1px;
+  overflow: hidden;
 }
 
 .lean-stats {

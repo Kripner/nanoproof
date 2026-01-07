@@ -86,6 +86,7 @@ export interface MonitorState {
   local_actors: Record<string, LocalActor>;
   gpus: GPU[];
   lean_server: LeanServerStatus;
+  lean_servers: LeanServerStatus[];
 }
 
 export interface ReplayBufferFile {

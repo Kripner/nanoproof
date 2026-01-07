@@ -1,9 +1,7 @@
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import enum
 import time
-import threading
-from contextlib import nullcontext
 from typing import Self, Protocol, TYPE_CHECKING
 import math
 
@@ -12,20 +10,8 @@ from leantree.repl_adapter.server import LeanClient, LeanProofBranch
 from nanoproof.common import pretty_print_tree, ValueOrError
 from nanoproof.cli import get_monitor, log, log_tactic
 
-# Heavy imports are done lazily inside TacticModel to speed up prover_server startup
-# These are only imported when TacticModel.create() is called:
-# - torch
-# - nanoproof.checkpoints (load_model)
-# - nanoproof.engine (Engine)
-# - nanoproof.model (Transformer)
-# - nanoproof.tokenizer (HuggingFaceTokenizer)
-
 if TYPE_CHECKING:
-    # For type hints only - not actually imported at runtime
-    import torch
-    from nanoproof.model import Transformer
-    from nanoproof.tokenizer import HuggingFaceTokenizer
-    from nanoproof.engine import Engine
+    from nanoproof.inference import TacticModel, BlockingTacticModel
 
 """
 leanserver --project-path ~/troja/nanoproof/leantree_project/ --repl-exe ~/repos/leantree/lean-repl/.lake/build/bin/repl --imports Mathlib FormalConjectures.ForMathlib.Analysis.SpecialFunctions.NthRoot FormalConjectures.Util.Answer --max-processes 2 --address=<PUBLIC_IP> --log-level=DEBUG
@@ -148,6 +134,128 @@ class Node:
         return pretty_print_tree(self, get_children, get_node_label, get_edge_label, max_label_len=200,
                                  max_edge_label_len=50)
 
+    def serialize(self) -> dict:
+        """Serialize the node tree to a JSON-compatible dict."""
+        # Serialize state as list of state strings (LeanProofBranch objects can't be serialized)
+        state_strs = [str(branch.state) for branch in self.state] if self.state else []
+        
+        # Serialize children recursively
+        children_data = None
+        if self.children is not None:
+            children_data = {
+                str(action): child.serialize() 
+                for action, child in self.children.items()
+            }
+        
+        return {
+            "action": self.action,
+            "prior": self.prior,
+            "state": state_strs,
+            "reward": self.reward,
+            "to_play": self.to_play.value,
+            "is_solved": self.is_solved,
+            "visit_count": self.visit_count,
+            "evaluations": self.evaluations,
+            "value_sum": self.value_sum,
+            "value_target": self.value_target,
+            "children": children_data,
+        }
+
+    @classmethod
+    def deserialize(cls, data: dict) -> Self:
+        """
+        Deserialize a node tree from a dict.
+        
+        Creates MockProofBranch objects for the state so that transition
+        extraction code (which expects branch.state) works correctly.
+        """
+        # Deserialize children recursively
+        children = None
+        if data.get("children") is not None:
+            children = {}
+            for action_str, child_data in data["children"].items():
+                # Try to convert action back to int if it was an int (for AND node children)
+                try:
+                    action = int(action_str)
+                except ValueError:
+                    action = action_str
+                children[action] = cls.deserialize(child_data)
+        
+        # Create mock proof branches with .state attribute
+        state_strs = data.get("state", [])
+        state = [MockProofBranch(s) for s in state_strs]
+        
+        return cls(
+            action=data["action"],
+            prior=data["prior"],
+            state=state,
+            reward=data["reward"],
+            to_play=Player(data["to_play"]),
+            is_solved=data["is_solved"],
+            visit_count=data["visit_count"],
+            evaluations=data["evaluations"],
+            value_sum=data["value_sum"],
+            value_target=data.get("value_target", 0),
+            children=children,
+        )
+
+
+class MockProofBranch:
+    """Mock proof branch for deserialized nodes. Mimics LeanProofBranch.state."""
+    
+    def __init__(self, state_str: str):
+        self.state = state_str
+    
+    def __str__(self):
+        return self.state
+
+
+def extract_transitions(node: Node) -> list[tuple[str, str, float]]:
+    """
+    Extract (context, tactic, value_target) transitions from a solved proof tree.
+    
+    Walks the solved path, extracting (state, action, value) for each OR node.
+    Works with both live LeanProofBranch states and deserialized MockProofBranch states.
+    """
+    if not node.is_solved:
+        return []
+    
+    transitions = []
+    _extract_transitions_recursive(node, transitions)
+    return transitions
+
+
+def _extract_transitions_recursive(node: Node, transitions: list):
+    """Recursively extract transitions from solved paths."""
+    if not node.is_solved:
+        return
+    
+    # Walk down the OR nodes
+    while node.to_play == Player.OR and not node.is_terminal:
+        if len(node.state) != 1:
+            break
+        if not node.children:
+            break
+        
+        # Find solved actions
+        solved_actions = [a for a in node.children if node.children[a].is_solved]
+        if not solved_actions:
+            break
+        
+        # Pick shortest tactic
+        action = min(solved_actions, key=lambda a: len(a))
+        
+        # Extract transition: (context, tactic, value_target)
+        context = str(node.state[0].state).strip()
+        transitions.append((context, action.strip(), node.value_target))
+        
+        node = node.children[action]
+    
+    # Handle AND nodes (multiple subgoals)
+    if node.to_play == Player.AND and node.children:
+        for child in node.children.values():
+            _extract_transitions_recursive(child, transitions)
+
 
 class Game:
     """A single episode of interaction with the environment."""
@@ -159,340 +267,12 @@ class Game:
         self.root: Node = None
 
 
-@dataclass
-class TacticModel:
-    # Type hints use strings for lazy imports
-    network: "Transformer"
-    tokenizer: "HuggingFaceTokenizer"
-    engine: "Engine"
-    num_samples: int = 6
-
-    def __post_init__(self):
-        import torch
-        self.rng = torch.Generator(device=self.network.get_device())
-        self.rng.manual_seed(0)
-
-    def sample_tactic(self, state: State) -> list[str]:
-        import torch
-        assert len(state) == 1, \
-            f"expected single branch in state when generating tactic, got {len(state)} - choose one goal first"
-        device = self.network.get_device()
-        assert device.type == "cuda"
-
-        state_str = str(state[0].state).strip()
-        tokens = self.tokenizer(state_str + "\n<|tactic|>", prepend=self.tokenizer.get_bos_token_id())
-        
-        # Check if state is too long for the model's rotary cache
-        max_prompt_len = self.network.config.sequence_len * 9
-        if len(tokens) > max_prompt_len:
-            return []  # State too long, return no tactics
-        
-        seed = torch.randint(torch.iinfo(torch.int32).max, (1,), device=device, generator=self.rng).item()
-        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-            sample_toks, masks = self.engine.generate_batch(
-                tokens, num_samples=self.num_samples, min_tokens=1, max_tokens=64, seed=seed
-            )
-        tactics = []
-        for i in range(self.num_samples):
-            tactic_toks = [token for token, mask in zip(sample_toks[i], masks[i]) if mask == 1]
-            tactic = self.tokenizer.decode(tactic_toks)
-            if "sorry" in tactic or "admit" in tactic:
-                continue
-            tactics.append(tactic)
-        return tactics
-
-    def sample_tactic_batch(self, states: list[State]) -> list[list[str]]:
-        """Batched version of sample_tactic for multiple states at once."""
-        state_strs = []
-        for state in states:
-            assert len(state) == 1, \
-                f"expected single branch in state when generating tactic, got {len(state)} - choose one goal first"
-            state_strs.append(str(state[0].state).strip())
-        return self.sample_tactic_from_str_batch(state_strs)
-
-    def sample_tactic_from_str(self, state_str: str) -> list[str]:
-        """Generate tactics from a state string directly (no State object needed)."""
-        return self.sample_tactic_from_str_batch([state_str])[0]
-
-    def sample_tactic_from_str_batch(self, state_strs: list[str]) -> list[list[str]]:
-        """Batched tactic generation from state strings directly."""
-        import torch
-        device = self.network.get_device()
-        assert device.type == "cuda"
-
-        # Maximum prompt length: leave room for generated tokens (64) within rotary cache
-        # Rotary cache is sequence_len * 10, so we use sequence_len * 9 as safe max
-        max_prompt_len = self.network.config.sequence_len * 9
-
-        # Prepare tokenized prompts, tracking which ones are too long
-        prompts = []
-        too_long_indices = set()
-        for idx, state_str in enumerate(state_strs):
-            tokens = self.tokenizer(state_str + "\n<|tactic|>", prepend=self.tokenizer.get_bos_token_id())
-            if len(tokens) > max_prompt_len:
-                # State is too long - use a placeholder (will return empty tactics)
-                too_long_indices.add(idx)
-                prompts.append([self.tokenizer.get_bos_token_id()])  # Minimal valid prompt
-            else:
-                prompts.append(tokens)
-
-        seed = torch.randint(torch.iinfo(torch.int32).max, (1,), device=device, generator=self.rng).item()
-        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-            # prompts is list[list[int]], which triggers batched generation
-            sample_toks_batch, masks_batch = self.engine.generate_batch(
-                prompts, num_samples=self.num_samples, min_tokens=1, max_tokens=64, seed=seed
-            )
-
-        # sample_toks_batch shape: (num_prompts, num_samples, seq_len)
-        results = []
-        for prompt_idx in range(len(state_strs)):
-            # Return empty tactics for states that were too long
-            if prompt_idx in too_long_indices:
-                results.append([])
-                continue
-            
-            tactics = []
-            for sample_idx in range(self.num_samples):
-                tactic_toks = [
-                    token for token, mask in zip(
-                        sample_toks_batch[prompt_idx][sample_idx],
-                        masks_batch[prompt_idx][sample_idx]
-                    ) if mask == 1
-                ]
-                tactic = self.tokenizer.decode(tactic_toks)
-                if "sorry" in tactic or "admit" in tactic:
-                    continue
-                tactics.append(tactic)
-            results.append(tactics)
-        return results
-
-    def shutdown(self):
-        """No-op for non-batched model. Exists for API compatibility with BatchedTacticModel."""
-        pass
-
-    @classmethod
-    def create(cls, num_samples: int = 6) -> Self:
-        # Lazy imports - only load heavy dependencies when actually creating the model
-        import torch
-        from nanoproof.checkpoints import load_model
-        from nanoproof.engine import Engine
-        
-        source = "sft"  # which checkpoint to load the model from
-        model_tag = "d26"  # model tag to load the model from
-        device = torch.device("cuda")
-
-        model, tokenizer, _ = load_model(source, device, phase="eval", model_tag=model_tag)
-        engine = Engine(model, tokenizer)
-        return cls(model, tokenizer, engine, num_samples=num_samples)
-
-
-class BatchedTacticModel:
-    """
-    Thread-safe wrapper around TacticModel that batches LLM calls from multiple threads.
-    
-    When sample_tactic is called, it blocks until either:
-    1. batch_size inputs have been accumulated, or
-    2. timeout_seconds has elapsed since the first pending request
-    
-    Then a single batched LLM call is made and results are distributed to waiting threads.
-    """
-
-    def __init__(self, inner_model: TacticModel, batch_size: int = 32, timeout_seconds: float = 0.1):
-        self.inner_model = inner_model
-        self.batch_size = batch_size
-        self.timeout_seconds = timeout_seconds
-
-        # Synchronization primitives
-        self._lock = threading.Lock()
-        self._batch_ready = threading.Condition(self._lock)
-
-        # Pending requests: list of (state, result_event, result_slot)
-        self._pending: list[tuple[State, threading.Event, list]] = []
-        self._first_request_time: float | None = None
-        self._batch_in_progress = False
-        
-        # Shutdown flag to unblock waiting threads
-        self._shutdown = False
-
-        # Stats for logging
-        self._total_requests = 0
-        self._total_batches = 0
-        log(f"Initialized with batch_size={batch_size}, timeout={timeout_seconds}s", component="BatchedTacticModel")
-
-    @property
-    def network(self):
-        """Expose network for compatibility with code that accesses model.network."""
-        return self.inner_model.network
-
-    def shutdown(self):
-        """
-        Signal shutdown to unblock all waiting threads.
-        Waiting threads will receive ValueOrError with error.
-        """
-        with self._lock:
-            self._shutdown = True
-            # Set all pending result events to unblock waiting threads
-            for _, result_event, result_slot in self._pending:
-                result_slot.append(ValueOrError.from_error("Model shutdown"))
-                result_event.set()
-            self._pending = []
-            self._batch_ready.notify_all()
-        log("Shutdown initiated, all waiting threads unblocked", component="BatchedTacticModel")
-
-    def sample_tactic(self, state: State) -> ValueOrError[list[str]]:
-        """
-        Thread-safe sample_tactic that batches calls from multiple threads.
-        Blocks until result is available.
-        
-        Returns ValueOrError with error if shutdown is in progress or an error occurs.
-        """
-        if self._shutdown:
-            return ValueOrError.from_error("Model shutdown")
-            
-        wait_start = time.time()
-        result_event = threading.Event()
-        result_slot: list[ValueOrError[list[str]]] = []  # Will hold the result
-
-        with self._lock:
-            if self._shutdown:
-                return ValueOrError.from_error("Model shutdown")
-                
-            self._total_requests += 1
-            request_num = self._total_requests
-            pending_count = len(self._pending) + 1
-
-            # Add this request to the pending batch
-            self._pending.append((state, result_event, result_slot))
-
-            if self._first_request_time is None:
-                self._first_request_time = time.time()
-                log(f"Request #{request_num}: first in batch", component="BatchedTacticModel")
-
-            # Log every 10th request or when batch is full
-            if request_num % 10 == 0 or pending_count >= self.batch_size:
-                log(f"Request #{request_num}: pending={pending_count}/{self.batch_size}",
-                    component="BatchedTacticModel")
-
-            # Check if we should trigger the batch
-            should_process = len(self._pending) >= self.batch_size
-
-            if should_process and not self._batch_in_progress:
-                self._process_batch_locked()
-
-        # If not processing immediately, wait for batch to be ready or timeout
-        if not result_event.is_set():
-            self._wait_for_batch_or_timeout(result_event)
-
-        # Wait for the result with timeout to avoid hanging forever
-        # Use a loop with short timeouts to stay responsive to shutdown
-        max_wait = 60.0  # Maximum total wait time
-        wait_interval = 1.0  # Check for shutdown every second
-        total_waited = 0.0
-        while not result_event.is_set() and total_waited < max_wait:
-            if self._shutdown:
-                return ValueOrError.from_error("Model shutdown")
-            result_event.wait(timeout=wait_interval)
-            total_waited += wait_interval
-        
-        if not result_event.is_set():
-            log(f"Request timed out after {max_wait}s", component="BatchedTacticModel")
-            return ValueOrError.from_error("Request timed out")
-
-        # Record wait time for monitoring
-        wait_time = time.time() - wait_start
-        monitor = get_monitor()
-        if monitor is not None:
-            monitor.record_batch_wait(wait_time)
-
-        return result_slot[0] if result_slot else ValueOrError.from_error("No result received")
-
-    def _wait_for_batch_or_timeout(self, my_event: threading.Event):
-        """Wait until batch is ready or timeout, then potentially trigger processing."""
-        max_iterations = 100  # Prevent infinite loop
-        iterations = 0
-        while not my_event.is_set() and iterations < max_iterations:
-            iterations += 1
-            with self._lock:
-                if self._shutdown:
-                    return
-                    
-                if my_event.is_set():
-                    return
-
-                if self._first_request_time is None:
-                    # Batch was already processed, but our event should be set
-                    # Wait briefly and check again (handles race condition)
-                    self._batch_ready.wait(timeout=0.1)
-                    continue
-
-                elapsed = time.time() - self._first_request_time
-                remaining = self.timeout_seconds - elapsed
-
-                if remaining <= 0 or len(self._pending) >= self.batch_size:
-                    # Time to process
-                    if not self._batch_in_progress and len(self._pending) > 0:
-                        self._process_batch_locked()
-                    return
-
-                # Wait with timeout
-                self._batch_ready.wait(timeout=min(remaining, 0.5))  # Cap wait to check shutdown
-
-    def _process_batch_locked(self):
-        """Process the current batch. Must be called with lock held."""
-        if len(self._pending) == 0:
-            return
-
-        self._batch_in_progress = True
-        self._total_batches += 1
-        batch_num = self._total_batches
-
-        # Grab the current batch
-        batch = self._pending[:]
-        self._pending = []
-        self._first_request_time = None
-
-        log(f"Batch #{batch_num}: processing {len(batch)} requests", component="BatchedTacticModel")
-
-        # Release lock during LLM inference
-        self._lock.release()
-        results = None
-        inference_error = None
-        try:
-            states = [item[0] for item in batch]
-            results = self.inner_model.sample_tactic_batch(states)
-        except Exception as e:
-            inference_error = e
-            log(f"Batch #{batch_num}: LLM inference FAILED: {type(e).__name__}: {e}", component="BatchedTacticModel")
-        finally:
-            self._lock.acquire()
-            # CRITICAL: Always reset _batch_in_progress, even on error
-            self._batch_in_progress = False
-
-        # Distribute results to waiting threads
-        for i, (_, result_event, result_slot) in enumerate(batch):
-            if results is not None:
-                result_slot.append(ValueOrError.from_success(results[i]))
-            else:
-                # On error, return error so caller knows inference failed
-                error_msg = f"LLM inference failed: {type(inference_error).__name__}: {inference_error}"
-                result_slot.append(ValueOrError.from_error(error_msg))
-            result_event.set()
-
-        if inference_error:
-            log(f"Batch #{batch_num}: returned errors to {len(batch)} threads due to error", component="BatchedTacticModel")
-        else:
-            log(f"Batch #{batch_num}: results distributed to {len(batch)} threads", component="BatchedTacticModel")
-
-        # Notify any threads waiting for this batch
-        self._batch_ready.notify_all()
-
-
 class MCTSAbortedError(Exception):
     """Raised when MCTS is aborted early (e.g., prover paused during evaluation)."""
     pass
 
 
-def run_mcts(config: Config, game: Game, model: TacticModel | BatchedTacticModel, expansion_callback=None, tactic_callback=None, abort_check=None):
+def run_mcts(config: Config, game: Game, model: "TacticModel | BlockingTacticModel", expansion_callback=None, tactic_callback=None, abort_check=None):
     """
     Run MCTS to find a proof.
     
@@ -699,7 +479,7 @@ def backprop_value_towards_min(node):
     return value
 
 
-def run_bfs(game: Game, model: TacticModel):
+def run_bfs(game: Game, model: "TacticModel"):
     open_nodes = [game.root]
     while open_nodes:
         node = open_nodes.pop(0)
@@ -779,72 +559,3 @@ def run_bfs(game: Game, model: TacticModel):
     return True
 
 
-def _main():
-    base_dir = get_base_dir()
-    server_address = "10.10.25.39"
-    server_port = 8000
-
-    project_dir = os.path.join(base_dir, "leantree_project")
-    if not os.path.exists(project_dir) or not os.listdir(project_dir):
-        # TODO: we need to add this to LeantreeProject.lean:
-        # """
-        # import FormalConjectures.ForMathlib.Analysis.SpecialFunctions.NthRoot
-        # import FormalConjectures.Util.Answer
-        # """
-        formal_conjectures = LeanLibrary(
-            name="formal_conjectures",
-            scope="google-deepmind",
-            git="https://github.com/google-deepmind/formal-conjectures",
-            rev="d3d568c9b6ba0b0609b8dd61d0019cd77462e96a",
-        )
-        LeanProject.create(project_dir, libraries=[LeanLibraries.MATHLIB, formal_conjectures])
-
-    model = TacticModel.create()
-
-    time_start = time.time()
-    theorems = list_theorems(split="train")
-    print(f"Retrieved {len(theorems)} theorems in {time.time() - time_start} seconds")
-    theorem = theorems[1]
-    print(theorem + "\n-----")
-
-    # We expect that the server has these imports:
-    # import Mathlib
-    # import FormalConjectures.ForMathlib.Analysis.SpecialFunctions.NthRoot
-    # import FormalConjectures.Util.Answer
-
-    client = LeanClient(server_address, server_port)
-    print(f"Connected to server at {server_address}:{server_port}")
-    print(f"Server status: {client.check_status()}")
-    process = client.get_process()
-    if process is None:
-        print("Failed to acquire Lean process")
-        return
-    with process as env:
-        print("Sending `open scoped` commands...")
-        env.send_command("""
-    open scoped Real
-    open scoped Nat
-    open scoped Topology
-    open scoped Polynomial
-    """)
-        print("Starting proof...")
-        init_branch = env.proof_from_sorry(theorem)
-        if not init_branch.is_success():
-            print(f"Error when starting proof: '{init_branch.error}'")
-            return
-        init_branch = init_branch.value
-        print(f"Initial state:\n{init_branch.state}")
-
-        game = Game(theorem)
-        game.root = Node(
-            action=None,
-            prior=None,
-            state=[init_branch],
-            to_play=Player.OR,
-            reward=None,
-        )
-        run_bfs(game, model)
-
-
-if __name__ == "__main__":
-    _main()
