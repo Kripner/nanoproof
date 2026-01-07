@@ -21,6 +21,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
+import logging
 
 import requests
 from flask import Flask, request, jsonify
@@ -34,6 +35,11 @@ from nanoproof.data.leanworkbook import list_theorems
 # RemoteTacticModel - calls the RL server for inference
 # -----------------------------------------------------------------------------
 
+class RLServerDisconnectedError(Exception):
+    """Raised when the RL server appears to be permanently disconnected."""
+    pass
+
+
 class RemoteTacticModel:
     """
     Tactic model that calls a remote RL server for inference.
@@ -46,6 +52,11 @@ class RemoteTacticModel:
         self.rl_server_address = rl_server_address
         self.timeout = timeout
         self._session = requests.Session()
+        self._consecutive_failures = 0
+        self._max_failures = 10  # After this many failures, raise exception
+        self._last_error_log_time = 0
+        self._error_log_interval = 5.0  # Only log errors every N seconds
+        self._lock = threading.Lock()
     
     def sample_tactic(self, state) -> list[str]:
         """Sample tactics for a single state by calling the remote RL server."""
@@ -62,13 +73,36 @@ class RemoteTacticModel:
             )
             response.raise_for_status()
             result = response.json()
+            
+            # Reset failure counter on success
+            with self._lock:
+                self._consecutive_failures = 0
+            
             return result["tactics"][0]
         except requests.exceptions.Timeout:
-            print(f"[RemoteTacticModel] Timeout calling RL server")
+            self._record_failure("Timeout calling RL server")
             return []
         except requests.exceptions.RequestException as e:
-            print(f"[RemoteTacticModel] Error calling RL server: {e}")
+            self._record_failure(f"Error calling RL server: {e}")
             return []
+    
+    def _record_failure(self, message: str):
+        """Record a failure and potentially raise if too many consecutive failures."""
+        with self._lock:
+            self._consecutive_failures += 1
+            failures = self._consecutive_failures
+            
+            # Rate-limit error logging
+            now = time.time()
+            if now - self._last_error_log_time >= self._error_log_interval:
+                print(f"[RemoteTacticModel] {message} (failures: {failures}/{self._max_failures})")
+                self._last_error_log_time = now
+            
+            # If too many failures, signal that RL server is down
+            if failures >= self._max_failures:
+                raise RLServerDisconnectedError(
+                    f"RL server appears disconnected after {failures} consecutive failures"
+                )
     
     def shutdown(self):
         """No-op, exists for API compatibility."""
@@ -95,8 +129,10 @@ class TheoremsSampler:
 @dataclass
 class LocalBuffer:
     transitions: list = field(default_factory=list)
+    tactics: list = field(default_factory=list)  # (state, tactic, success) tuples
     games_played: int = 0
     games_solved: int = 0
+    expansions: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock)
     
     def add_transitions(self, new_transitions: list, solved: bool):
@@ -106,16 +142,35 @@ class LocalBuffer:
             if solved:
                 self.games_solved += 1
     
+    def add_tactic(self, state: str, tactic: str, success: bool):
+        """Record a tactic application for display in the web UI."""
+        with self.lock:
+            self.tactics.append({"state": state, "tactic": tactic, "success": success})
+            # Keep only last 1000 tactics to avoid memory bloat
+            if len(self.tactics) > 1000:
+                self.tactics = self.tactics[-1000:]
+    
+    def add_expansion(self):
+        """Record an MCTS expansion."""
+        with self.lock:
+            self.expansions += 1
+    
     def poll_and_clear(self) -> dict:
-        """Return all transitions and stats, then clear the buffer."""
+        """Return all transitions and stats since last poll, then clear."""
         with self.lock:
             result = {
                 "transitions": self.transitions.copy(),
+                "tactics": self.tactics.copy(),
                 "games_played": self.games_played,
                 "games_solved": self.games_solved,
+                "expansions": self.expansions,
             }
+            # Reset everything - return only deltas since last poll
             self.transitions = []
-            # Don't reset stats, they're cumulative
+            self.tactics = []
+            self.games_played = 0
+            self.games_solved = 0
+            self.expansions = 0
             return result
     
     def get_stats(self) -> dict:
@@ -124,7 +179,58 @@ class LocalBuffer:
                 "transitions_pending": len(self.transitions),
                 "games_played": self.games_played,
                 "games_solved": self.games_solved,
+                "expansions": self.expansions,
             }
+
+
+# -----------------------------------------------------------------------------
+# Keyboard Monitor Thread
+# -----------------------------------------------------------------------------
+
+class KeyboardThread(threading.Thread):
+    """Background thread that monitors keyboard input and prints stats on Enter."""
+    
+    def __init__(self, prover_worker: "ProverWorker", buffer: "LocalBuffer"):
+        super().__init__(daemon=True)
+        self.prover_worker = prover_worker
+        self.buffer = buffer
+        self._stop_flag = threading.Event()
+    
+    def stop(self):
+        """Signal the thread to stop."""
+        self._stop_flag.set()
+    
+    def run(self):
+        import sys
+        import select
+        
+        while not self._stop_flag.is_set():
+            # Check for keyboard input (non-blocking on Unix)
+            try:
+                if sys.stdin in select.select([sys.stdin], [], [], 0.5)[0]:
+                    line = sys.stdin.readline()
+                    self._print_stats()
+            except (ValueError, OSError):
+                # stdin might be closed
+                break
+    
+    def _print_stats(self):
+        """Print current stats."""
+        stats = self.prover_worker.get_stats_summary()
+        buffer_stats = self.buffer.get_stats()
+        print("\n" + "=" * 60)
+        print("PROVER SERVER STATS")
+        print("=" * 60)
+        print(f"Actors: {stats['active_threads']}/{stats['total_actors']} active")
+        print(f"  Exited: {stats['exited_threads']}")
+        print(f"  States: {stats['state_counts']}")
+        print(f"  Paused: {stats['paused']}")
+        print(f"Buffer:")
+        print(f"  Transitions: {buffer_stats['transitions']}")
+        print(f"  Proof attempts: {buffer_stats['proof_attempts']}")
+        print(f"  Successes: {buffer_stats['successes']}")
+        print(f"  Expansions: {buffer_stats['expansions']}")
+        print("=" * 60 + "\n")
 
 
 # -----------------------------------------------------------------------------
@@ -204,6 +310,36 @@ class ProverWorker:
         with self._thread_states_lock:
             return [self._thread_states.get(i, "idle") for i in range(self.num_actors)]
     
+    def get_active_thread_count(self) -> int:
+        """Get the number of threads that are still alive."""
+        return sum(1 for t in self._threads if t.is_alive())
+    
+    def has_started_actors(self) -> bool:
+        """Check if actors have been started (threads list is non-empty)."""
+        return len(self._threads) > 0 and self._running
+    
+    def all_actors_exited(self) -> bool:
+        """Check if all actor threads have exited (only valid after actors started)."""
+        if not self._running or len(self._threads) == 0:
+            return False  # Not started yet, so not "exited"
+        return all(not t.is_alive() for t in self._threads)
+    
+    def get_stats_summary(self) -> dict:
+        """Get a summary of actor stats for CLI display."""
+        states = self.get_thread_states()
+        active = self.get_active_thread_count()
+        state_counts = {}
+        for s in states:
+            state_counts[s] = state_counts.get(s, 0) + 1
+        return {
+            "total_actors": self.num_actors,
+            "active_threads": active,
+            "exited_threads": self.num_actors - active,
+            "state_counts": state_counts,
+            "paused": self._paused,
+            "running": self._running,
+        }
+    
     def _actor_loop(self, actor_id: int):
         """Main loop for a single actor thread."""
         loop = asyncio.new_event_loop()
@@ -235,6 +371,12 @@ class ProverWorker:
             try:
                 game = self._play_game(client, local_sampler)
                 consecutive_errors = 0
+            except RLServerDisconnectedError as e:
+                # RL server is down - exit gracefully
+                self.set_thread_state(actor_id, "error")
+                print(f"[Actor {actor_id}] {e}")
+                print(f"[Actor {actor_id}] Exiting")
+                break
             except ConnectionResetError:
                 consecutive_errors += 1
                 self.set_thread_state(actor_id, "error")
@@ -274,7 +416,11 @@ class ProverWorker:
         """Play a single game."""
         theorem = sampler.sample_theorem()
         
-        with client.get_process() as env:
+        process = client.get_process()
+        if process is None:
+            raise RuntimeError("Failed to acquire Lean process (server overloaded?)")
+        
+        with process as env:
             env.send_command("""
                 open scoped Real
                 open scoped Nat
@@ -295,7 +441,12 @@ class ProverWorker:
                 reward=None,
             )
             
-            run_mcts(self.config, game, self.tactic_model)
+            # Use callbacks to track expansions and tactics
+            run_mcts(
+                self.config, game, self.tactic_model,
+                expansion_callback=self.buffer.add_expansion,
+                tactic_callback=self.buffer.add_tactic,
+            )
             return game
     
     def _extract_transitions(self, node: Node) -> list[tuple[str, str, float]]:
@@ -490,9 +641,39 @@ def main():
     print(f"  Lean server: {args.lean_server}")
     print(f"  My address: {my_address}")
     print(f"  Actors: {args.num_actors}")
+    print(f"\nPress Enter to show stats, Ctrl+C to exit\n")
     
-    # Use threaded=True to handle concurrent requests
-    app.run(host=args.host, port=args.port, threaded=True)
+    # Disable Flask's default request logging (very noisy with frequent /poll requests)
+    werkzeug_log = logging.getLogger('werkzeug')
+    werkzeug_log.setLevel(logging.ERROR)
+    
+    # Start keyboard monitoring thread
+    keyboard_thread = KeyboardThread(prover_worker, buffer)
+    keyboard_thread.start()
+    
+    # Run Flask in a background thread
+    flask_thread = threading.Thread(
+        target=lambda: app.run(host=args.host, port=args.port, threaded=True, use_reloader=False),
+        daemon=True
+    )
+    flask_thread.start()
+    
+    # Main loop: wait for actors to start, then monitor for all actors exiting
+    try:
+        # Wait for actors to start
+        while not prover_worker.has_started_actors():
+            time.sleep(1.0)
+        
+        # Monitor for all actors exiting
+        while not prover_worker.all_actors_exited():
+            time.sleep(1.0)
+        
+        print("\n[ProverServer] All actors have exited. Shutting down...")
+    except KeyboardInterrupt:
+        print("\n[ProverServer] Interrupted by user")
+    
+    keyboard_thread.stop()
+    cleanup()
 
 
 if __name__ == "__main__":

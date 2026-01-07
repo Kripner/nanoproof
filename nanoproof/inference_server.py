@@ -4,6 +4,8 @@ Inference Server - provides batched inference for prover servers.
 This server runs on GPU nodes and handles tactic generation requests
 from multiple prover servers. It batches requests for efficient GPU utilization.
 
+Supports multi-GPU: requests are distributed across GPUs in round-robin fashion.
+
 Usage:
     python -m nanoproof.inference_server --port 5000
 """
@@ -22,131 +24,84 @@ from nanoproof.search import TacticModel
 
 
 # -----------------------------------------------------------------------------
-# Batched Inference Handler
+# Multi-GPU Round-Robin Handler
 # -----------------------------------------------------------------------------
 
-@dataclass
-class BatchedInferenceHandler:
+class MultiGPUInferenceHandler:
     """
-    Handles batched inference for tactic generation.
+    Handles inference across multiple GPUs with round-robin distribution.
     
-    Requests are queued and processed in batches when either:
-    - The batch is full (batch_size reached)
-    - The timeout has elapsed since the first pending request
+    Each GPU has its own TacticModel and lock to allow parallel inference.
+    Requests are distributed across GPUs in round-robin fashion.
     """
     
-    tactic_model: TacticModel
-    batch_size: int = 32
-    timeout_seconds: float = 0.1
-    
-    _lock: threading.Lock = field(default_factory=threading.Lock)
-    _batch_ready: threading.Condition = field(init=False)
-    _pending: list = field(default_factory=list)
-    _first_request_time: float = None
-    _batch_in_progress: bool = False
-    _total_requests: int = 0
-    _total_batches: int = 0
-    
-    def __post_init__(self):
-        self._batch_ready = threading.Condition(self._lock)
-    
-    def generate_tactics(self, state_str: str) -> list[str]:
-        """
-        Generate tactics for a single state.
-        Thread-safe, blocks until result is available.
-        """
-        result_event = threading.Event()
-        result_slot: list = []
+    def __init__(self, num_samples: int = 6, model_source: str = "sft", model_tag: str = "d26"):
+        self.num_gpus = torch.cuda.device_count()
+        if self.num_gpus == 0:
+            raise RuntimeError("No CUDA GPUs available")
         
-        with self._lock:
-            self._total_requests += 1
-            self._pending.append((state_str, result_event, result_slot))
+        print(f"[Inference] Initializing models on {self.num_gpus} GPU(s)...")
+        
+        # Create a model for each GPU
+        self.models: list[TacticModel] = []
+        self.locks: list[threading.Lock] = []
+        
+        for gpu_id in range(self.num_gpus):
+            device = torch.device(f"cuda:{gpu_id}")
+            print(f"[Inference] Loading model on GPU {gpu_id} ({torch.cuda.get_device_name(gpu_id)})...")
             
-            if self._first_request_time is None:
-                self._first_request_time = time.time()
+            model, tokenizer, _ = load_model(model_source, device, phase="eval", model_tag=model_tag)
+            engine = Engine(model, tokenizer)
+            tactic_model = TacticModel(model, tokenizer, engine, num_samples=num_samples)
             
-            # Check if we should process immediately
-            if len(self._pending) >= self.batch_size and not self._batch_in_progress:
-                self._process_batch_locked()
+            self.models.append(tactic_model)
+            self.locks.append(threading.Lock())
         
-        # Wait for batch or timeout
-        if not result_event.is_set():
-            self._wait_for_batch_or_timeout(result_event)
+        # Round-robin counter
+        self._next_gpu = 0
+        self._counter_lock = threading.Lock()
         
-        # Wait for result with timeout
-        result_event.wait(timeout=60.0)
+        # Stats
+        self._total_requests = 0
+        self._requests_per_gpu = [0] * self.num_gpus
+        self._stats_lock = threading.Lock()
         
-        return result_slot[0] if result_slot else []
+        print(f"[Inference] All {self.num_gpus} GPU(s) ready!")
+    
+    def _get_next_gpu(self) -> int:
+        """Get the next GPU in round-robin order."""
+        with self._counter_lock:
+            gpu_id = self._next_gpu
+            self._next_gpu = (self._next_gpu + 1) % self.num_gpus
+            return gpu_id
     
     def generate_tactics_batch(self, state_strs: list[str]) -> list[list[str]]:
         """
-        Generate tactics for multiple states at once.
-        More efficient than calling generate_tactics repeatedly.
+        Generate tactics for multiple states.
+        Uses round-robin GPU selection for load balancing.
         """
-        # Process directly without queuing for batch requests
-        with self._lock:
-            return self.tactic_model.sample_tactic_from_str_batch(state_strs)
-    
-    def _wait_for_batch_or_timeout(self, my_event: threading.Event):
-        """Wait until batch is ready or timeout."""
-        while not my_event.is_set():
-            with self._lock:
-                if my_event.is_set():
-                    return
-                
-                if self._first_request_time is None:
-                    self._batch_ready.wait(timeout=0.1)
-                    continue
-                
-                elapsed = time.time() - self._first_request_time
-                remaining = self.timeout_seconds - elapsed
-                
-                if remaining <= 0 or len(self._pending) >= self.batch_size:
-                    if not self._batch_in_progress and len(self._pending) > 0:
-                        self._process_batch_locked()
-                    return
-                
-                self._batch_ready.wait(timeout=remaining)
-    
-    def _process_batch_locked(self):
-        """Process the current batch. Must be called with lock held."""
-        if len(self._pending) == 0:
-            return
+        if len(state_strs) == 0:
+            return []
         
-        self._batch_in_progress = True
-        self._total_batches += 1
+        # Select GPU (round-robin)
+        gpu_id = self._get_next_gpu()
         
-        batch = self._pending[:]
-        self._pending = []
-        self._first_request_time = None
+        # Update stats
+        with self._stats_lock:
+            self._total_requests += len(state_strs)
+            self._requests_per_gpu[gpu_id] += len(state_strs)
         
-        batch_size = len(batch)
-        print(f"[Inference] Processing batch #{self._total_batches}: {batch_size} requests")
-        
-        # Release lock during inference
-        self._lock.release()
-        try:
-            state_strs = [item[0] for item in batch]
-            results = self.tactic_model.sample_tactic_from_str_batch(state_strs)
-        finally:
-            self._lock.acquire()
-        
-        self._batch_in_progress = False
-        
-        # Distribute results
-        for i, (_, result_event, result_slot) in enumerate(batch):
-            result_slot.append(results[i])
-            result_event.set()
-        
-        self._batch_ready.notify_all()
+        # Acquire lock for this GPU and run inference
+        with self.locks[gpu_id]:
+            return self.models[gpu_id].sample_tactic_from_str_batch(state_strs)
     
     def get_stats(self) -> dict:
         """Return stats about the handler."""
-        with self._lock:
+        with self._stats_lock:
             return {
+                "num_gpus": self.num_gpus,
                 "total_requests": self._total_requests,
-                "total_batches": self._total_batches,
-                "pending": len(self._pending),
+                "requests_per_gpu": self._requests_per_gpu.copy(),
             }
 
 
@@ -154,8 +109,13 @@ class BatchedInferenceHandler:
 # Flask Server
 # -----------------------------------------------------------------------------
 
-def create_app(handler: BatchedInferenceHandler):
+def create_app(handler: MultiGPUInferenceHandler):
     app = Flask(__name__)
+    
+    # Disable Flask request logging to reduce spam
+    import logging
+    log = logging.getLogger('werkzeug')
+    log.setLevel(logging.ERROR)
     
     @app.route("/health", methods=["GET"])
     def health():
@@ -178,7 +138,7 @@ def create_app(handler: BatchedInferenceHandler):
         if len(states) == 0:
             return jsonify({"tactics": []})
         
-        # Use batch generation for efficiency
+        # Use batch generation for efficiency (round-robin across GPUs)
         tactics = handler.generate_tactics_batch(states)
         return jsonify({"tactics": tactics})
     
@@ -197,28 +157,24 @@ def main():
     parser = argparse.ArgumentParser(description="Inference Server")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=5000, help="Port to bind to")
-    parser.add_argument("--batch-size", type=int, default=32, help="Max batch size")
-    parser.add_argument("--timeout", type=float, default=0.1, help="Batch timeout in seconds")
     parser.add_argument("--num-samples", type=int, default=6, help="Tactics to sample per state")
     parser.add_argument("--model-source", default="sft", help="Model source (sft, pretrain, etc)")
     parser.add_argument("--model-tag", default="d26", help="Model tag")
     args = parser.parse_args()
     
-    print(f"Loading model from {args.model_source}/{args.model_tag}...")
-    tactic_model = TacticModel.create(num_samples=args.num_samples)
+    print(f"[Inference] GPUs available: {torch.cuda.device_count()}")
     
-    handler = BatchedInferenceHandler(
-        tactic_model=tactic_model,
-        batch_size=args.batch_size,
-        timeout_seconds=args.timeout,
+    handler = MultiGPUInferenceHandler(
+        num_samples=args.num_samples,
+        model_source=args.model_source,
+        model_tag=args.model_tag,
     )
     
     app = create_app(handler)
     
-    print(f"Inference server starting on {args.host}:{args.port}")
-    print(f"  Batch size: {args.batch_size}")
-    print(f"  Timeout: {args.timeout}s")
-    print(f"  Samples per state: {args.num_samples}")
+    print(f"[Inference] Server starting on {args.host}:{args.port}")
+    print(f"[Inference] Using {handler.num_gpus} GPU(s) in round-robin mode")
+    print(f"[Inference] Samples per state: {args.num_samples}")
     
     app.run(host=args.host, port=args.port, threaded=True)
 

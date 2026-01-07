@@ -1,10 +1,12 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { MonitorState, LogEntry } from './types'
 import { StatsPanel } from './components/StatsPanel'
 import { ProverGrid } from './components/ProverGrid'
 import { GPUPanel } from './components/GPUPanel'
 import { EvalHistory } from './components/EvalHistory'
 import { LogViewer } from './components/LogViewer'
+import { ReplayBufferPanel } from './components/ReplayBufferPanel'
+import { LeanServerPanel } from './components/LeanServerPanel'
 
 const POLL_INTERVAL = 1000;
 
@@ -12,6 +14,21 @@ function App() {
   const [state, setState] = useState<MonitorState | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [selectedActor, setSelectedActor] = useState<string | null>(null);
+
+  const copyOutputDir = useCallback(() => {
+    if (state?.output_dir) {
+      navigator.clipboard.writeText(state.output_dir).then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      });
+    }
+  }, [state?.output_dir]);
+
+  const handleActorClick = useCallback((actorId: number) => {
+    setSelectedActor(`actor_${actorId}`);
+  }, []);
 
   useEffect(() => {
     const fetchState = async () => {
@@ -49,9 +66,6 @@ function App() {
     };
   }, []);
 
-  const openLogStream = (component: string) => {
-    window.open(`/api/logs/${component}`, '_blank');
-  };
 
   if (error) {
     return (
@@ -87,28 +101,56 @@ function App() {
         <h1>NanoProof Monitor</h1>
         <span className={phaseClass}>{state.phase}</span>
         <span style={{ color: 'var(--text-secondary)' }}>Step {state.step}</span>
-        <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontSize: 12 }}>
-          Buffer: {state.replay_buffer_size.toLocaleString()} transitions
-        </span>
+        <div className="header-right">
+          {state.output_dir && (
+            <button 
+              className={`output-dir-badge ${copied ? 'copied' : ''}`} 
+              title={`Click to copy: ${state.output_dir}`}
+              onClick={copyOutputDir}
+            >
+              {copied ? '✓ Copied!' : `📁 ${state.output_dir.split('/').slice(-2).join('/')}`}
+            </button>
+          )}
+          <span className="buffer-count">
+            Buffer: {state.replay_buffer_size.toLocaleString()} transitions
+          </span>
+        </div>
       </div>
 
       <div className="main">
-        <StatsPanel collection={state.collection} training={state.training} phase={state.phase} />
+        <StatsPanel 
+          collection={state.collection} 
+          training={state.training} 
+          phase={state.phase}
+          replayBufferSize={state.replay_buffer_size}
+          evalProgress={state.eval_progress}
+        />
         
         <div className="card">
-          <div className="card-title">Prover Servers</div>
-          <ProverGrid servers={state.prover_servers} />
+          <div className="card-title">Provers</div>
+          <ProverGrid 
+            servers={state.prover_servers} 
+            localActors={state.local_actors}
+            onActorClick={handleActorClick}
+          />
         </div>
 
         <GPUPanel gpus={state.gpus} />
+
+        <LeanServerPanel server={state.lean_server} />
         
         <EvalHistory history={state.eval_history} />
 
-        <LogViewer logs={logs} onOpenStream={openLogStream} />
+        <ReplayBufferPanel outputDir={state.output_dir} />
+
+        <LogViewer 
+          logs={logs} 
+          selectedActor={selectedActor}
+          onActorSelect={setSelectedActor}
+        />
       </div>
     </div>
   );
 }
 
 export default App
-

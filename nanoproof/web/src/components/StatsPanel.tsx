@@ -1,9 +1,11 @@
-import { CollectionStats, TrainingStats } from '../types';
+import { CollectionStats, TrainingStats, EvalProgress } from '../types';
 
 interface StatsPanelProps {
   collection: CollectionStats;
   training: TrainingStats;
   phase: string;
+  replayBufferSize: number;
+  evalProgress: EvalProgress;
 }
 
 function formatDuration(seconds: number): string {
@@ -18,27 +20,31 @@ function formatMs(ms: number): string {
   return `${(ms / 1000).toFixed(2)}s`;
 }
 
-export function StatsPanel({ collection, training, phase }: StatsPanelProps) {
+export function StatsPanel({ collection, training, phase, replayBufferSize, evalProgress }: StatsPanelProps) {
   const progress = collection.target_samples > 0 
     ? Math.min(100, (collection.samples_collected / collection.target_samples) * 100)
+    : 0;
+
+  const expansionsPerSecond = collection.elapsed > 0 
+    ? collection.expansions / collection.elapsed 
     : 0;
 
   return (
     <div className="card">
       <div className="card-title">
-        {phase === 'collecting' ? 'Collection' : phase === 'training' ? 'Training' : 'Stats'}
+        {phase === 'collecting' ? 'Collection' : phase === 'training' ? 'Training' : phase === 'evaluating' ? 'Evaluation' : 'Stats'}
       </div>
 
       {phase === 'collecting' && (
         <>
           <div className="stats-grid">
             <div className="stat">
-              <div className="stat-value">{collection.samples_collected}</div>
-              <div className="stat-label">Samples</div>
+              <div className="stat-value">{collection.proofs_attempted}</div>
+              <div className="stat-label">Attempts</div>
             </div>
             <div className="stat">
               <div className="stat-value">{collection.proofs_successful}</div>
-              <div className="stat-label">Proofs</div>
+              <div className="stat-label">Solved</div>
             </div>
             <div className="stat">
               <div className="stat-value">{(collection.success_rate * 100).toFixed(1)}%</div>
@@ -54,17 +60,21 @@ export function StatsPanel({ collection, training, phase }: StatsPanelProps) {
             <div className="progress-bar-fill" style={{ width: `${progress}%` }} />
           </div>
           <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4, textAlign: 'center' }}>
-            {collection.samples_collected} / {collection.target_samples} ({progress.toFixed(1)}%)
+            {collection.samples_collected} / {collection.target_samples} transitions ({progress.toFixed(1)}%)
           </div>
 
           <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-secondary)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-              <span>Proofs attempted:</span>
-              <span>{collection.proofs_attempted}</span>
+              <span>Replay buffer:</span>
+              <span style={{ color: 'var(--accent-cyan)', fontWeight: 600 }}>{replayBufferSize.toLocaleString()}</span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
               <span>Expansions:</span>
               <span>{collection.expansions.toLocaleString()}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+              <span>Expansions/sec:</span>
+              <span style={{ color: 'var(--accent-green)' }}>{expansionsPerSecond.toFixed(1)}</span>
             </div>
             {collection.wait_time_median > 0 && (
               <div style={{ display: 'flex', justifyContent: 'space-between' }}>
@@ -77,34 +87,94 @@ export function StatsPanel({ collection, training, phase }: StatsPanelProps) {
       )}
 
       {phase === 'training' && (
-        <div className="stats-grid">
-          <div className="stat">
-            <div className="stat-value">{training.loss.toFixed(4)}</div>
-            <div className="stat-label">Loss</div>
+        <>
+          <div className="stats-grid">
+            <div className="stat">
+              <div className="stat-value">{training.loss.toFixed(4)}</div>
+              <div className="stat-label">Loss</div>
+            </div>
+            <div className="stat">
+              <div className="stat-value">{(training.num_tokens / 1000).toFixed(0)}k</div>
+              <div className="stat-label">Tokens</div>
+            </div>
+            <div className="stat">
+              <div className="stat-value">{training.step}</div>
+              <div className="stat-label">Step</div>
+            </div>
           </div>
-          <div className="stat">
-            <div className="stat-value">{(training.num_tokens / 1000).toFixed(0)}k</div>
-            <div className="stat-label">Tokens</div>
+          <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-secondary)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span>Replay buffer:</span>
+              <span style={{ color: 'var(--accent-cyan)', fontWeight: 600 }}>{replayBufferSize.toLocaleString()}</span>
+            </div>
           </div>
-          <div className="stat">
-            <div className="stat-value">{training.step}</div>
-            <div className="stat-label">Step</div>
-          </div>
-        </div>
+        </>
       )}
 
       {phase === 'evaluating' && (
-        <div style={{ textAlign: 'center', padding: 20, color: 'var(--accent-yellow)' }}>
-          Evaluating model...
-        </div>
+        <>
+          {evalProgress.active ? (
+            <>
+              <div className="stats-grid">
+                <div className="stat">
+                  <div className="stat-value">{evalProgress.current}/{evalProgress.total}</div>
+                  <div className="stat-label">Progress</div>
+                </div>
+                <div className="stat">
+                  <div className="stat-value">{evalProgress.solved}</div>
+                  <div className="stat-label">Solved</div>
+                </div>
+                <div className="stat">
+                  <div className="stat-value">{evalProgress.errors}</div>
+                  <div className="stat-label">Errors</div>
+                </div>
+                <div className="stat">
+                  <div className="stat-value">
+                    {evalProgress.total > 0 
+                      ? ((evalProgress.solved / Math.max(evalProgress.current, 1)) * 100).toFixed(1) 
+                      : 0}%
+                  </div>
+                  <div className="stat-label">Success</div>
+                </div>
+              </div>
+
+              <div className="progress-bar" style={{ marginTop: 12 }}>
+                <div 
+                  className="progress-bar-fill eval" 
+                  style={{ width: `${evalProgress.progress_percent}%` }} 
+                />
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4, textAlign: 'center' }}>
+                Evaluating {evalProgress.dataset} ({evalProgress.progress_percent.toFixed(1)}%)
+              </div>
+            </>
+          ) : (
+            <div style={{ textAlign: 'center', padding: 20, color: 'var(--accent-yellow)' }}>
+              Preparing evaluation...
+            </div>
+          )}
+          <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-secondary)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span>Replay buffer:</span>
+              <span style={{ color: 'var(--accent-cyan)', fontWeight: 600 }}>{replayBufferSize.toLocaleString()}</span>
+            </div>
+          </div>
+        </>
       )}
 
       {phase === 'idle' && (
-        <div style={{ textAlign: 'center', padding: 20, color: 'var(--text-muted)' }}>
-          Idle
-        </div>
+        <>
+          <div style={{ textAlign: 'center', padding: 20, color: 'var(--text-muted)' }}>
+            Idle
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span>Replay buffer:</span>
+              <span style={{ color: 'var(--accent-cyan)', fontWeight: 600 }}>{replayBufferSize.toLocaleString()}</span>
+            </div>
+          </div>
+        </>
       )}
     </div>
   );
 }
-

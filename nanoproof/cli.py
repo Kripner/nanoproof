@@ -24,7 +24,9 @@ from datetime import datetime
 from statistics import median
 from typing import Literal, TextIO, Any
 from queue import Queue
+import os
 
+import torch
 from flask import Flask, jsonify, Response, send_from_directory
 
 # -----------------------------------------------------------------------------
@@ -181,6 +183,17 @@ class ProverServerStatus:
 
 
 @dataclass
+class LocalActorStatus:
+    """Status of a local actor thread."""
+    id: int
+    state: Literal["idle", "running", "error"] = "idle"
+    games_played: int = 0
+    games_solved: int = 0
+    current_theorem: str = ""
+    last_update: float = field(default_factory=time.time)
+
+
+@dataclass
 class GPUStatus:
     """Status of a GPU."""
     id: int
@@ -190,6 +203,23 @@ class GPUStatus:
     memory_total: int = 0  # MB
     inference_queue_size: int = 0
     avg_wait_time_ms: float = 0.0
+
+
+@dataclass
+class LeanServerStatus:
+    """Status of the Lean server."""
+    address: str = ""
+    port: int = 0
+    connected: bool = False
+    available_processes: int = 0
+    used_processes: int = 0
+    max_processes: int = 0
+    cpu_percent: list[float] = field(default_factory=list)
+    ram_percent: float = 0.0
+    ram_used_gb: float = 0.0
+    ram_total_gb: float = 0.0
+    last_update: float = field(default_factory=time.time)
+    error: str = ""
 
 
 @dataclass
@@ -269,6 +299,28 @@ class EvalResult:
 
 
 @dataclass
+class EvalProgress:
+    """Progress of the current evaluation."""
+    dataset: str = ""
+    current: int = 0
+    total: int = 0
+    solved: int = 0
+    errors: int = 0
+    active: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "dataset": self.dataset,
+            "current": self.current,
+            "total": self.total,
+            "solved": self.solved,
+            "errors": self.errors,
+            "active": self.active,
+            "progress_percent": (self.current / self.total * 100) if self.total > 0 else 0,
+        }
+
+
+@dataclass
 class TrainingStats:
     """Statistics for the current training step."""
     step: int = 0
@@ -298,10 +350,20 @@ class WebMonitor:
         self.port = port
         self._lock = threading.Lock()
 
+        # Output directory for replay buffers and logs
+        self.output_dir: str | None = None
+
         # Current state
         self.phase: Phase = "idle"
         self.step: int = 0
         self.replay_buffer_size: int = 0
+        self.replay_buffer_base_size: int = 0  # Size at start of collection
+
+        # Live transitions (for displaying during collection)
+        self.live_transitions: deque = deque(maxlen=500)  # Increased from 200
+        
+        # Live tactics (for displaying in distributed mode)
+        self.live_tactics: deque = deque(maxlen=200)
 
         # Collection stats
         self.collection = CollectionStats(num_actors=num_actors)
@@ -312,18 +374,31 @@ class WebMonitor:
         # Evaluation history
         self.eval_history: deque[EvalResult] = deque(maxlen=50)
 
+        # Current evaluation progress
+        self.eval_progress = EvalProgress()
+
         # Prover servers
         self.prover_servers: dict[str, ProverServerStatus] = {}
+
+        # Local actors (for non-distributed mode)
+        self.local_actors: dict[int, LocalActorStatus] = {}
 
         # GPU status
         self.gpus: list[GPUStatus] = []
 
+        # Lean server status
+        self.lean_server: LeanServerStatus = LeanServerStatus()
+
         # Server thread
         self._server_thread: threading.Thread | None = None
+        self._gpu_monitor_thread: threading.Thread | None = None
+        self._lean_monitor_thread: threading.Thread | None = None
+        self._stop_monitors = threading.Event()
         self._app: Flask | None = None
 
         if enabled:
             self._start_server()
+            self._start_gpu_monitor()
 
     def _start_server(self):
         """Start the Flask server in a background thread."""
@@ -342,6 +417,121 @@ class WebMonitor:
         print(f"\n{'='*60}")
         print(f"  Web Monitor: {url}")
         print(f"{'='*60}\n")
+
+    def _start_gpu_monitor(self):
+        """Start a background thread to monitor GPU status."""
+        try:
+            import torch
+            if not torch.cuda.is_available():
+                return
+        except ImportError:
+            return
+
+        def monitor_gpus():
+            import subprocess
+            
+            # Map PyTorch indices to physical GPU IDs
+            # If CUDA_VISIBLE_DEVICES is set, parse it to get physical IDs
+            cuda_visible = os.environ.get('CUDA_VISIBLE_DEVICES', '')
+            if cuda_visible:
+                physical_ids = [int(x.strip()) for x in cuda_visible.split(',') if x.strip()]
+            else:
+                physical_ids = list(range(torch.cuda.device_count()))
+            
+            while not self._stop_monitors.wait(timeout=2.0):
+                try:
+                    for i in range(torch.cuda.device_count()):
+                        props = torch.cuda.get_device_properties(i)
+                        
+                        # Get physical GPU ID for nvidia-smi
+                        physical_id = physical_ids[i] if i < len(physical_ids) else i
+                        
+                        # Use nvidia-smi for both utilization and memory (system-wide view)
+                        # This shows memory used by ALL processes on the GPU
+                        utilization = 0.0
+                        memory_used = 0
+                        memory_total = props.total_memory // (1024 * 1024)
+                        
+                        try:
+                            result = subprocess.run(
+                                ['nvidia-smi', '--query-gpu=utilization.gpu,memory.used,memory.total', 
+                                 '--format=csv,noheader,nounits', f'--id={physical_id}'],
+                                capture_output=True, text=True, timeout=1.0
+                            )
+                            if result.returncode == 0:
+                                parts = result.stdout.strip().split(',')
+                                if len(parts) >= 3:
+                                    utilization = float(parts[0].strip())
+                                    memory_used = int(parts[1].strip())
+                                    memory_total = int(parts[2].strip())
+                        except Exception:
+                            # Fallback to PyTorch memory (only shows this process)
+                            memory_used = torch.cuda.memory_allocated(i) // (1024 * 1024)
+                        
+                        self.update_gpu(
+                            gpu_id=i,
+                            name=props.name,
+                            utilization=utilization,
+                            memory_used=memory_used,
+                            memory_total=memory_total,
+                        )
+                except Exception:
+                    pass
+        
+        self._gpu_monitor_thread = threading.Thread(target=monitor_gpus, daemon=True)
+        self._gpu_monitor_thread.start()
+
+    def set_lean_server(self, address: str, port: int):
+        """Configure the Lean server address and start monitoring."""
+        with self._lock:
+            self.lean_server.address = address
+            self.lean_server.port = port
+        
+        # Start the Lean server monitor if not already running
+        if self._lean_monitor_thread is None and self.enabled:
+            self._start_lean_monitor()
+
+    def _start_lean_monitor(self):
+        """Start a background thread to monitor Lean server status."""
+        def monitor_lean():
+            import urllib.request
+            import json as json_lib
+            
+            while not self._stop_monitors.wait(timeout=3.0):
+                with self._lock:
+                    address = self.lean_server.address
+                    port = self.lean_server.port
+                
+                if not address or not port:
+                    continue
+                
+                try:
+                    url = f"http://{address}:{port}/status"
+                    req = urllib.request.Request(url, method="GET")
+                    req.add_header("Accept", "application/json")
+                    
+                    with urllib.request.urlopen(req, timeout=5.0) as response:
+                        data = json_lib.loads(response.read().decode())
+                    
+                    with self._lock:
+                        self.lean_server.connected = True
+                        self.lean_server.available_processes = data.get("available_processes", 0)
+                        self.lean_server.used_processes = data.get("used_processes", 0)
+                        self.lean_server.max_processes = data.get("max_processes", 0)
+                        self.lean_server.cpu_percent = data.get("cpu_percent_per_core", [])
+                        ram = data.get("ram", {})
+                        self.lean_server.ram_percent = ram.get("percent", 0.0)
+                        self.lean_server.ram_used_gb = ram.get("used_bytes", 0) / (1024**3)
+                        self.lean_server.ram_total_gb = ram.get("total_bytes", 0) / (1024**3)
+                        self.lean_server.last_update = time.time()
+                        self.lean_server.error = ""
+                except Exception as e:
+                    with self._lock:
+                        self.lean_server.connected = False
+                        self.lean_server.error = str(e)
+        
+        self._lean_monitor_thread = threading.Thread(target=monitor_lean, daemon=True)
+        self._lean_monitor_thread.start()
 
     def _create_app(self) -> Flask:
         """Create the Flask application."""
@@ -393,6 +583,91 @@ class WebMonitor:
                     time.sleep(0.5)
             
             return Response(generate(), mimetype="text/event-stream")
+
+        @app.route("/api/replay_buffers")
+        def list_replay_buffers():
+            """List available replay buffer files."""
+            with self._lock:
+                output_dir = self.output_dir
+            if not output_dir or not os.path.exists(output_dir):
+                return jsonify({"files": []})
+            
+            files = []
+            for f in sorted(os.listdir(output_dir)):
+                if f.startswith("replay_buffer_") and f.endswith(".json"):
+                    filepath = os.path.join(output_dir, f)
+                    files.append({
+                        "name": f,
+                        "size": os.path.getsize(filepath),
+                        "step": int(f.replace("replay_buffer_", "").replace(".json", "")),
+                    })
+            return jsonify({"files": files})
+
+        @app.route("/api/replay_buffers/<filename>")
+        def get_replay_buffer(filename: str):
+            """Get contents of a specific replay buffer file."""
+            with self._lock:
+                output_dir = self.output_dir
+            if not output_dir:
+                return jsonify({"error": "No output directory"}), 404
+            
+            filepath = os.path.join(output_dir, filename)
+            if not os.path.exists(filepath) or not filename.startswith("replay_buffer_"):
+                return jsonify({"error": "File not found"}), 404
+            
+            try:
+                with open(filepath, "r") as f:
+                    data = json.load(f)
+                return jsonify({"transitions": data})
+            except Exception as e:
+                return jsonify({"error": str(e)}), 500
+
+        @app.route("/api/tactics")
+        def get_tactics():
+            """Get recent tactics from tactics.txt or live tactics from distributed mode."""
+            with self._lock:
+                output_dir = self.output_dir
+                # Include live tactics from distributed mode
+                live_tactics = list(self.live_tactics)
+            
+            tactics = []
+            
+            # Try to read from tactics.txt (local mode)
+            if output_dir:
+                filepath = os.path.join(output_dir, "tactics.txt")
+                if os.path.exists(filepath):
+                    try:
+                        with open(filepath, "r") as f:
+                            lines = f.readlines()
+                            # Return last 200 lines
+                            for line in lines[-200:]:
+                                parts = line.strip().split("\t")
+                                if len(parts) >= 3:
+                                    tactics.append({
+                                        "success": parts[0] == "+",
+                                        "state": parts[1][:100],  # Truncate long states
+                                        "tactic": parts[2],
+                                    })
+                    except Exception:
+                        pass
+            
+            # Also include live tactics from distributed mode
+            for t in live_tactics:
+                tactics.append({
+                    "success": t.get("success", False),
+                    "state": str(t.get("state", ""))[:100],
+                    "tactic": t.get("tactic", ""),
+                })
+            
+            # Return most recent 200
+            return jsonify({"tactics": tactics[-200:]})
+
+        @app.route("/api/live_transitions")
+        def get_live_transitions():
+            """Get live transitions collected during the current collection phase."""
+            with self._lock:
+                transitions = list(self.live_transitions)
+            return jsonify({"transitions": transitions})
 
         return app
 
@@ -548,7 +823,13 @@ class WebMonitor:
             return {
                 "phase": self.phase,
                 "step": self.step,
-                "replay_buffer_size": self.replay_buffer_size,
+                # During collection, show live count (base + collected)
+                "replay_buffer_size": (
+                    self.replay_buffer_base_size + self.collection.samples_collected
+                    if self.phase == "collecting"
+                    else self.replay_buffer_size
+                ),
+                "output_dir": self.output_dir,
                 "collection": self.collection.to_dict(),
                 "training": {
                     "step": self.training.step,
@@ -568,6 +849,7 @@ class WebMonitor:
                     }
                     for e in self.eval_history
                 ],
+                "eval_progress": self.eval_progress.to_dict(),
                 "prover_servers": {
                     addr: {
                         "address": s.address,
@@ -583,6 +865,16 @@ class WebMonitor:
                     }
                     for addr, s in self.prover_servers.items()
                 },
+                "local_actors": {
+                    str(actor_id): {
+                        "id": a.id,
+                        "state": a.state,
+                        "games_played": a.games_played,
+                        "games_solved": a.games_solved,
+                        "current_theorem": a.current_theorem[:60] if a.current_theorem else "",
+                    }
+                    for actor_id, a in self.local_actors.items()
+                },
                 "gpus": [
                     {
                         "id": g.id,
@@ -595,6 +887,19 @@ class WebMonitor:
                     }
                     for g in self.gpus
                 ],
+                "lean_server": {
+                    "address": self.lean_server.address,
+                    "port": self.lean_server.port,
+                    "connected": self.lean_server.connected,
+                    "available_processes": self.lean_server.available_processes,
+                    "used_processes": self.lean_server.used_processes,
+                    "max_processes": self.lean_server.max_processes,
+                    "cpu_percent": self.lean_server.cpu_percent,
+                    "ram_percent": self.lean_server.ram_percent,
+                    "ram_used_gb": self.lean_server.ram_used_gb,
+                    "ram_total_gb": self.lean_server.ram_total_gb,
+                    "error": self.lean_server.error,
+                },
             }
 
     # --- State update methods ---
@@ -613,12 +918,19 @@ class WebMonitor:
         with self._lock:
             self.replay_buffer_size = size
 
+    def set_output_dir(self, output_dir: str):
+        with self._lock:
+            self.output_dir = output_dir
+
     def start_collection(self, target_samples: int, num_actors: int):
         with self._lock:
             self.phase = "collecting"
             self.collection.reset()
             self.collection.target_samples = target_samples
             self.collection.num_actors = num_actors
+            self.replay_buffer_base_size = self.replay_buffer_size
+            self.live_transitions.clear()
+            self.live_tactics.clear()
 
     def record_proof_attempt(self, successful: bool, transitions: int = 0):
         with self._lock:
@@ -626,6 +938,26 @@ class WebMonitor:
             if successful:
                 self.collection.proofs_successful += 1
                 self.collection.samples_collected += transitions
+
+    def record_transitions(self, transitions: list):
+        """Record live transitions during collection."""
+        with self._lock:
+            for t in transitions:
+                self.live_transitions.append(t)
+            # Also update samples_collected count for the progress bar
+            self.collection.samples_collected += len(transitions)
+
+    def clear_live_transitions(self):
+        """Clear live transitions (called when collection ends)."""
+        with self._lock:
+            self.live_transitions.clear()
+            self.live_tactics.clear()
+
+    def record_tactics(self, tactics: list):
+        """Record tactics from distributed provers."""
+        with self._lock:
+            for t in tactics:
+                self.live_tactics.append(t)
 
     def record_expansion(self):
         with self._lock:
@@ -652,6 +984,27 @@ class WebMonitor:
                 total=total,
                 errors=errors,
             ))
+            # Clear eval progress when recording final result
+            self.eval_progress = EvalProgress()
+
+    def start_eval(self, dataset: str, total: int):
+        """Start tracking evaluation progress."""
+        with self._lock:
+            self.eval_progress = EvalProgress(
+                dataset=dataset,
+                current=0,
+                total=total,
+                solved=0,
+                errors=0,
+                active=True,
+            )
+
+    def update_eval_progress(self, current: int, solved: int, errors: int):
+        """Update evaluation progress."""
+        with self._lock:
+            self.eval_progress.current = current
+            self.eval_progress.solved = solved
+            self.eval_progress.errors = errors
 
     # --- Prover server updates ---
 
@@ -681,6 +1034,30 @@ class WebMonitor:
         with self._lock:
             if address in self.prover_servers:
                 del self.prover_servers[address]
+
+    # --- Local actor updates (for non-distributed mode) ---
+
+    def update_local_actor(self, actor_id: int, state: str = "running", 
+                           games_played: int | None = None, games_solved: int | None = None,
+                           current_theorem: str = ""):
+        """Update status of a local actor."""
+        with self._lock:
+            if actor_id not in self.local_actors:
+                self.local_actors[actor_id] = LocalActorStatus(id=actor_id)
+            
+            actor = self.local_actors[actor_id]
+            actor.state = state
+            if games_played is not None:
+                actor.games_played = games_played
+            if games_solved is not None:
+                actor.games_solved = games_solved
+            actor.current_theorem = current_theorem
+            actor.last_update = time.time()
+
+    def clear_local_actors(self):
+        """Clear all local actors (called when collection ends)."""
+        with self._lock:
+            self.local_actors.clear()
 
     # --- GPU updates ---
 

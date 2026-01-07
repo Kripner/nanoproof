@@ -56,6 +56,16 @@ export interface EvalResult {
   timestamp: number;
 }
 
+export interface EvalProgress {
+  dataset: string;
+  current: number;
+  total: number;
+  solved: number;
+  errors: number;
+  active: boolean;
+  progress_percent: number;
+}
+
 export interface LogEntry {
   timestamp: string;
   component: string;
@@ -67,10 +77,54 @@ export interface MonitorState {
   phase: 'idle' | 'collecting' | 'evaluating' | 'training';
   step: number;
   replay_buffer_size: number;
+  output_dir: string | null;
   collection: CollectionStats;
   training: TrainingStats;
   eval_history: EvalResult[];
+  eval_progress: EvalProgress;
   prover_servers: Record<string, ProverServer>;
+  local_actors: Record<string, LocalActor>;
   gpus: GPU[];
+  lean_server: LeanServerStatus;
+}
+
+export interface ReplayBufferFile {
+  name: string;
+  size: number;
+  step: number;
+}
+
+export interface Transition {
+  0: string;  // state
+  1: string;  // tactic
+  2: number;  // value
+}
+
+export interface TacticEntry {
+  success: boolean;
+  state: string;
+  tactic: string;
+}
+
+export interface LocalActor {
+  id: number;
+  state: 'idle' | 'running' | 'blocked' | 'error';
+  games_played: number;
+  games_solved: number;
+  current_theorem: string;
+}
+
+export interface LeanServerStatus {
+  address: string;
+  port: number;
+  connected: boolean;
+  available_processes: number;
+  used_processes: number;
+  max_processes: number;
+  cpu_percent: number[];
+  ram_percent: number;
+  ram_used_gb: number;
+  ram_total_gb: number;
+  error: string;
 }
 

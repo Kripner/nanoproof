@@ -4,21 +4,28 @@ import enum
 import time
 import threading
 from contextlib import nullcontext
-from typing import Self, Protocol
+from typing import Self, Protocol, TYPE_CHECKING
 import math
 
-import torch
-from leantree import LeanProject, LeanLibrary, LeanLibraries, LeanProofState
+# Lightweight imports (fast)
 from leantree.repl_adapter.server import LeanClient, LeanProofBranch
-
-from nanoproof.common import compute_init, compute_cleanup, get_base_dir, print0, DummyWandb, autodetect_device_type, \
-    pretty_print_tree, SimpleTimer, DummyTimer
-from nanoproof.checkpoints import load_model, save_checkpoint
-from nanoproof.engine import Engine
-from nanoproof.data.leanworkbook import list_theorems
-from nanoproof.model import Transformer
-from nanoproof.tokenizer import HuggingFaceTokenizer
+from nanoproof.common import pretty_print_tree
 from nanoproof.cli import get_monitor, log, log_tactic
+
+# Heavy imports are done lazily inside TacticModel to speed up prover_server startup
+# These are only imported when TacticModel.create() is called:
+# - torch
+# - nanoproof.checkpoints (load_model)
+# - nanoproof.engine (Engine)
+# - nanoproof.model (Transformer)
+# - nanoproof.tokenizer (HuggingFaceTokenizer)
+
+if TYPE_CHECKING:
+    # For type hints only - not actually imported at runtime
+    import torch
+    from nanoproof.model import Transformer
+    from nanoproof.tokenizer import HuggingFaceTokenizer
+    from nanoproof.engine import Engine
 
 """
 leanserver --project-path ~/troja/nanoproof/leantree_project/ --repl-exe ~/repos/leantree/lean-repl/.lake/build/bin/repl --imports Mathlib FormalConjectures.ForMathlib.Analysis.SpecialFunctions.NthRoot FormalConjectures.Util.Answer --max-processes 2 --address=<PUBLIC_IP> --log-level=DEBUG
@@ -154,16 +161,19 @@ class Game:
 
 @dataclass
 class TacticModel:
-    network: Transformer
-    tokenizer: HuggingFaceTokenizer
-    engine: Engine
+    # Type hints use strings for lazy imports
+    network: "Transformer"
+    tokenizer: "HuggingFaceTokenizer"
+    engine: "Engine"
     num_samples: int = 6
 
     def __post_init__(self):
+        import torch
         self.rng = torch.Generator(device=self.network.get_device())
         self.rng.manual_seed(0)
 
     def sample_tactic(self, state: State) -> list[str]:
+        import torch
         assert len(state) == 1, \
             f"expected single branch in state when generating tactic, got {len(state)} - choose one goal first"
         device = self.network.get_device()
@@ -171,6 +181,12 @@ class TacticModel:
 
         state_str = str(state[0].state).strip()
         tokens = self.tokenizer(state_str + "\n<|tactic|>", prepend=self.tokenizer.get_bos_token_id())
+        
+        # Check if state is too long for the model's rotary cache
+        max_prompt_len = self.network.config.sequence_len * 9
+        if len(tokens) > max_prompt_len:
+            return []  # State too long, return no tactics
+        
         seed = torch.randint(torch.iinfo(torch.int32).max, (1,), device=device, generator=self.rng).item()
         with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
             sample_toks, masks = self.engine.generate_batch(
@@ -200,14 +216,25 @@ class TacticModel:
 
     def sample_tactic_from_str_batch(self, state_strs: list[str]) -> list[list[str]]:
         """Batched tactic generation from state strings directly."""
+        import torch
         device = self.network.get_device()
         assert device.type == "cuda"
 
-        # Prepare tokenized prompts
+        # Maximum prompt length: leave room for generated tokens (64) within rotary cache
+        # Rotary cache is sequence_len * 10, so we use sequence_len * 9 as safe max
+        max_prompt_len = self.network.config.sequence_len * 9
+
+        # Prepare tokenized prompts, tracking which ones are too long
         prompts = []
-        for state_str in state_strs:
+        too_long_indices = set()
+        for idx, state_str in enumerate(state_strs):
             tokens = self.tokenizer(state_str + "\n<|tactic|>", prepend=self.tokenizer.get_bos_token_id())
-            prompts.append(tokens)
+            if len(tokens) > max_prompt_len:
+                # State is too long - use a placeholder (will return empty tactics)
+                too_long_indices.add(idx)
+                prompts.append([self.tokenizer.get_bos_token_id()])  # Minimal valid prompt
+            else:
+                prompts.append(tokens)
 
         seed = torch.randint(torch.iinfo(torch.int32).max, (1,), device=device, generator=self.rng).item()
         with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -219,6 +246,11 @@ class TacticModel:
         # sample_toks_batch shape: (num_prompts, num_samples, seq_len)
         results = []
         for prompt_idx in range(len(state_strs)):
+            # Return empty tactics for states that were too long
+            if prompt_idx in too_long_indices:
+                results.append([])
+                continue
+            
             tactics = []
             for sample_idx in range(self.num_samples):
                 tactic_toks = [
@@ -240,6 +272,11 @@ class TacticModel:
 
     @classmethod
     def create(cls, num_samples: int = 6) -> Self:
+        # Lazy imports - only load heavy dependencies when actually creating the model
+        import torch
+        from nanoproof.checkpoints import load_model
+        from nanoproof.engine import Engine
+        
         source = "sft"  # which checkpoint to load the model from
         model_tag = "d26"  # model tag to load the model from
         device = torch.device("cuda")
@@ -418,29 +455,52 @@ class BatchedTacticModel:
 
         # Release lock during LLM inference
         self._lock.release()
+        results = None
+        inference_error = None
         try:
             states = [item[0] for item in batch]
             inference_start = time.time()
             results = self.inner_model.sample_tactic_batch(states)
             inference_time = time.time() - inference_start
             log(f"Batch #{batch_num}: LLM inference took {inference_time:.2f}s", component="BatchedTacticModel")
+        except Exception as e:
+            inference_error = e
+            log(f"Batch #{batch_num}: LLM inference FAILED: {type(e).__name__}: {e}", component="BatchedTacticModel")
         finally:
             self._lock.acquire()
-
-        self._batch_in_progress = False
+            # CRITICAL: Always reset _batch_in_progress, even on error
+            self._batch_in_progress = False
 
         # Distribute results to waiting threads
         for i, (_, result_event, result_slot) in enumerate(batch):
-            result_slot.append(results[i])
+            if results is not None:
+                result_slot.append(results[i])
+            else:
+                # On error, return empty list so threads don't hang
+                result_slot.append([])
             result_event.set()
 
-        log(f"Batch #{batch_num}: results distributed to {len(batch)} threads", component="BatchedTacticModel")
+        if inference_error:
+            log(f"Batch #{batch_num}: returned empty results to {len(batch)} threads due to error", component="BatchedTacticModel")
+        else:
+            log(f"Batch #{batch_num}: results distributed to {len(batch)} threads", component="BatchedTacticModel")
 
         # Notify any threads waiting for this batch
         self._batch_ready.notify_all()
 
 
-def run_mcts(config: Config, game: Game, model: TacticModel | BatchedTacticModel):
+def run_mcts(config: Config, game: Game, model: TacticModel | BatchedTacticModel,
+              expansion_callback=None, tactic_callback=None):
+    """
+    Run MCTS to find a proof.
+    
+    Args:
+        config: MCTS configuration
+        game: The game to solve
+        model: Tactic model (local or remote)
+        expansion_callback: Optional callable() to call on each expansion
+        tactic_callback: Optional callable(state_str, tactic, success) to call on each tactic
+    """
     root = game.root
     for i in range(game.num_simulations):
         node = root
@@ -454,12 +514,24 @@ def run_mcts(config: Config, game: Game, model: TacticModel | BatchedTacticModel
         tactics = model.sample_tactic(node.state)
         tactic_logprobs = [1.0] * len(tactics)  # TODO: use the actual action logprobs
 
+        # Get state string for tactic callback
+        state_str = str(node.state[0].state).strip() if len(node.state) == 1 else ""
+
         expand_node(node, tactics, tactic_logprobs, config.prior_temperature)
 
         # Record expansion for monitoring
         monitor = get_monitor()
         if monitor is not None:
             monitor.record_expansion()
+        if expansion_callback is not None:
+            expansion_callback()
+        
+        # Record tactics for monitoring (if we have children, tactics were applied)
+        if tactic_callback is not None and node.children:
+            for tactic, child in node.children.items():
+                # A tactic is successful if it led to a valid state
+                success = child.state is not None and len(child.state) > 0
+                tactic_callback(state_str, tactic, success)
 
         backpropagate(
             search_path,
@@ -720,7 +792,11 @@ def _main():
     client = LeanClient(server_address, server_port)
     print(f"Connected to server at {server_address}:{server_port}")
     print(f"Server status: {client.check_status()}")
-    with client.get_process() as env:
+    process = client.get_process()
+    if process is None:
+        print("Failed to acquire Lean process")
+        return
+    with process as env:
         print("Sending `open scoped` commands...")
         env.send_command("""
     open scoped Real

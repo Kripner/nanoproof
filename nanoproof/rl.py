@@ -1,6 +1,8 @@
+import atexit
 import os
 from datetime import datetime
 import json
+import signal
 import sys
 from contextlib import nullcontext
 import random
@@ -23,7 +25,7 @@ from nanoproof.search import TacticModel, BatchedTacticModel
 from nanoproof.data import minif2f
 from nanoproof.data import leanworkbook
 from nanoproof.cli import create_monitor, configure_logging, log
-from nanoproof.rl_server import distributed_collect, InferenceHandler, start_inference_server
+from nanoproof.rl_server import distributed_collect, InferenceHandler, start_inference_only_server, start_coordinator
 from scripts.prover_eval import eval_success_rate
 
 # TODO: if tactic application results in a state that already is on the path from root, skip the tactic (otherwise we sometimes get stuck in loop of eg. rw [add_comm])
@@ -48,20 +50,18 @@ device_type = ""  # cuda|cpu|mps (empty => autodetect)
 dtype = "bfloat16"
 device_batch_size = 8  # (maybe) max to avoid OOM (on A100 40GB)
 # distributed mode
-distributed = False  # enable distributed mode (provers on separate nodes)
+distributed = True  # enable distributed mode (provers on separate nodes)
 inference_server_port = 5000  # port for inference server (distributed mode only)
 poll_interval = 3.0  # how often to poll provers for transitions (seconds)
 # data
 fraction_sft = 0.1  # 10% of data will come from Mathlib (leantree), 90% from replay buffer
-collect_every = 1  # how many steps to train between RL data collections
+collect_every = 1  # how many steps to train between RL data collections  # TODO: when collect_every>1, we need some warmup (collect collect_every*collect_transitions)
 collect_transitions = 100  # how many proof transitions to collect in one collection
 # parallel experience collection (local mode only)
 num_actors = 32  # number of parallel actor threads for experience collection
 num_sampled_tactics = 6  # number of tactics to sample per state in MCTS
 batch_timeout = 0.1  # timeout in seconds for batching LLM calls
 # optimization
-num_epochs = 1
-num_iterations = -1  # override number of iterations (-1 = disable, use num_epochs to derive it)
 target_examples_per_step = 512
 unembedding_lr = 0.004
 embedding_lr = 0.2
@@ -69,10 +69,8 @@ matrix_lr = 0.02
 weight_decay = 0.0
 init_lr_frac = 0.02
 # evaluation and logging there of
-eval_every = 5  # TODO: when eval_every>1, we need some warmup (collect eval_every*collect_transitions)
+eval_every = 5
 # eval_metrics_every = 200
-sample_every = 100
-eval_metrics_max_problems = 1024
 save_every = 1000
 # now allow CLI to override the settings via the configurator lol
 config_keys = [k for k, v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
@@ -152,13 +150,15 @@ theorems_sampler = TheoremsSampler(seed=rank_seed)
 
 # Create the RL monitor (only show on master process)
 rl_monitor = create_monitor(num_actors=num_actors, enabled=master_process)
+rl_monitor.set_output_dir(output_dir)
+rl_monitor.set_lean_server(config.server_address, config.server_port)
 
 
 def train_generator():
     rng = random.Random(rank_seed)
     mathlib_iter = iter(mathlib_train)
     while True:
-        assert len(replay_buffer.buffer) > 100
+        assert len(replay_buffer.buffer) >= collect_transitions
         if rng.random() < fraction_sft:
             try:
                 yield next(mathlib_iter)
@@ -190,16 +190,43 @@ for opt in optimizers:
 # Training loop
 # -----------------------------------------------------------------------------
 
-# Start inference server if in distributed mode (master process only)
-if distributed and master_process:
+# Start inference servers in distributed mode (each rank runs one)
+if distributed:
+    # Each rank starts an inference server on its own port
+    inference_port = inference_server_port + 1 + ddp_rank  # ports 5001, 5002, ...
     inference_handler = InferenceHandler(inner_tactic_model)
-    inference_server_thread = start_inference_server(inference_handler, inference_server_port)
-    # Give server time to start
-    time.sleep(1.0)
+    inference_server_thread = start_inference_only_server(inference_handler, inference_port, ddp_rank)
+    
+    # Sync to ensure all inference servers are up before coordinator starts
+    if ddp:
+        dist.barrier()
+    
+    # Master also starts the coordinator that proxies to all inference servers
+    if master_process:
+        inference_ports = [inference_server_port + 1 + r for r in range(ddp_world_size)]
+        coordinator_thread = start_coordinator(inference_ports, inference_server_port)
+        # Give coordinator time to start
+        time.sleep(0.5)
+    
+    # Sync again so all ranks wait for coordinator
+    if ddp:
+        dist.barrier()
 
 # Go!
 step = 0
 timer = SimpleTimer()
+
+# Register cleanup to run on exit (handles normal exit, sys.exit, and unhandled exceptions)
+def cleanup():
+    """Cleanup function to ensure resources are released on shutdown."""
+    log("Shutting down...", component="Main")
+    # Shutdown the batched tactic model to unblock any waiting threads
+    if tactic_model is not None:
+        tactic_model.shutdown()
+    log("Shutdown complete", component="Main")
+
+atexit.register(cleanup)
+
 while True:
     if step % collect_every == 0:
         # collect proofs
@@ -208,14 +235,30 @@ while True:
         rl_monitor.start_collection(target_samples=collect_transitions, num_actors=num_actors)
         rl_monitor.set_step(step)
         
-        if distributed and master_process:
-            # Distributed mode: coordinate remote provers
-            distributed_collect(
-                collect_transitions,
-                poll_interval,
-                replay_buffer,
-            )
-        elif not distributed:
+        if distributed:
+            if master_process:
+                # Distributed mode: coordinate remote provers (only master does this)
+                distributed_collect(
+                    collect_transitions,
+                    poll_interval,
+                    replay_buffer,
+                )
+                # Signal completion to other ranks via store (avoid NCCL timeout)
+                dist.get_rank()  # Ensure distributed is initialized
+                store = dist.distributed_c10d._get_default_store()
+                store.set(f"collection_done_{step}", "1")
+            else:
+                # Non-master ranks wait for master to finish (without NCCL barrier)
+                store = dist.distributed_c10d._get_default_store()
+                while True:
+                    try:
+                        done = store.get(f"collection_done_{step}")
+                        if done == b"1":
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(1.0)
+        else:
             # Local mode: run actors locally
             run_actor(collect_transitions, config, tactic_model, replay_buffer, theorems_sampler)
         
@@ -232,18 +275,35 @@ while True:
         model.eval()
         rl_monitor.set_phase("evaluating")
 
+        # Progress callback that reports to the monitor
+        class MonitorProgress:
+            def __init__(self, dataset_name: str):
+                self.dataset_name = dataset_name
+            
+            def on_start(self, dataset: str, total: int):
+                rl_monitor.start_eval(self.dataset_name, total)
+            
+            def on_update(self, current: int, solved: int, errors: int):
+                rl_monitor.update_eval_progress(current, solved, errors)
+
         minif2f_theorems = minif2f.list_theorems(split="Valid")
         minif2f_theorems = minif2f_theorems[:64]
         log(f"Evaluating on {len(minif2f_theorems)} theorems from MiniF2F", component="Eval")
-        # Use inner model for evaluation (sequential, no batching needed)
-        minif2f_results = eval_success_rate(inner_tactic_model, minif2f_theorems)
+        # Use parallel evaluation with batched model for speed
+        minif2f_results = eval_success_rate(
+            inner_tactic_model, minif2f_theorems, progress=MonitorProgress("MiniF2F"),
+            num_actors=num_actors
+        )
         rl_monitor.record_eval(step, "MiniF2F", minif2f_results['success_rate'],
                                minif2f_results['solved'], minif2f_results['total'], minif2f_results['errors'])
 
         leanworkbook_theorems = leanworkbook.list_theorems(split="val")
         leanworkbook_theorems = leanworkbook_theorems[:64]
         log(f"Evaluating on {len(leanworkbook_theorems)} theorems from LeanWorkBook", component="Eval")
-        leanworkbook_results = eval_success_rate(inner_tactic_model, leanworkbook_theorems)
+        leanworkbook_results = eval_success_rate(
+            inner_tactic_model, leanworkbook_theorems, progress=MonitorProgress("LeanWorkBook"),
+            num_actors=num_actors
+        )
         rl_monitor.record_eval(step, "LeanWorkBook", leanworkbook_results['success_rate'],
                                leanworkbook_results['solved'], leanworkbook_results['total'],
                                leanworkbook_results['errors'])
@@ -280,8 +340,7 @@ while True:
     # evaluate the gradient
     num_tokens = torch.tensor(0, device=device)  # the number of "active" tokens of supervision seen
     for micro_step in range(grad_accum_steps):
-        train_inputs, train_targets = next(
-            train_loader)  # prefetch the next batch while the GPU is busy with forward/backward
+        train_inputs, train_targets = next(train_loader)  # prefetch the next batch while the GPU is busy with forward/backward
         with autocast_ctx:
             loss = model(train_inputs, train_targets)
         train_loss = loss.detach()  # for logging

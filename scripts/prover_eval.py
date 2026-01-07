@@ -1,98 +1,330 @@
 import argparse
-import os
+import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from dataclasses import dataclass
+from typing import Protocol, Optional, runtime_checkable, Union, Callable
 
 import torch
 import torch.distributed as dist
 from tqdm import tqdm
 from leantree.repl_adapter.server import LeanClient
 
-from nanoproof.common import compute_init, compute_cleanup, print0, is_ddp, autodetect_device_type, get_dist_info
+from nanoproof.common import compute_init, compute_cleanup, print0, autodetect_device_type, get_dist_info
 from nanoproof.data import minif2f
 from nanoproof.data import leanworkbook
-from nanoproof.search import run_mcts, Config, Game, Node, Player, TacticModel
-from nanoproof.checkpoints import load_model
-from nanoproof.engine import Engine
+from nanoproof.search import run_mcts, Config, Game, Node, Player, TacticModel, BatchedTacticModel
+from nanoproof.cli import log
 
-@torch.inference_mode()
-def eval_success_rate(tactic_model: TacticModel, theorems=None, use_tqdm=False):
-    """
-    Evaluates the success rate of the model on the MiniF2F benchmark.
-    Returns a dictionary with 'success_rate', 'solved', and 'total'.
-    """
-    ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
-    theorem_indices = list(range(ddp_rank, len(theorems), ddp_world_size))
-    theorems = [theorems[i] for i in theorem_indices]
 
-    config = Config()
-    client = LeanClient(config.server_address, config.server_port)
+# Lean environment setup commands
+LEAN_OPEN_SCOPED_COMMANDS = """
+    open scoped Real
+    open scoped Nat
+    open scoped Topology
+    open scoped Polynomial
+"""
+
+
+@runtime_checkable
+class EvalProgressCallback(Protocol):
+    """Protocol for receiving evaluation progress updates."""
     
-    solved_count = 0
-    error_count = 0
+    def on_start(self, dataset: str, total: int) -> None:
+        """Called when evaluation starts."""
+        ...
     
-    device = tactic_model.network.get_device()
-    with client.get_process() as env:
-        env.send_command("""
-            open scoped Real
-            open scoped Nat
-            open scoped Topology
-            open scoped Polynomial
-        """)
-        iterator = zip(theorem_indices, theorems)
-        if use_tqdm:
-            iterator = tqdm(iterator, total=len(theorems), desc=f"Rank {ddp_rank}", position=ddp_rank)
-            
-        for i, theorem in iterator:
-            init_branch = env.proof_from_sorry(theorem)
-            if not init_branch.is_success():
-                error_count += 1
-                print0(f"Error on theorem: {theorem}\n... error: {init_branch.error}")
-                continue
-            init_branch = init_branch.value
-            
-            game = Game(theorem, num_simulations=config.num_simulations)
-            game.root = Node(
-                action=None,
-                prior=None,
-                state=[init_branch],
-                to_play=Player.OR,
-                reward=None,
-            )
-            
-            run_mcts(config, game, tactic_model)
-            
-            if game.root.is_solved:
-                solved_count += 1
+    def on_update(self, current: int, solved: int, errors: int) -> None:
+        """Called after each theorem is evaluated with exact global counts."""
+        ...
 
-    local_metrics = torch.tensor([solved_count, error_count, len(theorem_indices)], dtype=torch.long, device=device)
+
+@dataclass
+class EvalCounters:
+    """Thread-safe counters for evaluation progress."""
+    solved: int = 0
+    errors: int = 0
+    processed: int = 0
+    
+    def as_dict(self, total: int) -> dict:
+        """Convert to final results dictionary."""
+        success_rate = self.solved / total if total > 0 else 0.0
+        error_rate = self.errors / total if total > 0 else 0.0
+        return {
+            "success_rate": success_rate,
+            "solved": self.solved,
+            "total": total,
+            "errors": self.errors,
+            "error_rate": error_rate,
+        }
+
+
+def evaluate_theorem(
+    theorem: str,
+    env,
+    config: Config,
+    model: Union[TacticModel, BatchedTacticModel],
+) -> tuple[bool, bool]:
+    """
+    Evaluate a single theorem using MCTS.
+    
+    Returns:
+        (success, is_error): success=True if proof found, is_error=True if theorem parsing failed
+    """
+    init_branch = env.proof_from_sorry(theorem)
+    if not init_branch.is_success():
+        return False, True  # Error case
+    
+    init_branch = init_branch.value
+    game = Game(theorem, num_simulations=config.num_simulations)
+    game.root = Node(
+        action=None,
+        prior=None,
+        state=[init_branch],
+        to_play=Player.OR,
+        reward=None,
+    )
+    
+    run_mcts(config, game, model)
+    return game.root.is_solved, False
+
+
+def aggregate_results(
+    local_solved: int,
+    local_errors: int, 
+    local_total: int,
+    device: torch.device,
+    ddp: bool,
+) -> dict:
+    """Aggregate local results across DDP ranks and return final metrics."""
+    local_metrics = torch.tensor(
+        [local_solved, local_errors, local_total],
+        dtype=torch.long, device=device
+    )
     if ddp:
         dist.all_reduce(local_metrics, op=dist.ReduceOp.SUM)
+    
     global_solved = local_metrics[0].item()
-    global_error = local_metrics[1].item()
+    global_errors = local_metrics[1].item()
     global_total = local_metrics[2].item()
     
-    success_rate = global_solved / global_total if global_total > 0 else 0.0
-    error_rate = global_error / global_total if global_total > 0 else 0.0
-    return {
-        "success_rate": success_rate,
-        "solved": global_solved,
-        "total": global_total,
-        "errors": global_error,
-        "error_rate": error_rate,
-    }
+    return EvalCounters(global_solved, global_errors, global_total).as_dict(global_total)
+
+
+def broadcast_progress(
+    progress: Optional[EvalProgressCallback],
+    processed: int,
+    solved: int,
+    errors: int,
+    device: torch.device,
+    ddp: bool,
+    ddp_rank: int,
+):
+    """Broadcast progress update across DDP ranks and notify callback."""
+    if progress is None:
+        return
+    
+    local_stats = torch.tensor(
+        [processed, solved, errors],
+        dtype=torch.long, device=device
+    )
+    if ddp:
+        dist.all_reduce(local_stats, op=dist.ReduceOp.SUM)
+    
+    if ddp_rank == 0:
+        progress.on_update(
+            current=local_stats[0].item(),
+            solved=local_stats[1].item(),
+            errors=local_stats[2].item(),
+        )
+
+
+@torch.inference_mode()
+def eval_success_rate(
+    tactic_model: Union[TacticModel, BatchedTacticModel],
+    theorems=None,
+    use_tqdm=False,
+    progress: Optional[EvalProgressCallback] = None,
+    num_actors: int = 1,
+):
+    """
+    Evaluates the success rate of the model on the given theorems.
+    Returns a dictionary with 'success_rate', 'solved', and 'total'.
+    
+    Args:
+        tactic_model: The model to evaluate (TacticModel or BatchedTacticModel)
+        theorems: List of theorems to evaluate
+        use_tqdm: Whether to show tqdm progress bar
+        progress: Optional callback object for progress updates
+        num_actors: Number of parallel actors for evaluation. If >1, uses parallel evaluation.
+                    When num_actors > 1 and tactic_model is a TacticModel, it will be wrapped
+                    in a BatchedTacticModel automatically.
+    """
+    ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
+    theorems_subset = theorems[ddp_rank::ddp_world_size]
+    
+    if progress is not None and ddp_rank == 0:
+        progress.on_start("", len(theorems))
+    
+    if num_actors > 1:
+        return _eval_parallel(tactic_model, theorems, theorems_subset, progress, num_actors)
+    else:
+        return _eval_sequential(tactic_model, theorems_subset, use_tqdm, progress)
+
+
+def _eval_sequential(
+    tactic_model: Union[TacticModel, BatchedTacticModel],
+    theorems_subset: list[str],
+    use_tqdm: bool,
+    progress: Optional[EvalProgressCallback],
+) -> dict:
+    """Sequential (single-threaded) evaluation."""
+    ddp, ddp_rank, _, _ = get_dist_info()
+    config = Config()
+    device = tactic_model.network.get_device()
+    
+    counters = EvalCounters()
+    client = LeanClient(config.server_address, config.server_port)
+    
+    process = client.get_process()
+    if process is None:
+        raise RuntimeError(f"Failed to acquire Lean process from {config.server_address}:{config.server_port}")
+    
+    with process as env:
+        env.send_command(LEAN_OPEN_SCOPED_COMMANDS)
+        
+        iterator = enumerate(theorems_subset)
+        if use_tqdm:
+            iterator = tqdm(iterator, total=len(theorems_subset), desc=f"Rank {ddp_rank}", position=ddp_rank)
+        
+        for idx, theorem in iterator:
+            solved, is_error = evaluate_theorem(theorem, env, config, tactic_model)
+            
+            if is_error:
+                counters.errors += 1
+                print0(f"Error on theorem: {theorem[:80]}...")
+            elif solved:
+                counters.solved += 1
+            counters.processed += 1
+            
+            broadcast_progress(progress, counters.processed, counters.solved, counters.errors, device, ddp, ddp_rank)
+    
+    return aggregate_results(counters.solved, counters.errors, len(theorems_subset), device, ddp)
+
+
+def _eval_parallel(
+    tactic_model: Union[TacticModel, BatchedTacticModel],
+    theorems: list[str],
+    theorems_subset: list[str],
+    progress: Optional[EvalProgressCallback],
+    num_actors: int,
+) -> dict:
+    """Parallel evaluation using multiple threads with work-stealing."""
+    ddp, ddp_rank, _, _ = get_dist_info()
+    config = Config()
+    
+    # Wrap in BatchedTacticModel if necessary
+    if isinstance(tactic_model, TacticModel):
+        model = BatchedTacticModel(tactic_model, batch_size=num_actors, timeout_seconds=0.1)
+        owns_model = True
+    else:
+        model = tactic_model
+        owns_model = False
+    
+    device = model.network.get_device()
+    
+    # Thread-safe state - use separate lists to avoid any aliasing issues
+    lock = threading.Lock()
+    results = []  # List of (solved: bool, is_error: bool) tuples
+    next_idx = [0]
+    stop_flag = threading.Event()
+    
+    def actor_loop(actor_id: int):
+        """Single actor thread that evaluates theorems until done."""
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        local_results = []  # Collect results locally first
+        
+        log(f"[Eval Actor {actor_id}] Connecting to {config.server_address}:{config.server_port}")
+        
+        try:
+            client = LeanClient(config.server_address, config.server_port)
+        except Exception as e:
+            log(f"[Eval Actor {actor_id}] Failed to connect: {e}")
+            return
+        
+        try:
+            process = client.get_process()
+            if process is None:
+                log(f"[Eval Actor {actor_id}] Failed to acquire Lean process (server overloaded?)")
+                return
+            
+            with process as env:
+                env.send_command(LEAN_OPEN_SCOPED_COMMANDS)
+                log(f"[Eval Actor {actor_id}] Ready")
+                
+                while not stop_flag.is_set():
+                    # Get next theorem (work stealing)
+                    with lock:
+                        if next_idx[0] >= len(theorems_subset):
+                            break
+                        my_idx = next_idx[0]
+                        next_idx[0] += 1
+                    
+                    theorem = theorems_subset[my_idx]
+                    solved, is_error = evaluate_theorem(theorem, env, config, model)
+                    local_results.append((solved, is_error))
+                    
+                    if is_error:
+                        log(f"[Eval Actor {actor_id}] Error: {theorem[:50]}...")
+                
+                log(f"[Eval Actor {actor_id}] Done, processed {len(local_results)} theorems")
+        except Exception as e:
+            log(f"[Eval Actor {actor_id}] Error: {e}")
+        
+        # Merge local results into global results under lock
+        with lock:
+            results.extend(local_results)
+    
+    # Run actors in parallel
+    with ThreadPoolExecutor(max_workers=num_actors) as executor:
+        futures = [executor.submit(actor_loop, i) for i in range(num_actors)]
+        for i, future in enumerate(futures):
+            try:
+                future.result(timeout=600.0)
+            except FuturesTimeoutError:
+                log(f"[Eval] Actor {i} timed out")
+            except Exception as e:
+                log(f"[Eval] Actor {i} exception: {e}")
+    
+    if owns_model:
+        model.shutdown()
+    
+    # Count results from the collected tuples
+    solved_count = sum(1 for solved, is_error in results if solved and not is_error)
+    error_count = sum(1 for solved, is_error in results if is_error)
+    processed_count = len(results)
+    
+    log(f"[Eval] Parallel evaluation complete: {solved_count} solved, {error_count} errors, {processed_count} processed out of {len(theorems_subset)} theorems")
+    
+    # Final progress update (from main thread, safe for DDP)
+    if progress is not None:
+        broadcast_progress(progress, processed_count, solved_count, error_count, device, ddp, ddp_rank)
+    
+    return aggregate_results(solved_count, error_count, processed_count, device, ddp)
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--max-theorems", type=int, default=50, help="Max theorems to evaluate")
+    parser.add_argument("--num-actors", type=int, default=4, help="Number of parallel actors (1 for sequential)")
     args = parser.parse_args()
 
     device_type = autodetect_device_type()
     compute_init(device_type)
 
     tactic_model = TacticModel.create()
-    minif2f_theorems = minif2f.list_theorems(split="Valid")
-    minif2f_theorems = minif2f_theorems[:args.max_theorems]
-    leanworkbook_theorems = leanworkbook.list_theorems(split="val")
-    leanworkbook_theorems = leanworkbook_theorems[:args.max_theorems]
+    minif2f_theorems = minif2f.list_theorems(split="Valid")[:args.max_theorems]
+    leanworkbook_theorems = leanworkbook.list_theorems(split="val")[:args.max_theorems]
 
     def print_results(results, name):
         print0("-" * 80)
@@ -103,13 +335,20 @@ def main():
         print0(f"Error rate: {results['error_rate']:.4%}")
         print0("-" * 80)
 
-    leanworkbook_results = eval_success_rate(tactic_model, leanworkbook_theorems, use_tqdm=True)
+    print0(f"Using {args.num_actors} parallel actor(s)")
+    
+    leanworkbook_results = eval_success_rate(
+        tactic_model, leanworkbook_theorems, use_tqdm=True, num_actors=args.num_actors
+    )
     print_results(leanworkbook_results, "LeanWorkBook")
 
-    minif2f_results = eval_success_rate(tactic_model, minif2f_theorems, use_tqdm=True)
+    minif2f_results = eval_success_rate(
+        tactic_model, minif2f_theorems, use_tqdm=True, num_actors=args.num_actors
+    )
     print_results(minif2f_results, "MiniF2F")
 
     compute_cleanup()
+
 
 if __name__ == "__main__":
     main()
