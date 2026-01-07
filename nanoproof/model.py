@@ -297,7 +297,7 @@ class Transformer(nn.Module):
             logits = logits[..., :self.config.vocab_size]
             return logits
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def generate(self, tokens, max_tokens, temperature=1.0, top_k=None, seed=42):
         """
         Naive autoregressive streaming inference.

@@ -22,12 +22,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 import logging
+import traceback
 
 import requests
 from flask import Flask, request, jsonify
 
 from leantree.repl_adapter.server import LeanClient
-from nanoproof.search import Node, Player, Game, run_mcts, Config
+from nanoproof.search import Node, Player, Game, run_mcts, Config, MCTSAbortedError
 from nanoproof.data.leanworkbook import list_theorems
 
 
@@ -48,10 +49,18 @@ class RemoteTacticModel:
     The RL server handles batching and GPU inference.
     """
     
-    def __init__(self, rl_server_address: str, timeout: float = 60.0):
+    def __init__(self, rl_server_address: str, timeout: float = 60.0, max_pool_size: int = 50):
         self.rl_server_address = rl_server_address
         self.timeout = timeout
+        # Configure session with larger connection pool for many concurrent actors
         self._session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=max_pool_size,
+            pool_maxsize=max_pool_size,
+            max_retries=0,  # We handle retries ourselves
+        )
+        self._session.mount('http://', adapter)
+        self._session.mount('https://', adapter)
         self._consecutive_failures = 0
         self._max_failures = 10  # After this many failures, raise exception
         self._last_error_log_time = 0
@@ -155,25 +164,19 @@ class LocalBuffer:
         with self.lock:
             self.expansions += 1
     
-    def poll_and_clear(self) -> dict:
-        """Return all transitions and stats since last poll, then clear."""
+    def pop_transitions(self) -> dict:
+        """Return all transitions and tactics, then clear them."""
         with self.lock:
             result = {
                 "transitions": self.transitions.copy(),
                 "tactics": self.tactics.copy(),
-                "games_played": self.games_played,
-                "games_solved": self.games_solved,
-                "expansions": self.expansions,
             }
-            # Reset everything - return only deltas since last poll
             self.transitions = []
             self.tactics = []
-            self.games_played = 0
-            self.games_solved = 0
-            self.expansions = 0
             return result
     
     def get_stats(self) -> dict:
+        """Return current stats without modifying them."""
         with self.lock:
             return {
                 "transitions_pending": len(self.transitions),
@@ -226,9 +229,9 @@ class KeyboardThread(threading.Thread):
         print(f"  States: {stats['state_counts']}")
         print(f"  Paused: {stats['paused']}")
         print(f"Buffer:")
-        print(f"  Transitions: {buffer_stats['transitions']}")
-        print(f"  Proof attempts: {buffer_stats['proof_attempts']}")
-        print(f"  Successes: {buffer_stats['successes']}")
+        print(f"  Transitions pending: {buffer_stats['transitions_pending']}")
+        print(f"  Games played: {buffer_stats['games_played']}")
+        print(f"  Games solved: {buffer_stats['games_solved']}")
         print(f"  Expansions: {buffer_stats['expansions']}")
         print("=" * 60 + "\n")
 
@@ -243,11 +246,12 @@ class ProverWorker:
     def __init__(
         self,
         config: Config,
-        tactic_model: RemoteTacticModel,
+        tactic_model,  # RemoteTacticModel or any model with sample_tactic()
         lean_server_address: str,
         lean_server_port: int,
         buffer: LocalBuffer,
-        num_actors: int = 4,
+        num_actors: int,
+        theorems_seed: int = 0,
     ):
         self.config = config
         self.tactic_model = tactic_model
@@ -260,7 +264,7 @@ class ProverWorker:
         self._paused = True
         self._stop_flag = threading.Event()
         self._threads: list[threading.Thread] = []
-        self._theorems_sampler = TheoremsSampler(seed=0)
+        self._theorems_sampler = TheoremsSampler(seed=theorems_seed)
         
         # Thread states for monitoring: 'idle', 'running', 'blocked', 'error'
         self._thread_states: dict[int, str] = {}
@@ -375,8 +379,12 @@ class ProverWorker:
                 # RL server is down - exit gracefully
                 self.set_thread_state(actor_id, "error")
                 print(f"[Actor {actor_id}] {e}")
-                print(f"[Actor {actor_id}] Exiting")
                 break
+            except MCTSAbortedError:
+                # MCTS was aborted due to pause - this is expected, just continue
+                # The Lean process is now freed for evaluation
+                print(f"[Actor {actor_id}] MCTS aborted (paused for evaluation)")
+                continue
             except ConnectionResetError:
                 consecutive_errors += 1
                 self.set_thread_state(actor_id, "error")
@@ -393,10 +401,10 @@ class ProverWorker:
                 consecutive_errors += 1
                 self.set_thread_state(actor_id, "error")
                 print(f"[Actor {actor_id}] Error: {e} ({consecutive_errors}/{max_consecutive_errors})")
+                print(f"[Actor {actor_id}] Traceback:\n{traceback.format_exc()}")
                 if consecutive_errors >= max_consecutive_errors:
                     break
                 continue
-            
             if game is None:
                 continue
             
@@ -442,10 +450,13 @@ class ProverWorker:
             )
             
             # Use callbacks to track expansions and tactics
+            # Pass pause check as abort_check so MCTS exits early when paused,
+            # freeing the Lean process for evaluation
             run_mcts(
                 self.config, game, self.tactic_model,
                 expansion_callback=self.buffer.add_expansion,
                 tactic_callback=self.buffer.add_tactic,
+                abort_check=lambda: self._paused,
             )
             return game
     
@@ -554,7 +565,8 @@ def create_app(prover_worker: ProverWorker, buffer: LocalBuffer):
         Returns and clears the local buffer.
         Also includes thread states for monitoring.
         """
-        result = buffer.poll_and_clear()
+        result = buffer.pop_transitions()
+        result.update(buffer.get_stats())
         result["num_threads"] = prover_worker.num_actors
         result["thread_states"] = prover_worker.get_thread_states()
         return jsonify(result)

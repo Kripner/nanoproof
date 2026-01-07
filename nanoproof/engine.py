@@ -85,7 +85,7 @@ class KVCache:
 
 
 # -----------------------------------------------------------------------------
-@torch.inference_mode()
+@torch.no_grad()
 def sample_next_token(logits, rng, temperature=1.0, top_k=None):
     """Sample a single next token from given logits of shape (B, vocab_size). Returns (B, 1)."""
     assert temperature >= 0.0, "temperature must be non-negative"
@@ -116,7 +116,7 @@ class Engine:
         self.model = model
         self.tokenizer = tokenizer
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def generate(self, tokens, num_samples=1, max_tokens=None, min_tokens=None, temperature=1.0, top_k=None, seed=42):
         """
         Generate tokens from prompt(s). Accepts either list[int] (single prompt) or

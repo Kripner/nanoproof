@@ -9,7 +9,7 @@ import math
 
 # Lightweight imports (fast)
 from leantree.repl_adapter.server import LeanClient, LeanProofBranch
-from nanoproof.common import pretty_print_tree
+from nanoproof.common import pretty_print_tree, ValueOrError
 from nanoproof.cli import get_monitor, log, log_tactic
 
 # Heavy imports are done lazily inside TacticModel to speed up prover_server startup
@@ -327,35 +327,35 @@ class BatchedTacticModel:
     def shutdown(self):
         """
         Signal shutdown to unblock all waiting threads.
-        Waiting threads will raise RuntimeError.
+        Waiting threads will receive ValueOrError with error.
         """
         with self._lock:
             self._shutdown = True
             # Set all pending result events to unblock waiting threads
             for _, result_event, result_slot in self._pending:
-                result_slot.append([])  # Empty result
+                result_slot.append(ValueOrError.from_error("Model shutdown"))
                 result_event.set()
             self._pending = []
             self._batch_ready.notify_all()
         log("Shutdown initiated, all waiting threads unblocked", component="BatchedTacticModel")
 
-    def sample_tactic(self, state: State) -> list[str]:
+    def sample_tactic(self, state: State) -> ValueOrError[list[str]]:
         """
         Thread-safe sample_tactic that batches calls from multiple threads.
         Blocks until result is available.
         
-        Returns empty list if shutdown is in progress.
+        Returns ValueOrError with error if shutdown is in progress or an error occurs.
         """
         if self._shutdown:
-            return []
+            return ValueOrError.from_error("Model shutdown")
             
         wait_start = time.time()
         result_event = threading.Event()
-        result_slot: list[list[str]] = []  # Will hold the result
+        result_slot: list[ValueOrError[list[str]]] = []  # Will hold the result
 
         with self._lock:
             if self._shutdown:
-                return []
+                return ValueOrError.from_error("Model shutdown")
                 
             self._total_requests += 1
             request_num = self._total_requests
@@ -390,13 +390,13 @@ class BatchedTacticModel:
         total_waited = 0.0
         while not result_event.is_set() and total_waited < max_wait:
             if self._shutdown:
-                return []
+                return ValueOrError.from_error("Model shutdown")
             result_event.wait(timeout=wait_interval)
             total_waited += wait_interval
         
         if not result_event.is_set():
             log(f"Request timed out after {max_wait}s", component="BatchedTacticModel")
-            return []
+            return ValueOrError.from_error("Request timed out")
 
         # Record wait time for monitoring
         wait_time = time.time() - wait_start
@@ -404,7 +404,7 @@ class BatchedTacticModel:
         if monitor is not None:
             monitor.record_batch_wait(wait_time)
 
-        return result_slot[0] if result_slot else []
+        return result_slot[0] if result_slot else ValueOrError.from_error("No result received")
 
     def _wait_for_batch_or_timeout(self, my_event: threading.Event):
         """Wait until batch is ready or timeout, then potentially trigger processing."""
@@ -459,10 +459,7 @@ class BatchedTacticModel:
         inference_error = None
         try:
             states = [item[0] for item in batch]
-            inference_start = time.time()
             results = self.inner_model.sample_tactic_batch(states)
-            inference_time = time.time() - inference_start
-            log(f"Batch #{batch_num}: LLM inference took {inference_time:.2f}s", component="BatchedTacticModel")
         except Exception as e:
             inference_error = e
             log(f"Batch #{batch_num}: LLM inference FAILED: {type(e).__name__}: {e}", component="BatchedTacticModel")
@@ -474,14 +471,15 @@ class BatchedTacticModel:
         # Distribute results to waiting threads
         for i, (_, result_event, result_slot) in enumerate(batch):
             if results is not None:
-                result_slot.append(results[i])
+                result_slot.append(ValueOrError.from_success(results[i]))
             else:
-                # On error, return empty list so threads don't hang
-                result_slot.append([])
+                # On error, return error so caller knows inference failed
+                error_msg = f"LLM inference failed: {type(inference_error).__name__}: {inference_error}"
+                result_slot.append(ValueOrError.from_error(error_msg))
             result_event.set()
 
         if inference_error:
-            log(f"Batch #{batch_num}: returned empty results to {len(batch)} threads due to error", component="BatchedTacticModel")
+            log(f"Batch #{batch_num}: returned errors to {len(batch)} threads due to error", component="BatchedTacticModel")
         else:
             log(f"Batch #{batch_num}: results distributed to {len(batch)} threads", component="BatchedTacticModel")
 
@@ -489,8 +487,12 @@ class BatchedTacticModel:
         self._batch_ready.notify_all()
 
 
-def run_mcts(config: Config, game: Game, model: TacticModel | BatchedTacticModel,
-              expansion_callback=None, tactic_callback=None):
+class MCTSAbortedError(Exception):
+    """Raised when MCTS is aborted early (e.g., prover paused during evaluation)."""
+    pass
+
+
+def run_mcts(config: Config, game: Game, model: TacticModel | BatchedTacticModel, expansion_callback=None, tactic_callback=None, abort_check=None):
     """
     Run MCTS to find a proof.
     
@@ -500,9 +502,18 @@ def run_mcts(config: Config, game: Game, model: TacticModel | BatchedTacticModel
         model: Tactic model (local or remote)
         expansion_callback: Optional callable() to call on each expansion
         tactic_callback: Optional callable(state_str, tactic, success) to call on each tactic
+        abort_check: Optional callable() -> bool that returns True if MCTS should abort early.
+                     This is checked each iteration and allows callers to cancel search
+                     (e.g., when prover is paused and needs to free Lean processes).
+    
+    Raises:
+        MCTSAbortedError: If abort_check returns True during search.
     """
     root = game.root
     for i in range(game.num_simulations):
+        # Check if we should abort early (e.g., prover paused during evaluation)
+        if abort_check is not None and abort_check():
+            raise MCTSAbortedError("MCTS aborted: prover paused")
         node = root
         search_path = [node]
 
@@ -511,7 +522,13 @@ def run_mcts(config: Config, game: Game, model: TacticModel | BatchedTacticModel
             search_path.append(node)
 
         assert node.state is not None
-        tactics = model.sample_tactic(node.state)
+        tactics_result = model.sample_tactic(node.state)
+        if isinstance(tactics_result, ValueOrError):
+            if not tactics_result.is_success():
+                raise RuntimeError(f"Tactic generation failed: {tactics_result.error}")
+            tactics = tactics_result.value
+        else:
+            tactics = tactics_result
         tactic_logprobs = [1.0] * len(tactics)  # TODO: use the actual action logprobs
 
         # Get state string for tactic callback
@@ -692,7 +709,13 @@ def run_bfs(game: Game, model: TacticModel):
         print("-" * 80 + f"Solving state:\n{branch.state}\n")
         for retry_idx in range(10):
             print("Generating ..." + f" (retry {retry_idx})" if retry_idx != 0 else "")
-            tactics = model.sample_tactic(node.state)
+            tactics_result = model.sample_tactic(node.state)
+            if isinstance(tactics_result, ValueOrError):
+                if not tactics_result.is_success():
+                    raise RuntimeError(f"Tactic generation failed: {tactics_result.error}")
+                tactics = tactics_result.value
+            else:
+                tactics = tactics_result
             # [tactic] = tactics
             # print(f"Trying tactic:\n'{tactic}'")
             options = []

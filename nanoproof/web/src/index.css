@@ -546,9 +546,6 @@ body {
 
 .transition-state {
   color: var(--text-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .transition-tactic {
@@ -584,18 +581,11 @@ body {
 .tactic-text {
   color: var(--accent-cyan);
   flex-shrink: 0;
-  max-width: 300px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .tactic-state {
   color: var(--text-muted);
   flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* Lean Server Panel */

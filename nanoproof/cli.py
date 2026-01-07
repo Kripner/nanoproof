@@ -645,7 +645,7 @@ class WebMonitor:
                                 if len(parts) >= 3:
                                     tactics.append({
                                         "success": parts[0] == "+",
-                                        "state": parts[1][:100],  # Truncate long states
+                                        "state": parts[1],
                                         "tactic": parts[2],
                                     })
                     except Exception:
@@ -655,7 +655,7 @@ class WebMonitor:
             for t in live_tactics:
                 tactics.append({
                     "success": t.get("success", False),
-                    "state": str(t.get("state", ""))[:100],
+                    "state": str(t.get("state", "")),
                     "tactic": t.get("tactic", ""),
                 })
             

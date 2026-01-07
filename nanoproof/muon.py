@@ -128,8 +128,17 @@ class DistMuon(torch.optim.Optimizer):
         rank = dist.get_rank()
         world_size = dist.get_world_size()
 
+        # Ensure all grads exist - with detailed error message for debugging
+        missing_grads = []
+        for group_idx, group in enumerate(self.param_groups):
+            for param_idx, p in enumerate(group["params"]):
+                if p.grad is None:
+                    missing_grads.append(f"group[{group_idx}].params[{param_idx}] shape={p.shape} requires_grad={p.requires_grad}")
+        if missing_grads:
+            raise RuntimeError(f"[rank {rank}] DistMuon.step(): {len(missing_grads)} params missing grads:\n" + "\n".join(missing_grads[:10]))
+
         # Ensure all grads exist
-        assert all(p.grad is not None for group in self.param_groups for p in group["params"]), "All params must have grads"
+        # assert all(p.grad is not None for group in self.param_groups for p in group["params"]), "All params must have grads"
 
         # Kick off all the reduce scatter operations to average up the gradients across all ranks
         all_reduce_futures = []

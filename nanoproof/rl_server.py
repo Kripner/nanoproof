@@ -26,6 +26,7 @@ from flask import Flask, request as flask_request, jsonify
 from nanoproof.search import TacticModel
 from nanoproof.experience_collection import ReplayBuffer
 from nanoproof.cli import log
+from nanoproof.cli import get_monitor
 
 
 # -----------------------------------------------------------------------------
@@ -44,12 +45,10 @@ class ProverRegistry:
         """Register a prover server. If collection is running, start it immediately."""
         with self._lock:
             self._provers.add(address)
-            should_start = self._collecting
             log(f"Prover registered: {address} (total: {len(self._provers)})", component="Registry")
         
-        # Start the prover outside the lock to avoid blocking
-        if should_start:
-            start_prover(address)
+            if self._collecting:
+                start_prover(address)
     
     def unregister(self, address: str):
         """Unregister a prover server."""
@@ -102,7 +101,7 @@ class InferenceHandler:
         self.tactic_model = tactic_model
         self._lock = threading.Lock()
     
-    @torch.inference_mode()
+    @torch.no_grad()
     def generate_tactics_batch(self, state_strs: list[str]) -> list[list[str]]:
         """Generate tactics for a batch of states."""
         with self._lock:
@@ -282,14 +281,20 @@ def start_inference_server(handler: InferenceHandler, port: int):
 # Prover Coordination
 # -----------------------------------------------------------------------------
 
-def start_prover(addr: str):
-    """Start a single prover server."""
-    try:
-        response = requests.post(f"http://{addr}/start", timeout=5.0)
-        response.raise_for_status()
-        log(f"Started prover at {addr}", component="Coordinator")
-    except Exception as e:
-        log(f"Failed to start prover at {addr}: {e}", component="Coordinator")
+def start_prover(addr: str, max_retries: int = 3, retry_delay: float = 2.0):
+    """Start a single prover server with retries for startup race conditions."""
+    log(f"Starting prover at {addr}", component="Coordinator")
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(f"http://{addr}/start", timeout=10.0)
+            response.raise_for_status()
+            log(f"Started prover at {addr}", component="Coordinator")
+            return
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+            else:
+                log(f"Failed to start prover at {addr} after {max_retries} attempts: {e}", component="Coordinator")
 
 
 def start_all_provers(prover_addresses: list[str]):
@@ -302,7 +307,7 @@ def pause_all_provers(prover_addresses: list[str]):
     """Instruct all prover servers to pause collection."""
     for addr in prover_addresses:
         try:
-            response = requests.post(f"http://{addr}/pause", timeout=5.0)
+            response = requests.post(f"http://{addr}/pause", timeout=10.0)
             response.raise_for_status()
             log(f"Paused prover at {addr}", component="Coordinator")
         except Exception as e:
@@ -326,7 +331,7 @@ def poll_all_provers(prover_addresses: list[str]) -> tuple[list, list, int, int,
     
     for addr in prover_addresses:
         try:
-            response = requests.get(f"http://{addr}/poll", timeout=5.0)
+            response = requests.get(f"http://{addr}/poll", timeout=30.0)
             response.raise_for_status()
             data = response.json()
             all_transitions.extend(data.get("transitions", []))
@@ -367,7 +372,6 @@ def distributed_collect(
     
     Returns the number of transitions collected.
     """
-    from nanoproof.cli import get_monitor
     
     registry = get_registry()
     monitor = get_monitor()

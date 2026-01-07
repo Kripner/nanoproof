@@ -148,7 +148,7 @@ export function ReplayBufferPanel({ outputDir }: ReplayBufferPanelProps) {
                   className="transition-item clickable"
                   onClick={() => setModalData({ type: 'transition', state: String(t[0]), tactic: String(t[1]) })}
                 >
-                  <div className="transition-state">{String(t[0]).substring(0, 80)}...</div>
+                  <div className="transition-state">{String(t[0])}</div>
                   <div className="transition-tactic">→ {t[1]}</div>
                 </div>
               ))
@@ -185,7 +185,7 @@ export function ReplayBufferPanel({ outputDir }: ReplayBufferPanelProps) {
                   className="transition-item clickable"
                   onClick={() => setModalData({ type: 'transition', state: String(t[0]), tactic: String(t[1]) })}
                 >
-                  <div className="transition-state">{String(t[0]).substring(0, 80)}...</div>
+                  <div className="transition-state">{String(t[0])}</div>
                   <div className="transition-tactic">→ {t[1]}</div>
                 </div>
               ))

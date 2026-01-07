@@ -11,7 +11,7 @@ import urllib.request
 import gc
 from collections import Counter
 from filelock import FileLock
-from typing import Callable, TypeVar, Self
+from typing import Callable, Generic, TypeVar, Self
 
 import torch
 import torch.distributed as dist
@@ -281,6 +281,37 @@ def strict_zip(a: list, b: list):
     if len(a) != len(b):
         raise Exception(f"List sizes differ ({len(a)} != {len(b)}).")
     return zip(a, b)
+
+
+SomeValue = TypeVar('SomeValue')
+
+class ValueOrError(Generic[SomeValue]):
+    def __init__(self, value: SomeValue | None, error: str | None):
+        assert (value is None) != (error is None)
+        self._value = value
+        self._error = error
+
+    @classmethod
+    def from_success(cls, value: SomeValue) -> Self:
+        return cls(value, None)
+
+    @classmethod
+    def from_error(cls, error: str) -> Self:
+        return cls(None, error)
+
+    def is_success(self) -> bool:
+        return self._value is not None
+
+    @property
+    def value(self) -> SomeValue:
+        assert self.is_success()
+        return self._value
+
+    @property
+    def error(self) -> str:
+        assert not self.is_success()
+        return self._error
+
 
 TypeNode = TypeVar('TypeNode')
 def pretty_print_tree(

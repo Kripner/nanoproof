@@ -8,12 +8,6 @@ interface StatsPanelProps {
   evalProgress: EvalProgress;
 }
 
-function formatDuration(seconds: number): string {
-  if (seconds < 60) return `${seconds.toFixed(1)}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
-  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
-}
-
 function formatMs(ms: number): string {
   if (ms < 1) return `${(ms * 1000).toFixed(0)}μs`;
   if (ms < 1000) return `${ms.toFixed(1)}ms`;
@@ -21,10 +15,6 @@ function formatMs(ms: number): string {
 }
 
 export function StatsPanel({ collection, training, phase, replayBufferSize, evalProgress }: StatsPanelProps) {
-  const progress = collection.target_samples > 0 
-    ? Math.min(100, (collection.samples_collected / collection.target_samples) * 100)
-    : 0;
-
   const expansionsPerSecond = collection.elapsed > 0 
     ? collection.expansions / collection.elapsed 
     : 0;
@@ -40,27 +30,16 @@ export function StatsPanel({ collection, training, phase, replayBufferSize, eval
           <div className="stats-grid">
             <div className="stat">
               <div className="stat-value">{collection.proofs_attempted}</div>
-              <div className="stat-label">Attempts</div>
+              <div className="stat-label">Proof Attempts</div>
             </div>
             <div className="stat">
               <div className="stat-value">{collection.proofs_successful}</div>
-              <div className="stat-label">Solved</div>
+              <div className="stat-label">Proofs Found</div>
             </div>
             <div className="stat">
               <div className="stat-value">{(collection.success_rate * 100).toFixed(1)}%</div>
-              <div className="stat-label">Success</div>
+              <div className="stat-label">Success Rate</div>
             </div>
-            <div className="stat">
-              <div className="stat-value">{formatDuration(collection.elapsed)}</div>
-              <div className="stat-label">Elapsed</div>
-            </div>
-          </div>
-
-          <div className="progress-bar">
-            <div className="progress-bar-fill" style={{ width: `${progress}%` }} />
-          </div>
-          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4, textAlign: 'center' }}>
-            {collection.samples_collected} / {collection.target_samples} transitions ({progress.toFixed(1)}%)
           </div>
 
           <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-secondary)' }}>

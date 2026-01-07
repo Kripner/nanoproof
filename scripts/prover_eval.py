@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from typing import Protocol, Optional, runtime_checkable, Union, Callable
@@ -119,23 +120,35 @@ def broadcast_progress(
     device: torch.device,
     ddp: bool,
     ddp_rank: int,
+    use_allreduce: bool = False,
 ):
-    """Broadcast progress update across DDP ranks and notify callback."""
+    """
+    Report progress update to callback.
+    
+    Args:
+        use_allreduce: If True, aggregate stats across DDP ranks using all_reduce.
+                       WARNING: Only use this when you can guarantee ALL ranks will
+                       call this function the SAME number of times!
+    """
     if progress is None:
         return
     
-    local_stats = torch.tensor(
-        [processed, solved, errors],
-        dtype=torch.long, device=device
-    )
-    if ddp:
+    if use_allreduce and ddp:
+        local_stats = torch.tensor(
+            [processed, solved, errors],
+            dtype=torch.long, device=device
+        )
         dist.all_reduce(local_stats, op=dist.ReduceOp.SUM)
+        processed = local_stats[0].item()
+        solved = local_stats[1].item()
+        errors = local_stats[2].item()
     
+    # Only rank 0 reports progress to avoid duplicate updates
     if ddp_rank == 0:
         progress.on_update(
-            current=local_stats[0].item(),
-            solved=local_stats[1].item(),
-            errors=local_stats[2].item(),
+            current=processed,
+            solved=solved,
+            errors=errors,
         )
 
 
@@ -207,7 +220,8 @@ def _eval_sequential(
                 counters.solved += 1
             counters.processed += 1
             
-            broadcast_progress(progress, counters.processed, counters.solved, counters.errors, device, ddp, ddp_rank)
+            # In sequential mode, all ranks process their subset in lockstep, so we can safely use all_reduce
+            broadcast_progress(progress, counters.processed, counters.solved, counters.errors, device, ddp, ddp_rank, use_allreduce=True)
     
     return aggregate_results(counters.solved, counters.errors, len(theorems_subset), device, ddp)
 
@@ -238,6 +252,10 @@ def _eval_parallel(
     results = []  # List of (solved: bool, is_error: bool) tuples
     next_idx = [0]
     stop_flag = threading.Event()
+    done_flag = threading.Event()  # Set when all workers are done
+    
+    # Thread-safe counters for live progress tracking
+    counters = {"processed": 0, "solved": 0, "errors": 0}
     
     def actor_loop(actor_id: int):
         """Single actor thread that evaluates theorems until done."""
@@ -274,6 +292,14 @@ def _eval_parallel(
                     solved, is_error = evaluate_theorem(theorem, env, config, model)
                     local_results.append((solved, is_error))
                     
+                    # Update live counters for progress tracking
+                    with lock:
+                        counters["processed"] += 1
+                        if solved and not is_error:
+                            counters["solved"] += 1
+                        if is_error:
+                            counters["errors"] += 1
+                    
                     if is_error:
                         log(f"[Eval Actor {actor_id}] Error: {theorem[:50]}...")
                 
@@ -288,9 +314,36 @@ def _eval_parallel(
     # Run actors in parallel
     with ThreadPoolExecutor(max_workers=num_actors) as executor:
         futures = [executor.submit(actor_loop, i) for i in range(num_actors)]
+        
+        # Poll for progress while workers are running
+        # WARNING: Do NOT use DDP collectives here! Each rank finishes at different times,
+        # so the number of loop iterations is non-deterministic. Using all_reduce would
+        # cause ranks to get out of sync and timeout.
+        all_done = False
+        while not all_done:
+            # Check if all futures are done
+            all_done = all(f.done() for f in futures)
+            
+            # Report local progress only (no DDP aggregation in the polling loop)
+            if progress is not None and ddp_rank == 0:
+                with lock:
+                    current_processed = counters["processed"]
+                    current_solved = counters["solved"]
+                    current_errors = counters["errors"]
+                # Report local stats only - final aggregation happens after all ranks finish
+                progress.on_update(
+                    current=current_processed,
+                    solved=current_solved,
+                    errors=current_errors,
+                )
+            
+            if not all_done:
+                time.sleep(0.5)  # Poll every 500ms
+        
+        # Collect any exceptions
         for i, future in enumerate(futures):
             try:
-                future.result(timeout=600.0)
+                future.result(timeout=1.0)  # Should be instant since already done
             except FuturesTimeoutError:
                 log(f"[Eval] Actor {i} timed out")
             except Exception as e:
@@ -306,9 +359,13 @@ def _eval_parallel(
     
     log(f"[Eval] Parallel evaluation complete: {solved_count} solved, {error_count} errors, {processed_count} processed out of {len(theorems_subset)} theorems")
     
-    # Final progress update (from main thread, safe for DDP)
+    # Synchronize all ranks before final aggregation
+    if ddp:
+        dist.barrier()
+    
+    # Final progress update with DDP aggregation (now safe since all ranks are synchronized)
     if progress is not None:
-        broadcast_progress(progress, processed_count, solved_count, error_count, device, ddp, ddp_rank)
+        broadcast_progress(progress, processed_count, solved_count, error_count, device, ddp, ddp_rank, use_allreduce=True)
     
     return aggregate_results(solved_count, error_count, processed_count, device, ddp)
 
