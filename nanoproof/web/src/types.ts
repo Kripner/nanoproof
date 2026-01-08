@@ -34,6 +34,7 @@ export interface CollectionStats {
   success_rate: number;
   expansions: number;
   elapsed: number;
+  total_elapsed: number;
   wait_time_min: number;
   wait_time_max: number;
   wait_time_median: number;

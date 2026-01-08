@@ -367,6 +367,9 @@ class WebMonitor:
 
         # Collection stats
         self.collection = CollectionStats(num_actors=num_actors)
+        
+        # Training start time (for calculating overall expansions/sec)
+        self.training_start_time: float = time.time()
 
         # Training stats
         self.training = TrainingStats()
@@ -902,7 +905,10 @@ class WebMonitor:
                     else self.replay_buffer_size
                 ),
                 "output_dir": self.output_dir,
-                "collection": self.collection.to_dict(),
+                "collection": {
+                    **self.collection.to_dict(),
+                    "total_elapsed": time.time() - self.training_start_time,
+                },
                 "training": {
                     "step": self.training.step,
                     "loss": self.training.loss,

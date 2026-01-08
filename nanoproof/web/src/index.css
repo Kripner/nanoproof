@@ -342,10 +342,12 @@ body {
 .eval-dataset {
   color: var(--accent-purple);
   font-weight: 500;
+  font-size: var(--font-base);
 }
 
 .eval-rate {
   font-weight: 600;
+  font-size: var(--font-base);
 }
 
 .eval-rate.improving { color: var(--accent-green); }

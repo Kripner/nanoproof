@@ -16,8 +16,8 @@ function formatMs(ms: number): string {
 }
 
 export function StatsPanel({ collection, training, phase, replayBufferSize, evalProgress, evalHistory }: StatsPanelProps) {
-  const expansionsPerSecond = collection.elapsed > 0 
-    ? collection.expansions / collection.elapsed 
+  const expansionsPerSecond = collection.total_elapsed > 0 
+    ? collection.expansions / collection.total_elapsed 
     : 0;
 
   return (
@@ -156,7 +156,7 @@ export function StatsPanel({ collection, training, phase, replayBufferSize, eval
       {/* Eval History */}
       {evalHistory.length > 0 && (
         <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
-          <div style={{ fontSize: 'var(--font-sm)', color: 'var(--text-muted)', marginBottom: 8 }}>Eval History</div>
+          <div style={{ fontSize: 'var(--font-base)', color: 'var(--text-secondary)', marginBottom: 8 }}>Eval History</div>
           <div className="eval-history">
             {(() => {
               const datasets: Record<string, typeof evalHistory> = {};
@@ -165,9 +165,8 @@ export function StatsPanel({ collection, training, phase, replayBufferSize, eval
                 datasets[result.dataset].push(result);
               }
               return Object.entries(datasets).map(([dataset, results]) => {
-                const recent = results.slice(-5);
-                const last = recent[recent.length - 1];
-                const prev = recent.length > 1 ? recent[recent.length - 2] : null;
+                const last = results[results.length - 1];
+                const prev = results.length > 1 ? results[results.length - 2] : null;
                 
                 let trend = 'stable';
                 if (prev) {
@@ -183,8 +182,8 @@ export function StatsPanel({ collection, training, phase, replayBufferSize, eval
                         {(last.success_rate * 100).toFixed(1)}%
                       </span>
                     </div>
-                    <div style={{ fontSize: 'var(--font-xs)', color: 'var(--text-muted)' }}>
-                      {recent.map((r, i) => (
+                    <div style={{ fontSize: 'var(--font-sm)', color: 'var(--text-secondary)' }}>
+                      {results.map((r, i) => (
                         <span key={i}>
                           {i > 0 && ' → '}
                           {(r.success_rate * 100).toFixed(1)}%
