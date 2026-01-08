@@ -152,6 +152,10 @@ class ProverWorker:
         with self._thread_states_lock:
             return [self._thread_states.get(i, "idle") for i in range(self.num_actors)]
     
+    def get_expansions(self) -> int:
+        with self._stats_lock:
+            return self.expansions
+    
     def has_started_actors(self) -> bool:
         return len(self._threads) > 0 and self._running
     

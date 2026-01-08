@@ -313,26 +313,32 @@ def pause_all_provers(prover_addresses: list[str]):
             log(f"Failed to pause prover at {addr}: {e}", component="Coordinator")
 
 
-def poll_all_provers(prover_addresses: list[str], monitor):
-    """Poll all prover servers for their status and update the monitor."""
-    if not monitor:
-        return
+def poll_all_provers(prover_addresses: list[str], monitor) -> int:
+    """Poll all prover servers for their status and update the monitor.
+    
+    Returns total expansions across all provers.
+    """
+    total_expansions = 0
     
     for addr in prover_addresses:
         try:
             response = requests.get(f"http://{addr}/poll", timeout=5.0)
             response.raise_for_status()
             data = response.json()
-            monitor.update_prover_server(
-                address=addr,
-                games_played=data.get("games_played", 0),
-                games_solved=data.get("games_solved", 0),
-                thread_states=data.get("thread_states", []),
-                num_threads=len(data.get("thread_states", [])),
-            )
+            total_expansions += data.get("expansions", 0)
+            if monitor:
+                monitor.update_prover_server(
+                    address=addr,
+                    games_played=data.get("games_played", 0),
+                    games_solved=data.get("games_solved", 0),
+                    thread_states=data.get("thread_states", []),
+                    num_threads=len(data.get("thread_states", [])),
+                )
         except Exception:
             # Prover might be busy or disconnected
             pass
+    
+    return total_expansions
 
 
 def distributed_collect(
@@ -440,15 +446,16 @@ def distributed_collect(
                 
                 log(f"Transitions: {collected}/{target_transitions}", component="Coordinator")
             
+            # Poll prover servers for status updates (and get expansions)
+            total_expansions = poll_all_provers(registry.get_all(), monitor)
+            
             if monitor:
                 metrics = get_metrics()
                 monitor.update_collection_stats(
                     proofs_attempted=metrics['total'],
                     proofs_successful=metrics['solved'],
+                    expansions=total_expansions,
                 )
-            
-            # Poll prover servers for status updates
-            poll_all_provers(registry.get_all(), monitor)
         
         pause_all_provers(registry.get_all())
         

@@ -445,53 +445,41 @@ class WebMonitor:
             while not self._stop_monitors.wait(timeout=2.0):
                 try:
                     # Query all GPUs at once for efficiency and reliability
+                    result = subprocess.run(
+                        ['nvidia-smi', '--query-gpu=index,utilization.gpu,memory.used,memory.total', 
+                         '--format=csv,noheader,nounits'],
+                        capture_output=True, text=True, timeout=5.0
+                    )
+                    if result.returncode != 0:
+                        continue  # Keep previous values on failure
+                    
                     all_gpu_stats = {}
-                    try:
-                        result = subprocess.run(
-                            ['nvidia-smi', '--query-gpu=index,utilization.gpu,memory.used,memory.total', 
-                             '--format=csv,noheader,nounits'],
-                            capture_output=True, text=True, timeout=2.0
-                        )
-                        if result.returncode == 0:
-                            for line in result.stdout.strip().split('\n'):
-                                parts = [p.strip() for p in line.split(',')]
-                                if len(parts) >= 4:
-                                    gpu_idx = int(parts[0])
-                                    all_gpu_stats[gpu_idx] = {
-                                        'utilization': float(parts[1]),
-                                        'memory_used': int(parts[2]),
-                                        'memory_total': int(parts[3]),
-                                    }
-                    except Exception:
-                        pass
+                    for line in result.stdout.strip().split('\n'):
+                        parts = [p.strip() for p in line.split(',')]
+                        if len(parts) >= 4:
+                            gpu_idx = int(parts[0])
+                            all_gpu_stats[gpu_idx] = {
+                                'utilization': float(parts[1]),
+                                'memory_used': int(parts[2]),
+                                'memory_total': int(parts[3]),
+                            }
                     
                     for i in range(torch.cuda.device_count()):
                         props = torch.cuda.get_device_properties(i)
-                        
-                        # Get physical GPU ID for nvidia-smi
                         physical_id = physical_ids[i] if i < len(physical_ids) else i
                         
-                        # Look up stats from nvidia-smi output
                         if physical_id in all_gpu_stats:
                             stats = all_gpu_stats[physical_id]
-                            utilization = stats['utilization']
-                            memory_used = stats['memory_used']
-                            memory_total = stats['memory_total']
-                        else:
-                            # Fallback to PyTorch memory (only shows this process)
-                            utilization = 0.0
-                            memory_used = torch.cuda.memory_allocated(i) // (1024 * 1024)
-                            memory_total = props.total_memory // (1024 * 1024)
-                        
-                        self.update_gpu(
-                            gpu_id=i,
-                            name=props.name,
-                            utilization=utilization,
-                            memory_used=memory_used,
-                            memory_total=memory_total,
-                        )
+                            self.update_gpu(
+                                gpu_id=i,
+                                name=props.name,
+                                utilization=stats['utilization'],
+                                memory_used=stats['memory_used'],
+                                memory_total=stats['memory_total'],
+                            )
+                        # If physical_id not found, keep previous values
                 except Exception:
-                    pass
+                    pass  # Keep previous values on error
         
         self._gpu_monitor_thread = threading.Thread(target=monitor_gpus, daemon=True)
         self._gpu_monitor_thread.start()

@@ -7,6 +7,7 @@ import sys
 from contextlib import nullcontext
 import random
 import time
+import gc
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -426,6 +427,9 @@ while True:
     
     # Resume inference server after training
     if distributed:
+        # Clear CUDA cache before resuming inference (frees training memory)
+        gc.collect()
+        torch.cuda.empty_cache()
         inference_model.resume()
     
     timer.end("train")

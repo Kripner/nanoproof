@@ -3,11 +3,12 @@ import { LogEntry } from '../types';
 
 interface LogViewerProps {
   logs: LogEntry[];
+  components?: string[];
   selectedActor?: string | null;
   onActorSelect?: (actor: string | null) => void;
 }
 
-export function LogViewer({ logs, selectedActor, onActorSelect }: LogViewerProps) {
+export function LogViewer({ logs, components = [], selectedActor, onActorSelect }: LogViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [filter, setFilter] = useState<string | null>(null);
   const [actorFilter, setActorFilter] = useState<string | null>(null);
@@ -47,20 +48,16 @@ export function LogViewer({ logs, selectedActor, onActorSelect }: LogViewerProps
     }
   }, [filter, actorFilter]);
 
-  // Separate actors from other components
+  // Separate actors from other components (from server-provided list)
   const actors: string[] = [];
   const otherComponents: string[] = [];
   
-  for (const log of logs) {
-    if (log.component && log.component !== '_merged') {
-      if (log.component.startsWith('actor_')) {
-        if (!actors.includes(log.component)) {
-          actors.push(log.component);
-        }
+  for (const c of components) {
+    if (c && c !== '_merged') {
+      if (c.startsWith('actor_')) {
+        actors.push(c);
       } else {
-        if (!otherComponents.includes(log.component)) {
-          otherComponents.push(log.component);
-        }
+        otherComponents.push(c);
       }
     }
   }
@@ -71,6 +68,9 @@ export function LogViewer({ logs, selectedActor, onActorSelect }: LogViewerProps
     const numB = parseInt(b.replace('actor_', ''));
     return numA - numB;
   });
+  
+  // Sort other components alphabetically
+  otherComponents.sort();
 
   // Filter logs based on selected component or actor
   const filteredLogs = (() => {

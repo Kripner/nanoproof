@@ -1,4 +1,4 @@
-import { CollectionStats, TrainingStats, EvalProgress } from '../types';
+import { CollectionStats, TrainingStats, EvalProgress, EvalResult } from '../types';
 
 interface StatsPanelProps {
   collection: CollectionStats;
@@ -6,6 +6,7 @@ interface StatsPanelProps {
   phase: string;
   replayBufferSize: number;
   evalProgress: EvalProgress;
+  evalHistory: EvalResult[];
 }
 
 function formatMs(ms: number): string {
@@ -14,7 +15,7 @@ function formatMs(ms: number): string {
   return `${(ms / 1000).toFixed(2)}s`;
 }
 
-export function StatsPanel({ collection, training, phase, replayBufferSize, evalProgress }: StatsPanelProps) {
+export function StatsPanel({ collection, training, phase, replayBufferSize, evalProgress, evalHistory }: StatsPanelProps) {
   const expansionsPerSecond = collection.elapsed > 0 
     ? collection.expansions / collection.elapsed 
     : 0;
@@ -150,6 +151,52 @@ export function StatsPanel({ collection, training, phase, replayBufferSize, eval
             </div>
           </div>
         </>
+      )}
+
+      {/* Eval History */}
+      {evalHistory.length > 0 && (
+        <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+          <div style={{ fontSize: 'var(--font-sm)', color: 'var(--text-muted)', marginBottom: 8 }}>Eval History</div>
+          <div className="eval-history">
+            {(() => {
+              const datasets: Record<string, typeof evalHistory> = {};
+              for (const result of evalHistory) {
+                if (!datasets[result.dataset]) datasets[result.dataset] = [];
+                datasets[result.dataset].push(result);
+              }
+              return Object.entries(datasets).map(([dataset, results]) => {
+                const recent = results.slice(-5);
+                const last = recent[recent.length - 1];
+                const prev = recent.length > 1 ? recent[recent.length - 2] : null;
+                
+                let trend = 'stable';
+                if (prev) {
+                  if (last.success_rate > prev.success_rate + 0.01) trend = 'improving';
+                  else if (last.success_rate < prev.success_rate - 0.01) trend = 'declining';
+                }
+
+                return (
+                  <div key={dataset} style={{ marginBottom: 8 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
+                      <span className="eval-dataset">{dataset}</span>
+                      <span className={`eval-rate ${trend}`}>
+                        {(last.success_rate * 100).toFixed(1)}%
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 'var(--font-xs)', color: 'var(--text-muted)' }}>
+                      {recent.map((r, i) => (
+                        <span key={i}>
+                          {i > 0 && ' → '}
+                          {(r.success_rate * 100).toFixed(1)}%
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                );
+              });
+            })()}
+          </div>
+        </div>
       )}
     </div>
   );

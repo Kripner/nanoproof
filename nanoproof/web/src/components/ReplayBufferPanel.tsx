@@ -2,10 +2,6 @@ import { useState, useEffect } from 'react';
 import { ReplayBufferFile, Transition, TacticEntry } from '../types';
 import { Modal } from './Modal';
 
-interface ReplayBufferPanelProps {
-  outputDir: string | null;
-}
-
 type Tab = 'live' | 'saved' | 'tactics';
 
 interface ModalData {
@@ -15,7 +11,7 @@ interface ModalData {
   success?: boolean;
 }
 
-export function ReplayBufferPanel({ outputDir }: ReplayBufferPanelProps) {
+export function ReplayBufferPanel() {
   const [tab, setTab] = useState<Tab>('live');
   const [files, setFiles] = useState<ReplayBufferFile[]>([]);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
@@ -106,14 +102,7 @@ export function ReplayBufferPanel({ outputDir }: ReplayBufferPanelProps) {
   return (
     <div className="card replay-buffer-panel">
       <div className="replay-header">
-        <div className="card-title" style={{ marginBottom: 0 }}>
-          Data
-          {outputDir && (
-            <span className="output-dir" title={outputDir}>
-              {outputDir}
-            </span>
-          )}
-        </div>
+        <div className="card-title" style={{ marginBottom: 0 }}>Data</div>
         <div className="replay-tabs">
           <button 
             className={tab === 'live' ? 'active' : ''} 

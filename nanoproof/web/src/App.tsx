@@ -3,7 +3,6 @@ import { MonitorState, LogEntry } from './types'
 import { StatsPanel } from './components/StatsPanel'
 import { ProverGrid } from './components/ProverGrid'
 import { GPUPanel } from './components/GPUPanel'
-import { EvalHistory } from './components/EvalHistory'
 import { LogViewer } from './components/LogViewer'
 import { ReplayBufferPanel } from './components/ReplayBufferPanel'
 import { LeanServerPanel } from './components/LeanServerPanel'
@@ -13,6 +12,7 @@ const POLL_INTERVAL = 1000;
 function App() {
   const [state, setState] = useState<MonitorState | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [logComponents, setLogComponents] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [selectedActor, setSelectedActor] = useState<string | null>(null);
@@ -54,15 +54,29 @@ function App() {
       }
     };
 
+    const fetchLogComponents = async () => {
+      try {
+        const res = await fetch('/api/logs');
+        if (!res.ok) return;
+        const data = await res.json();
+        setLogComponents(data.components || []);
+      } catch (e) {
+        // Ignore errors
+      }
+    };
+
     fetchState();
     fetchLogs();
+    fetchLogComponents();
 
     const stateInterval = setInterval(fetchState, POLL_INTERVAL);
     const logsInterval = setInterval(fetchLogs, POLL_INTERVAL);
+    const componentsInterval = setInterval(fetchLogComponents, POLL_INTERVAL * 5);
 
     return () => {
       clearInterval(stateInterval);
       clearInterval(logsInterval);
+      clearInterval(componentsInterval);
     };
   }, []);
 
@@ -121,6 +135,7 @@ function App() {
           phase={state.phase}
           replayBufferSize={state.replay_buffer_size}
           evalProgress={state.eval_progress}
+          evalHistory={state.eval_history}
         />
         
         <div className="card">
@@ -135,13 +150,12 @@ function App() {
         <GPUPanel gpus={state.gpus} />
 
         <LeanServerPanel server={state.lean_server} servers={state.lean_servers} />
-        
-        <EvalHistory history={state.eval_history} />
 
-        <ReplayBufferPanel outputDir={state.output_dir} />
+        <ReplayBufferPanel />
 
         <LogViewer 
           logs={logs} 
+          components={logComponents}
           selectedActor={selectedActor}
           onActorSelect={setSelectedActor}
         />

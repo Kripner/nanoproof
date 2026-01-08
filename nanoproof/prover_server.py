@@ -228,6 +228,7 @@ def create_app(prover_worker: ProverWorker, buffer: LocalBuffer):
         """Poll for stats."""
         result = buffer.get_stats()
         result["thread_states"] = prover_worker.get_thread_states()
+        result["expansions"] = prover_worker.get_expansions()
         return jsonify(result)
     
     @app.route("/stats", methods=["GET"])
