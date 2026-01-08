@@ -40,7 +40,7 @@ _tactics_file: TextIO | None = None
 # In-memory log buffers for web streaming
 _log_buffers: dict[str, deque] = {}
 _log_buffers_lock = threading.Lock()
-MAX_LOG_BUFFER_SIZE = 1000
+MAX_LOG_BUFFER_SIZE = 2000
 
 
 def _get_log_buffer(component: str) -> deque:

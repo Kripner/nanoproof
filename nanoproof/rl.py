@@ -57,6 +57,7 @@ collect_transitions = 100  # how many proof transitions to collect in one collec
 num_actors = 32  # number of parallel actor threads for experience collection and evaluation
 num_sampled_tactics = 6  # number of tactics to sample per state in MCTS
 batch_timeout = 0.1  # timeout in seconds for batching LLM calls
+max_batch_size = 16  # max batch size for inference (limits memory usage)
 # optimization
 target_examples_per_step = 512
 unembedding_lr = 0.004
@@ -65,7 +66,7 @@ matrix_lr = 0.02
 weight_decay = 0.0
 init_lr_frac = 0.02
 # evaluation and logging there of
-eval_every = 5
+eval_every = 50
 save_every = 1000
 # now allow CLI to override the settings via the configurator lol
 config_keys = [k for k, v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
@@ -123,7 +124,7 @@ if distributed:
 else:
     tactic_model = BlockingTacticModel(
         inner_model=inner_tactic_model,
-        batch_size=num_actors,
+        batch_size=min(num_actors, max_batch_size),
         timeout_seconds=batch_timeout
     )
     model = tactic_model.network
@@ -202,9 +203,11 @@ for opt in optimizers:
 # Start inference servers in distributed mode (each rank runs one)
 if distributed:
     # Create BlockingTacticModel for the inference server
+    # Cap batch size to avoid OOM (large batches need too much memory)
+    inference_batch_size = min(num_actors, max_batch_size)
     inference_model = BlockingTacticModel(
         inner_model=inner_tactic_model,
-        batch_size=num_actors,
+        batch_size=inference_batch_size,
         timeout_seconds=batch_timeout
     )
     # Each rank starts an inference server on its own port

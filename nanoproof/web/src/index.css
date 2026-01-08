@@ -75,12 +75,30 @@ body {
 
 .main {
   flex: 1;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  grid-template-rows: auto auto 1fr;
+  display: flex;
+  flex-direction: column;
   gap: 16px;
   padding: 16px;
   overflow: hidden;
+}
+
+.row {
+  display: flex;
+  gap: 16px;
+}
+
+.row > * {
+  flex: 1;
+}
+
+.row-top {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+}
+
+.row-logs {
+  flex: 1;
+  min-height: 200px;
 }
 
 .card {
@@ -222,7 +240,7 @@ body {
 
 .gpu-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 8px;
 }
 
@@ -646,9 +664,9 @@ body {
 }
 
 .lean-server-url {
-  font-family: 'SF Mono', 'Consolas', monospace;
-  font-size: var(--font-xs);
-  color: var(--text-secondary);
+  font-size: var(--font-sm);
+  font-weight: 600;
+  color: var(--accent-blue);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

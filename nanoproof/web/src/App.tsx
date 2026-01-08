@@ -48,7 +48,7 @@ function App() {
         const res = await fetch('/api/logs/_merged');
         if (!res.ok) return;
         const data = await res.json();
-        setLogs(data.logs.slice(-100));
+        setLogs(data.logs.slice(-500));
       } catch (e) {
         // Ignore log fetch errors
       }
@@ -129,36 +129,48 @@ function App() {
       </div>
 
       <div className="main">
-        <StatsPanel 
-          collection={state.collection} 
-          training={state.training} 
-          phase={state.phase}
-          replayBufferSize={state.replay_buffer_size}
-          evalProgress={state.eval_progress}
-          evalHistory={state.eval_history}
-        />
-        
-        <div className="card">
-          <div className="card-title">Provers</div>
-          <ProverGrid 
-            servers={state.prover_servers} 
-            localActors={state.local_actors}
-            onActorClick={handleActorClick}
+        {/* Row 1: Stats + Provers + Lean Servers */}
+        <div className="row row-top">
+          <StatsPanel 
+            collection={state.collection} 
+            training={state.training} 
+            phase={state.phase}
+            replayBufferSize={state.replay_buffer_size}
+            evalProgress={state.eval_progress}
+            evalHistory={state.eval_history}
           />
+          
+          <div className="card">
+            <div className="card-title">Provers</div>
+            <ProverGrid 
+              servers={state.prover_servers} 
+              localActors={state.local_actors}
+              onActorClick={handleActorClick}
+            />
+          </div>
+
+          <LeanServerPanel server={state.lean_server} servers={state.lean_servers} />
         </div>
 
-        <GPUPanel gpus={state.gpus} />
+        {/* Row 2: GPUs */}
+        <div className="row">
+          <GPUPanel gpus={state.gpus} />
+        </div>
 
-        <LeanServerPanel server={state.lean_server} servers={state.lean_servers} />
+        {/* Row 3: Data */}
+        <div className="row">
+          <ReplayBufferPanel />
+        </div>
 
-        <ReplayBufferPanel />
-
-        <LogViewer 
-          logs={logs} 
-          components={logComponents}
-          selectedActor={selectedActor}
-          onActorSelect={setSelectedActor}
-        />
+        {/* Row 4: Logs */}
+        <div className="row row-logs">
+          <LogViewer 
+            logs={logs} 
+            components={logComponents}
+            selectedActor={selectedActor}
+            onActorSelect={setSelectedActor}
+          />
+        </div>
       </div>
     </div>
   );
