@@ -318,10 +318,21 @@ while True:
                     "minif2f_val": minif2f_results['success_rate'],
                     "leanworkbook_val": leanworkbook_results['success_rate'],
                 })
-            
-            # Wait for master to finish evaluation
-            if ddp:
-                dist.barrier()
+                
+                # Signal completion to other ranks via store (avoid NCCL blocking GPU)
+                store = dist.distributed_c10d._get_default_store()
+                store.set(f"eval_done_{step}", "1")
+            else:
+                # Non-master ranks wait for master to finish (without NCCL barrier)
+                store = dist.distributed_c10d._get_default_store()
+                while True:
+                    try:
+                        done = store.get(f"eval_done_{step}")
+                        if done == b"1":
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(1.0)
         else:
             # Local mode: use local model
             class MonitorProgress:

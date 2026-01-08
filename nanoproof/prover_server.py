@@ -64,6 +64,23 @@ class LocalBuffer:
 # Remote Prover Worker Factory
 # -----------------------------------------------------------------------------
 
+class ConnectionFailureTracker:
+    """Tracks consecutive connection failures and raises after threshold."""
+    
+    def __init__(self, max_failures: int = 3):
+        self.consecutive_failures = 0
+        self.max_failures = max_failures
+    
+    def record_success(self):
+        self.consecutive_failures = 0
+    
+    def record_failure(self, error: Exception):
+        self.consecutive_failures += 1
+        print(f"[Prover] Failed to get theorem ({self.consecutive_failures}/{self.max_failures}): {error}")
+        if self.consecutive_failures >= self.max_failures:
+            raise RuntimeError(f"RL server unreachable after {self.max_failures} consecutive failures")
+
+
 def create_remote_prover_worker(
     config: Config,
     tactic_model: RemoteTacticModel,
@@ -77,17 +94,20 @@ def create_remote_prover_worker(
     Create a ProverWorker that gets theorems from coordinator and submits results.
     """
     
+    failure_tracker = ConnectionFailureTracker(max_failures=3)
+    
     def get_theorem() -> Optional[tuple[str, str]]:
         """Request next theorem from coordinator."""
         try:
             response = requests.get(f"{coordinator_url}/get_theorem", timeout=5.0)
             response.raise_for_status()
             data = response.json()
+            failure_tracker.record_success()
             if data.get("done"):
                 return None
             return data["id"], data["theorem"]
         except Exception as e:
-            print(f"[Prover] Failed to get theorem: {e}")
+            failure_tracker.record_failure(e)
             return None
     
     def on_result(theorem_id: str, theorem: str, game: Optional["Game"], error: str | None):
@@ -267,10 +287,6 @@ def main():
     
     app = create_app(prover_worker, buffer)
     
-    # Register with RL server
-    print(f"Registering as {my_address} with RL server at {args.rl_server}")
-    register_with_rl_server(args.rl_server, my_address)
-    
     # Setup cleanup on exit
     def cleanup():
         print("Shutting down...")
@@ -292,7 +308,6 @@ def main():
     print(f"  Lean server: {args.lean_server}")
     print(f"  My address: {my_address}")
     print(f"  Actors: {args.num_actors}")
-    print(f"\nCtrl+C to exit\n")
     
     # Disable Flask's default request logging
     werkzeug_log = logging.getLogger('werkzeug')
@@ -304,6 +319,25 @@ def main():
         daemon=True
     )
     flask_thread.start()
+    
+    # Wait for Flask server to be ready before registering
+    print("Waiting for Flask server to be ready...")
+    for _ in range(50):  # Up to 5 seconds
+        try:
+            response = requests.get(f"http://127.0.0.1:{args.port}/health", timeout=1.0)
+            if response.status_code == 200:
+                break
+        except Exception:
+            pass
+        time.sleep(0.1)
+    else:
+        print("WARNING: Flask server may not be ready")
+    
+    # Register with RL server (after Flask is ready)
+    print(f"Registering as {my_address} with RL server at {args.rl_server}")
+    register_with_rl_server(args.rl_server, my_address)
+    
+    print("\nCtrl+C to exit\n")
     
     # Main loop: wait for actors to start, then monitor for exit
     try:
