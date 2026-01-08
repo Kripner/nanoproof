@@ -23,11 +23,10 @@ Used by rl.py when distributed=True.
 """
 
 import logging
-import queue
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 import requests
 from flask import Flask, request as flask_request, jsonify
@@ -113,125 +112,15 @@ class ProofResult:
 
 class TheoremDispatcher:
     """
-    Dispatches theorems to provers and collects results.
+    Simple dispatcher with pluggable theorem supplier and result handler.
     
-    Two modes:
-    - Training: start_training(sampler) - infinite theorems from sampler
-    - Eval: start_eval(theorems) - fixed list, done when all processed
+    The actual state management is done by distributed_collect/distributed_eval,
+    which set up the get_theorem and submit_result functions.
     """
     
     def __init__(self):
-        self._queue: queue.Queue[tuple[str, str]] = queue.Queue()
-        self._results: list[ProofResult] = []
-        self._lock = threading.Lock()
-        self._done = threading.Event()
-        
-        # Mode state
-        self._mode: str = "idle"  # "idle", "training", "eval"
-        self._sampler: Optional[TheoremsSampler] = None
-        self._expected: Optional[int] = None
-        self._theorem_counter = 0
-    
-    def _clear(self):
-        """Clear queue and results."""
-        self._results = []
-        self._done.clear()
-        while not self._queue.empty():
-            try:
-                self._queue.get_nowait()
-            except queue.Empty:
-                break
-    
-    def start_training(self, sampler: TheoremsSampler):
-        """Start training mode with infinite theorems from sampler."""
-        with self._lock:
-            self._clear()
-            self._mode = "training"
-            self._sampler = sampler
-            self._expected = None
-        log("Dispatcher: training mode started", component="Dispatcher")
-    
-    def start_eval(self, theorems: list[str]):
-        """Start eval mode with fixed theorem list. Done when all processed."""
-        with self._lock:
-            self._clear()
-            self._mode = "eval"
-            self._sampler = None
-            self._expected = len(theorems)
-            for i, theorem in enumerate(theorems):
-                self._queue.put((f"eval_{i}", theorem))
-        log(f"Dispatcher: eval mode started with {len(theorems)} theorems", component="Dispatcher")
-    
-    def stop(self):
-        """Stop dispatching (provers will get None from get_theorem)."""
-        with self._lock:
-            self._mode = "idle"
-            self._sampler = None
-    
-    def get_theorem(self) -> Optional[tuple[str, str]]:
-        """Get next theorem. Returns None if idle or eval queue exhausted."""
-        if self._mode == "idle":
-            return None
-        
-        # In training mode, refill from sampler
-        if self._mode == "training" and self._sampler:
-            if self._queue.qsize() < 10:
-                for _ in range(50):
-                    theorem = self._sampler.sample_theorem()
-                    self._theorem_counter += 1
-                    self._queue.put((f"train_{self._theorem_counter}", theorem))
-        
-        try:
-            return self._queue.get_nowait()
-        except queue.Empty:
-            return None
-    
-    def submit_result(self, result: ProofResult):
-        """Submit a proof result."""
-        with self._lock:
-            self._results.append(result)
-            n = len(self._results)
-            solved = sum(1 for r in self._results if r.is_solved)
-            
-            if n % 10 == 0:
-                log(f"Progress: {n} results, {solved} solved", component="Dispatcher")
-            
-            # In eval mode, signal done when all results received
-            if self._mode == "eval" and self._expected and n >= self._expected:
-                self._done.set()
-    
-    def wait(self, timeout: float = None) -> bool:
-        """Wait for eval completion. Returns True if done, False on timeout."""
-        return self._done.wait(timeout=timeout)
-    
-    @property
-    def results(self) -> list[ProofResult]:
-        """Get all collected results."""
-        with self._lock:
-            return list(self._results)
-    
-    def metrics(self) -> dict:
-        """Get summary metrics."""
-        with self._lock:
-            total = len(self._results)
-            solved = sum(1 for r in self._results if r.is_solved)
-            errors = sum(1 for r in self._results if r.error)
-            return {
-                "success_rate": solved / total if total > 0 else 0.0,
-                "solved": solved,
-                "total": total,
-                "errors": errors,
-            }
-    
-    def get_transitions(self) -> list[tuple[str, str, float]]:
-        """Extract all transitions from solved proof trees."""
-        transitions = []
-        with self._lock:
-            for result in self._results:
-                if result.is_solved:
-                    root = Node.deserialize(result.proof_tree)
-                    transitions.extend(extract_transitions(root))
-        return transitions
+        self.get_theorem: Callable[[], Optional[tuple[str, str]]] = lambda: None
+        self.submit_result: Callable[[ProofResult], None] = lambda r: None
 
 
 # Global dispatcher instance
@@ -250,14 +139,15 @@ def get_dispatcher() -> TheoremDispatcher:
 class InferenceRouter:
     """Routes inference requests to backend servers in round-robin fashion."""
     
-    def __init__(self, inference_ports: list[int], host: str = "127.0.0.1"):
+    def __init__(self, inference_ports: list[int], host: str = "127.0.0.1", timeout: float = 30.0):
         self.endpoints = [f"http://{host}:{port}" for port in inference_ports]
+        self.timeout = timeout
         self._next_idx = 0
         self._lock = threading.Lock()
     
     def forward_request(self, states: list[str]) -> list[list[str]]:
         """Forward inference request to next backend server."""
-        if len(states) == 0:
+        if not states:
             return []
         
         with self._lock:
@@ -269,12 +159,12 @@ class InferenceRouter:
             response = requests.post(
                 f"{endpoint}/generate",
                 json={"states": states},
-                timeout=60.0
+                timeout=self.timeout
             )
             response.raise_for_status()
             return response.json().get("tactics", [])
         except Exception as e:
-            log(f"Inference request to {endpoint} failed: {e}", component="Coordinator")
+            log(f"Inference to {endpoint} failed: {e}", component="Coordinator")
             return [[] for _ in states]
 
 
@@ -292,8 +182,6 @@ def create_coordinator_app(registry: ProverRegistry, router: InferenceRouter, di
             "status": "ok",
             "provers": registry.count(),
             "collecting": registry.is_collecting(),
-            "queue_size": dispatcher.queue_size,
-            "results": len(dispatcher.results),
         })
     
     @app.route("/generate", methods=["POST"])
@@ -449,7 +337,56 @@ def distributed_collect(
     
     log(f"Starting distributed collection, target={target_transitions}", component="Coordinator")
     
-    dispatcher.start_training(sampler)
+    # Local state for this collection run
+    results: list[ProofResult] = []  # All results (for metrics)
+    new_results: list[ProofResult] = []  # Unprocessed results (for transition extraction)
+    results_lock = threading.Lock()
+    theorem_counter = 0
+    
+    def get_theorem() -> Optional[tuple[str, str]]:
+        """Supply theorems infinitely from sampler."""
+        nonlocal theorem_counter
+        theorem_counter += 1
+        theorem = sampler.sample_theorem()
+        return (f"train_{theorem_counter}", theorem)
+    
+    def submit_result(result: ProofResult):
+        """Collect proof results."""
+        with results_lock:
+            results.append(result)
+            new_results.append(result)
+            n = len(results)
+            solved = sum(1 for r in results if r.is_solved)
+            if n % 10 == 0:
+                log(f"Progress: {n} results, {solved} solved", component="Dispatcher")
+    
+    def extract_new_transitions() -> list[tuple[str, str, float]]:
+        """Extract transitions from new results, clearing the new_results list."""
+        transitions = []
+        with results_lock:
+            for result in new_results:
+                if result.is_solved:
+                    root = Node.deserialize(result.proof_tree)
+                    transitions.extend(extract_transitions(root))
+            new_results.clear()
+        return transitions
+    
+    def get_metrics() -> dict:
+        """Get summary metrics."""
+        with results_lock:
+            total = len(results)
+            solved = sum(1 for r in results if r.is_solved)
+            errors = sum(1 for r in results if r.error)
+            return {
+                "success_rate": solved / total if total > 0 else 0.0,
+                "solved": solved,
+                "total": total,
+                "errors": errors,
+            }
+    
+    # Set up dispatcher
+    dispatcher.get_theorem = get_theorem
+    dispatcher.submit_result = submit_result
     registry.set_collecting(True)
     
     try:
@@ -466,32 +403,30 @@ def distributed_collect(
         while collected < target_transitions:
             time.sleep(poll_interval)
             
-            # Get current transitions
-            transitions = dispatcher.get_transitions()
-            new_transitions = transitions[collected:]
-            
+            new_transitions = extract_new_transitions()
             if new_transitions:
-                # Add to replay buffer
                 replay_buffer.local_buffer.extend(new_transitions)
-                collected = len(transitions)
+                collected += len(new_transitions)
                 
-                # Update monitor with transitions
                 if monitor:
                     monitor.record_transitions(new_transitions)
                     monitor.set_replay_buffer_size(len(replay_buffer.local_buffer))
                 
                 log(f"Transitions: {collected}/{target_transitions}", component="Coordinator")
             
-            # Update monitor with proof stats from dispatcher
             if monitor:
-                metrics = dispatcher.metrics()
+                metrics = get_metrics()
                 monitor.update_collection_stats(
                     proofs_attempted=metrics['total'],
                     proofs_successful=metrics['solved'],
                 )
         
         pause_all_provers(registry.get_all())
-        dispatcher.stop()
+        
+        # Clear dispatcher (provers will get None)
+        dispatcher.get_theorem = lambda: None
+        dispatcher.submit_result = lambda r: None
+        
         log(f"Distributed collection complete: {collected} transitions", component="Coordinator")
         return collected
     finally:
@@ -515,6 +450,48 @@ def distributed_eval(theorems: list[str], dataset_name: str = "eval") -> dict:
     
     log(f"Starting distributed evaluation on {len(theorems)} theorems", component="Coordinator")
     
+    # Local state for this eval run
+    results: list[ProofResult] = []
+    results_lock = threading.Lock()
+    done = threading.Event()
+    index = 0
+    expected = len(theorems)
+    
+    def get_theorem() -> Optional[tuple[str, str]]:
+        """Supply theorems from the list, None when exhausted."""
+        nonlocal index
+        with results_lock:
+            if index >= len(theorems):
+                return None
+            theorem = theorems[index]
+            tid = f"eval_{index}"
+            index += 1
+            return (tid, theorem)
+    
+    def submit_result(result: ProofResult):
+        """Collect proof results and signal done when complete."""
+        with results_lock:
+            results.append(result)
+            n = len(results)
+            solved = sum(1 for r in results if r.is_solved)
+            if n % 10 == 0:
+                log(f"Progress: {n} results, {solved} solved", component="Dispatcher")
+            if n >= expected:
+                done.set()
+    
+    def get_metrics() -> dict:
+        """Get summary metrics."""
+        with results_lock:
+            total = len(results)
+            solved = sum(1 for r in results if r.is_solved)
+            errors = sum(1 for r in results if r.error)
+            return {
+                "success_rate": solved / total if total > 0 else 0.0,
+                "solved": solved,
+                "total": total,
+                "errors": errors,
+            }
+    
     # Update monitor to show eval is starting
     if monitor:
         monitor.start_eval(dataset_name, len(theorems))
@@ -524,7 +501,9 @@ def distributed_eval(theorems: list[str], dataset_name: str = "eval") -> dict:
         log("Waiting for provers to register...", component="Coordinator")
         time.sleep(1.0)
     
-    dispatcher.start_eval(theorems)
+    # Set up dispatcher
+    dispatcher.get_theorem = get_theorem
+    dispatcher.submit_result = submit_result
     
     # Start provers
     start_all_provers(registry.get_all())
@@ -534,10 +513,10 @@ def distributed_eval(theorems: list[str], dataset_name: str = "eval") -> dict:
     max_wait_time = 600.0
     start_time = time.time()
     
-    while not dispatcher.wait(timeout=poll_interval):
+    while not done.wait(timeout=poll_interval):
         # Update monitor with current progress
         if monitor:
-            metrics = dispatcher.metrics()
+            metrics = get_metrics()
             monitor.update_eval_progress(
                 current=metrics['total'],
                 solved=metrics['solved'],
@@ -549,8 +528,26 @@ def distributed_eval(theorems: list[str], dataset_name: str = "eval") -> dict:
             log("Eval timed out", component="Coordinator")
             break
     
-    metrics = dispatcher.metrics()
     pause_all_provers(registry.get_all())
     
+    # Clear dispatcher
+    dispatcher.get_theorem = lambda: None
+    dispatcher.submit_result = lambda r: None
+    
+    # Verify all theorems (and only the requested theorems) were attempted
+    assert len(results) == len(theorems), \
+        f"Expected {len(theorems)} results, got {len(results)}"
+    
+    submitted_ids = {r.theorem_id for r in results}
+    expected_ids = {f"eval_{i}" for i in range(len(theorems))}
+    assert submitted_ids == expected_ids, \
+        f"Theorem ID mismatch: missing={expected_ids - submitted_ids}, extra={submitted_ids - expected_ids}"
+    
+    for result in results:
+        idx = int(result.theorem_id.split("_")[1])
+        assert result.theorem == theorems[idx], \
+            f"Theorem mismatch for {result.theorem_id}: expected {theorems[idx]!r}, got {result.theorem!r}"
+    
+    metrics = get_metrics()
     log(f"Eval complete: {metrics['solved']}/{metrics['total']} solved", component="Coordinator")
     return metrics

@@ -116,7 +116,6 @@ class TacticModel:
         assert device.type == "cuda"
 
         # Maximum prompt length: leave room for generated tokens (64) within rotary cache
-        # Rotary cache is sequence_len * 10, so we use sequence_len * 9 as safe max
         max_prompt_len = self.network.config.sequence_len * 9
 
         # Prepare tokenized prompts, tracking which ones are too long
@@ -125,15 +124,13 @@ class TacticModel:
         for idx, state_str in enumerate(state_strs):
             tokens = self.tokenizer(state_str + "\n<|tactic|>", prepend=self.tokenizer.get_bos_token_id())
             if len(tokens) > max_prompt_len:
-                # State is too long - use a placeholder (will return empty tactics)
                 too_long_indices.add(idx)
-                prompts.append([self.tokenizer.get_bos_token_id()])  # Minimal valid prompt
+                prompts.append([self.tokenizer.get_bos_token_id()])
             else:
                 prompts.append(tokens)
 
         seed = torch.randint(torch.iinfo(torch.int32).max, (1,), device=device, generator=self.rng).item()
         with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-            # prompts is list[list[int]], which triggers batched generation
             sample_toks_batch, masks_batch = self.engine.generate_batch(
                 prompts, num_samples=self.num_samples, min_tokens=1, max_tokens=64, seed=seed
             )
@@ -185,11 +182,9 @@ class BlockingTacticModel:
     """
     Thread-safe wrapper around TacticModel that batches LLM calls from multiple threads.
     
-    When sample_tactic is called, it blocks until either:
-    1. batch_size inputs have been accumulated, or
+    Requests are queued and processed in batches when either:
+    1. batch_size requests have accumulated, or
     2. timeout_seconds has elapsed since the first pending request
-    
-    Then a single batched LLM call is made and results are distributed to waiting threads.
     """
 
     def __init__(self, inner_model: TacticModel, batch_size: int = 32, timeout_seconds: float = 0.1):
@@ -197,206 +192,130 @@ class BlockingTacticModel:
         self.batch_size = batch_size
         self.timeout_seconds = timeout_seconds
 
-        # Synchronization primitives
         self._lock = threading.Lock()
         self._batch_ready = threading.Condition(self._lock)
-
-        # Pending requests: list of (state_str, result_event, result_slot)
         self._pending: list[tuple[str, threading.Event, list]] = []
         self._first_request_time: float | None = None
         self._batch_in_progress = False
-        
-        # Shutdown flag to unblock waiting threads
         self._shutdown = False
-
-        # Stats for logging
-        self._total_requests = 0
         self._total_batches = 0
-        log(f"Initialized with batch_size={batch_size}, timeout={timeout_seconds}s", component="BlockingTacticModel")
 
     @property
     def network(self):
-        """Expose network for compatibility with code that accesses model.network."""
         return self.inner_model.network
-    
-    def is_batch_in_progress(self) -> bool:
-        """Check if a batch is currently being processed (for load balancing)."""
-        with self._lock:
-            return self._batch_in_progress
 
     def shutdown(self):
-        """
-        Signal shutdown to unblock all waiting threads.
-        Waiting threads will receive ValueOrError with error.
-        """
+        """Signal shutdown to unblock all waiting threads."""
         with self._lock:
             self._shutdown = True
-            # Set all pending result events to unblock waiting threads
-            for _, result_event, result_slot in self._pending:
-                result_slot.append(ValueOrError.from_error("Model shutdown"))
-                result_event.set()
+            for _, event, slot in self._pending:
+                slot.append(ValueOrError.from_error("Model shutdown"))
+                event.set()
             self._pending = []
             self._batch_ready.notify_all()
-        log("Shutdown initiated, all waiting threads unblocked", component="BlockingTacticModel")
 
     def sample_tactic(self, state: State) -> ValueOrError[list[str]]:
-        """
-        Thread-safe sample_tactic that batches calls from multiple threads.
-        Blocks until result is available.
-        
-        Returns ValueOrError with error if shutdown is in progress or an error occurs.
-        """
-        assert len(state) == 1, \
-            f"expected single branch in state when generating tactic, got {len(state)} - choose one goal first"
-        state_str = str(state[0].state).strip()
-        return self.sample_tactic_from_str(state_str)
+        """Thread-safe sample_tactic that batches calls from multiple threads."""
+        assert len(state) == 1
+        return self.sample_tactic_from_str(str(state[0].state).strip())
 
     def sample_tactic_from_str(self, state_str: str) -> ValueOrError[list[str]]:
+        """Thread-safe tactic generation from a state string."""
+        results = self.sample_tactic_from_str_batch([state_str])
+        return results[0]
+
+    def sample_tactic_from_str_batch(self, state_strs: list[str]) -> list[ValueOrError[list[str]]]:
         """
-        Thread-safe tactic generation from a state string.
-        Blocks until result is available.
-        
-        Returns ValueOrError with error if shutdown is in progress or an error occurs.
+        Thread-safe batch tactic generation. All states are queued together
+        and will be processed in the same or consecutive GPU batches.
         """
+        if not state_strs:
+            return []
         if self._shutdown:
-            return ValueOrError.from_error("Model shutdown")
-            
-        wait_start = time.time()
-        result_event = threading.Event()
-        result_slot: list[ValueOrError[list[str]]] = []  # Will hold the result
+            return [ValueOrError.from_error("Model shutdown") for _ in state_strs]
+
+        # Create events and slots for all states
+        entries = [(s, threading.Event(), []) for s in state_strs]
 
         with self._lock:
             if self._shutdown:
-                return ValueOrError.from_error("Model shutdown")
-                
-            self._total_requests += 1
-            request_num = self._total_requests
-            pending_count = len(self._pending) + 1
+                return [ValueOrError.from_error("Model shutdown") for _ in state_strs]
 
-            # Add this request to the pending batch
-            self._pending.append((state_str, result_event, result_slot))
-
+            # Add all to pending queue
+            for entry in entries:
+                self._pending.append(entry)
+            
             if self._first_request_time is None:
                 self._first_request_time = time.time()
-                log(f"Request #{request_num}: first in batch", component="BlockingTacticModel")
 
-            # Log every 10th request or when batch is full
-            if request_num % 10 == 0 or pending_count >= self.batch_size:
-                log(f"Request #{request_num}: pending={pending_count}/{self.batch_size}",
-                    component="BlockingTacticModel")
-
-            # Check if we should trigger the batch
-            should_process = len(self._pending) >= self.batch_size
-
-            if should_process and not self._batch_in_progress:
+            # Trigger batch if ready
+            if len(self._pending) >= self.batch_size and not self._batch_in_progress:
                 self._process_batch_locked()
 
-        # If not processing immediately, wait for batch to be ready or timeout
-        if not result_event.is_set():
-            self._wait_for_batch_or_timeout(result_event)
+        # Wait for all results
+        for _, event, _ in entries:
+            self._wait_for_result(event)
 
-        # Wait for the result with timeout to avoid hanging forever
-        # Use a loop with short timeouts to stay responsive to shutdown
-        max_wait = 60.0  # Maximum total wait time
-        wait_interval = 1.0  # Check for shutdown every second
-        total_waited = 0.0
-        while not result_event.is_set() and total_waited < max_wait:
-            if self._shutdown:
-                return ValueOrError.from_error("Model shutdown")
-            result_event.wait(timeout=wait_interval)
-            total_waited += wait_interval
-        
-        if not result_event.is_set():
-            log(f"Request timed out after {max_wait}s", component="BlockingTacticModel")
-            return ValueOrError.from_error("Request timed out")
+        return [slot[0] if slot else ValueOrError.from_error("No result") for _, _, slot in entries]
 
-        # Record wait time for monitoring
-        wait_time = time.time() - wait_start
-        monitor = get_monitor()
-        if monitor is not None:
-            monitor.record_batch_wait(wait_time)
-
-        return result_slot[0] if result_slot else ValueOrError.from_error("No result received")
-
-    def _wait_for_batch_or_timeout(self, my_event: threading.Event):
-        """Wait until batch is ready or timeout, then potentially trigger processing."""
-        max_iterations = 100  # Prevent infinite loop
-        iterations = 0
-        while not my_event.is_set() and iterations < max_iterations:
-            iterations += 1
+    def _wait_for_result(self, event: threading.Event):
+        """Wait for a result, triggering batch processing if needed."""
+        while not event.is_set():
             with self._lock:
-                if self._shutdown:
+                if self._shutdown or event.is_set():
                     return
-                    
-                if my_event.is_set():
-                    return
+                
+                # Check if we should trigger processing
+                if self._first_request_time is not None:
+                    elapsed = time.time() - self._first_request_time
+                    if (elapsed >= self.timeout_seconds or len(self._pending) >= self.batch_size):
+                        if not self._batch_in_progress and self._pending:
+                            self._process_batch_locked()
+                            continue
 
-                if self._first_request_time is None:
-                    # Batch was already processed, but our event should be set
-                    # Wait briefly and check again (handles race condition)
-                    self._batch_ready.wait(timeout=0.1)
-                    continue
-
-                elapsed = time.time() - self._first_request_time
-                remaining = self.timeout_seconds - elapsed
-
-                if remaining <= 0 or len(self._pending) >= self.batch_size:
-                    # Time to process
-                    if not self._batch_in_progress and len(self._pending) > 0:
-                        self._process_batch_locked()
-                    return
-
-                # Wait with timeout
-                self._batch_ready.wait(timeout=min(remaining, 0.5))  # Cap wait to check shutdown
+                self._batch_ready.wait(timeout=0.1)
 
     def _process_batch_locked(self):
-        """Process the current batch. Must be called with lock held."""
-        if len(self._pending) == 0:
+        """Process pending batch. Must be called with lock held."""
+        if not self._pending or self._batch_in_progress:
             return
 
         self._batch_in_progress = True
         self._total_batches += 1
         batch_num = self._total_batches
 
-        # Grab the current batch
+        # Take current batch
         batch = self._pending[:]
         self._pending = []
         self._first_request_time = None
 
         log(f"Batch #{batch_num}: processing {len(batch)} requests", component="BlockingTacticModel")
 
-        # Release lock during LLM inference
+        # Release lock during inference
         self._lock.release()
-        results = None
-        inference_error = None
         try:
             state_strs = [item[0] for item in batch]
+            start = time.time()
             results = self.inner_model.sample_tactic_from_str_batch(state_strs)
+            elapsed = time.time() - start
+            
+            if elapsed > 2.0:
+                log(f"Batch #{batch_num}: took {elapsed:.1f}s", component="BlockingTacticModel")
+
+            # Distribute results
+            for i, (_, event, slot) in enumerate(batch):
+                slot.append(ValueOrError.from_success(results[i]))
+                event.set()
+                
         except Exception as e:
-            inference_error = e
-            log(f"Batch #{batch_num}: LLM inference FAILED: {type(e).__name__}: {e}", component="BlockingTacticModel")
+            log(f"Batch #{batch_num}: FAILED - {e}", component="BlockingTacticModel")
+            for _, event, slot in batch:
+                slot.append(ValueOrError.from_error(str(e)))
+                event.set()
         finally:
             self._lock.acquire()
-            # CRITICAL: Always reset _batch_in_progress, even on error
             self._batch_in_progress = False
-
-        # Distribute results to waiting threads
-        for i, (_, result_event, result_slot) in enumerate(batch):
-            if results is not None:
-                result_slot.append(ValueOrError.from_success(results[i]))
-            else:
-                # On error, return error so caller knows inference failed
-                error_msg = f"LLM inference failed: {type(inference_error).__name__}: {inference_error}"
-                result_slot.append(ValueOrError.from_error(error_msg))
-            result_event.set()
-
-        if inference_error:
-            log(f"Batch #{batch_num}: returned errors to {len(batch)} threads due to error", component="BlockingTacticModel")
-        else:
-            log(f"Batch #{batch_num}: results distributed to {len(batch)} threads", component="BlockingTacticModel")
-
-        # Notify any threads waiting for this batch
-        self._batch_ready.notify_all()
+            self._batch_ready.notify_all()
 
 
 # -----------------------------------------------------------------------------
@@ -506,13 +425,11 @@ def create_blocking_model_app(model: BlockingTacticModel):
     def generate():
         data = request.get_json()
         states = data.get("states", [])
-        if len(states) == 0:
+        if not states:
             return jsonify({"tactics": []})
-        # Generate tactics for each state (BlockingTacticModel handles batching)
-        tactics = []
-        for state_str in states:
-            result = model.sample_tactic_from_str(state_str)
-            tactics.append(result.value if result.is_success() else [])
+        # Submit all states at once - they'll be batched together
+        results = model.sample_tactic_from_str_batch(states)
+        tactics = [r.value if r.is_success() else [] for r in results]
         return jsonify({"tactics": tactics})
     
     return app
