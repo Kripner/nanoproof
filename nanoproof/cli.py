@@ -444,33 +444,44 @@ class WebMonitor:
             
             while not self._stop_monitors.wait(timeout=2.0):
                 try:
+                    # Query all GPUs at once for efficiency and reliability
+                    all_gpu_stats = {}
+                    try:
+                        result = subprocess.run(
+                            ['nvidia-smi', '--query-gpu=index,utilization.gpu,memory.used,memory.total', 
+                             '--format=csv,noheader,nounits'],
+                            capture_output=True, text=True, timeout=2.0
+                        )
+                        if result.returncode == 0:
+                            for line in result.stdout.strip().split('\n'):
+                                parts = [p.strip() for p in line.split(',')]
+                                if len(parts) >= 4:
+                                    gpu_idx = int(parts[0])
+                                    all_gpu_stats[gpu_idx] = {
+                                        'utilization': float(parts[1]),
+                                        'memory_used': int(parts[2]),
+                                        'memory_total': int(parts[3]),
+                                    }
+                    except Exception:
+                        pass
+                    
                     for i in range(torch.cuda.device_count()):
                         props = torch.cuda.get_device_properties(i)
                         
                         # Get physical GPU ID for nvidia-smi
                         physical_id = physical_ids[i] if i < len(physical_ids) else i
                         
-                        # Use nvidia-smi for both utilization and memory (system-wide view)
-                        # This shows memory used by ALL processes on the GPU
-                        utilization = 0.0
-                        memory_used = 0
-                        memory_total = props.total_memory // (1024 * 1024)
-                        
-                        try:
-                            result = subprocess.run(
-                                ['nvidia-smi', '--query-gpu=utilization.gpu,memory.used,memory.total', 
-                                 '--format=csv,noheader,nounits', f'--id={physical_id}'],
-                                capture_output=True, text=True, timeout=1.0
-                            )
-                            if result.returncode == 0:
-                                parts = result.stdout.strip().split(',')
-                                if len(parts) >= 3:
-                                    utilization = float(parts[0].strip())
-                                    memory_used = int(parts[1].strip())
-                                    memory_total = int(parts[2].strip())
-                        except Exception:
+                        # Look up stats from nvidia-smi output
+                        if physical_id in all_gpu_stats:
+                            stats = all_gpu_stats[physical_id]
+                            utilization = stats['utilization']
+                            memory_used = stats['memory_used']
+                            memory_total = stats['memory_total']
+                        else:
                             # Fallback to PyTorch memory (only shows this process)
+                            utilization = 0.0
                             memory_used = torch.cuda.memory_allocated(i) // (1024 * 1024)
+                            memory_total = props.total_memory // (1024 * 1024)
                         
                         self.update_gpu(
                             gpu_id=i,

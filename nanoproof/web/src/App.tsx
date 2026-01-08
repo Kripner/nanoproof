@@ -71,7 +71,7 @@ function App() {
     return (
       <div className="app">
         <div className="header">
-          <h1>NanoProof Monitor</h1>
+          <h1>nanoproof</h1>
         </div>
         <div style={{ padding: 40, textAlign: 'center', color: 'var(--accent-red)' }}>
           {error}
@@ -84,7 +84,7 @@ function App() {
     return (
       <div className="app">
         <div className="header">
-          <h1>NanoProof Monitor</h1>
+          <h1>nanoproof</h1>
         </div>
         <div style={{ padding: 40, textAlign: 'center' }}>
           Loading...
@@ -98,7 +98,7 @@ function App() {
   return (
     <div className="app">
       <div className="header">
-        <h1>NanoProof Monitor</h1>
+        <h1>nanoproof</h1>
         <span className={phaseClass}>{state.phase}</span>
         <span style={{ color: 'var(--text-secondary)' }}>Step {state.step}</span>
         <div className="header-right">
@@ -111,9 +111,6 @@ function App() {
               {copied ? '✓ Copied!' : `📁 ${state.output_dir.split('/').slice(-2).join('/')}`}
             </button>
           )}
-          <span className="buffer-count">
-            Buffer: {state.replay_buffer_size.toLocaleString()} transitions
-          </span>
         </div>
       </div>
 

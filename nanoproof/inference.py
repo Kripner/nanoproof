@@ -198,6 +198,7 @@ class BlockingTacticModel:
         self._first_request_time: float | None = None
         self._batch_in_progress = False
         self._shutdown = False
+        self._paused = False
         self._total_batches = 0
 
     @property
@@ -212,6 +213,24 @@ class BlockingTacticModel:
                 slot.append(ValueOrError.from_error("Model shutdown"))
                 event.set()
             self._pending = []
+            self._batch_ready.notify_all()
+    
+    def pause(self):
+        """Pause inference and wait for any in-progress batch to complete.
+        
+        After this returns, no new batches will be processed until resume() is called.
+        Safe to call multiple times.
+        """
+        with self._lock:
+            self._paused = True
+            # Wait for any in-progress batch to complete
+            while self._batch_in_progress:
+                self._batch_ready.wait(timeout=0.1)
+    
+    def resume(self):
+        """Resume inference after pause()."""
+        with self._lock:
+            self._paused = False
             self._batch_ready.notify_all()
 
     def sample_tactic(self, state: State) -> ValueOrError[list[str]]:
@@ -233,6 +252,8 @@ class BlockingTacticModel:
             return []
         if self._shutdown:
             return [ValueOrError.from_error("Model shutdown") for _ in state_strs]
+        if self._paused:
+            return [ValueOrError.from_error("Model paused for training") for _ in state_strs]
 
         # Create events and slots for all states
         entries = [(s, threading.Event(), []) for s in state_strs]
@@ -240,6 +261,8 @@ class BlockingTacticModel:
         with self._lock:
             if self._shutdown:
                 return [ValueOrError.from_error("Model shutdown") for _ in state_strs]
+            if self._paused:
+                return [ValueOrError.from_error("Model paused for training") for _ in state_strs]
 
             # Add all to pending queue
             for entry in entries:
@@ -262,7 +285,7 @@ class BlockingTacticModel:
         """Wait for a result, triggering batch processing if needed."""
         while not event.is_set():
             with self._lock:
-                if self._shutdown or event.is_set():
+                if self._shutdown or self._paused or event.is_set():
                     return
                 
                 # Check if we should trigger processing
@@ -289,7 +312,7 @@ class BlockingTacticModel:
         self._pending = []
         self._first_request_time = None
 
-        log(f"Batch #{batch_num}: processing {len(batch)} requests", component="BlockingTacticModel")
+        # log(f"Batch #{batch_num}: processing {len(batch)} requests", component="BlockingTacticModel")
 
         # Release lock during inference
         self._lock.release()

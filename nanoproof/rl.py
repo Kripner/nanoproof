@@ -392,14 +392,17 @@ while True:
 
     timer.start("train")
     rl_monitor.set_phase("training")
+    
+    # Pause inference server during training to prevent concurrent model access
+    if distributed:
+        inference_model.pause()
+    
     # evaluate the gradient
     num_tokens = torch.tensor(0, device=device)  # the number of "active" tokens of supervision seen
     for micro_step in range(grad_accum_steps):
         train_inputs, train_targets = next(train_loader)  # prefetch the next batch while the GPU is busy with forward/backward
-        print(train_inputs, train_targets)  # TODO: remove
         with autocast_ctx:
             loss = model(train_inputs, train_targets)
-            print("loss", loss)  # TODO: remove
         train_loss = loss.detach()  # for logging
         loss = loss / grad_accum_steps  # each .backward() is a grad sum => normalize loss here
         loss.backward()  # accumulate the gradient
@@ -420,6 +423,11 @@ while True:
     for opt in optimizers:
         opt.step()
     model.zero_grad(set_to_none=True)
+    
+    # Resume inference server after training
+    if distributed:
+        inference_model.resume()
+    
     timer.end("train")
 
     # logging

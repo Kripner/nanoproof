@@ -313,6 +313,28 @@ def pause_all_provers(prover_addresses: list[str]):
             log(f"Failed to pause prover at {addr}: {e}", component="Coordinator")
 
 
+def poll_all_provers(prover_addresses: list[str], monitor):
+    """Poll all prover servers for their status and update the monitor."""
+    if not monitor:
+        return
+    
+    for addr in prover_addresses:
+        try:
+            response = requests.get(f"http://{addr}/poll", timeout=5.0)
+            response.raise_for_status()
+            data = response.json()
+            monitor.update_prover_server(
+                address=addr,
+                games_played=data.get("games_played", 0),
+                games_solved=data.get("games_solved", 0),
+                thread_states=data.get("thread_states", []),
+                num_threads=len(data.get("thread_states", [])),
+            )
+        except Exception:
+            # Prover might be busy or disconnected
+            pass
+
+
 def distributed_collect(
     sampler: TheoremsSampler,
     target_transitions: int,
@@ -352,6 +374,10 @@ def distributed_collect(
     
     def submit_result(result: ProofResult):
         """Collect proof results."""
+        # Ignore straggler results from previous eval phase
+        if not result.theorem_id.startswith("train_"):
+            return
+        
         with results_lock:
             results.append(result)
             new_results.append(result)
@@ -420,6 +446,9 @@ def distributed_collect(
                     proofs_attempted=metrics['total'],
                     proofs_successful=metrics['solved'],
                 )
+            
+            # Poll prover servers for status updates
+            poll_all_provers(registry.get_all(), monitor)
         
         pause_all_provers(registry.get_all())
         
@@ -470,6 +499,10 @@ def distributed_eval(theorems: list[str], dataset_name: str = "eval") -> dict:
     
     def submit_result(result: ProofResult):
         """Collect proof results and signal done when complete."""
+        # Ignore straggler results from previous collection phase
+        if not result.theorem_id.startswith("eval_"):
+            return
+        
         with results_lock:
             results.append(result)
             n = len(results)
@@ -522,6 +555,9 @@ def distributed_eval(theorems: list[str], dataset_name: str = "eval") -> dict:
                 solved=metrics['solved'],
                 errors=metrics['errors']
             )
+        
+        # Poll prover servers for status updates
+        poll_all_provers(registry.get_all(), monitor)
         
         # Check overall timeout
         if time.time() - start_time > max_wait_time:

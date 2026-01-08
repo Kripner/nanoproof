@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { LogEntry } from '../types';
 
 interface LogViewerProps {
@@ -11,6 +11,16 @@ export function LogViewer({ logs, selectedActor, onActorSelect }: LogViewerProps
   const containerRef = useRef<HTMLDivElement>(null);
   const [filter, setFilter] = useState<string | null>(null);
   const [actorFilter, setActorFilter] = useState<string | null>(null);
+  const [isAtBottom, setIsAtBottom] = useState(true);
+
+  // Track whether user is scrolled to the bottom
+  const handleScroll = useCallback(() => {
+    if (containerRef.current) {
+      const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
+      // Consider "at bottom" if within 50px of the bottom
+      setIsAtBottom(scrollHeight - scrollTop - clientHeight < 50);
+    }
+  }, []);
 
   // Sync with external selectedActor prop
   useEffect(() => {
@@ -22,11 +32,20 @@ export function LogViewer({ logs, selectedActor, onActorSelect }: LogViewerProps
     }
   }, [selectedActor]);
 
+  // Only auto-scroll if user is at the bottom
+  useEffect(() => {
+    if (containerRef.current && isAtBottom) {
+      containerRef.current.scrollTop = containerRef.current.scrollHeight;
+    }
+  }, [logs, isAtBottom]);
+
+  // Scroll to bottom when filter changes
   useEffect(() => {
     if (containerRef.current) {
       containerRef.current.scrollTop = containerRef.current.scrollHeight;
+      setIsAtBottom(true);
     }
-  }, [logs, filter, actorFilter]);
+  }, [filter, actorFilter]);
 
   // Separate actors from other components
   const actors: string[] = [];
@@ -129,7 +148,7 @@ export function LogViewer({ logs, selectedActor, onActorSelect }: LogViewerProps
           )}
         </div>
       </div>
-      <div className="logs-container" ref={containerRef}>
+      <div className="logs-container" ref={containerRef} onScroll={handleScroll}>
         {filteredLogs.map((log, i) => (
           <div key={i} className={`log-entry ${log.level === 'error' ? 'error' : ''}`}>
             <span className="log-time">{log.timestamp}</span>

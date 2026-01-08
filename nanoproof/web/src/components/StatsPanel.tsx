@@ -42,21 +42,21 @@ export function StatsPanel({ collection, training, phase, replayBufferSize, eval
             </div>
           </div>
 
-          <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-secondary)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+          <div className="stats-details">
+            <div className="stats-detail-row">
               <span>Replay buffer:</span>
               <span style={{ color: 'var(--accent-cyan)', fontWeight: 600 }}>{replayBufferSize.toLocaleString()}</span>
             </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+            <div className="stats-detail-row">
               <span>Expansions:</span>
               <span>{collection.expansions.toLocaleString()}</span>
             </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+            <div className="stats-detail-row">
               <span>Expansions/sec:</span>
               <span style={{ color: 'var(--accent-green)' }}>{expansionsPerSecond.toFixed(1)}</span>
             </div>
             {collection.wait_time_median > 0 && (
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <div className="stats-detail-row">
                 <span>Batch wait (med):</span>
                 <span>{formatMs(collection.wait_time_median * 1000)}</span>
               </div>
@@ -81,8 +81,8 @@ export function StatsPanel({ collection, training, phase, replayBufferSize, eval
               <div className="stat-label">Step</div>
             </div>
           </div>
-          <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-secondary)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+          <div className="stats-details">
+            <div className="stats-detail-row">
               <span>Replay buffer:</span>
               <span style={{ color: 'var(--accent-cyan)', fontWeight: 600 }}>{replayBufferSize.toLocaleString()}</span>
             </div>
@@ -96,24 +96,26 @@ export function StatsPanel({ collection, training, phase, replayBufferSize, eval
             <>
               <div className="stats-grid">
                 <div className="stat">
-                  <div className="stat-value">{evalProgress.current}/{evalProgress.total}</div>
-                  <div className="stat-label">Progress</div>
+                  <div className="stat-value">{evalProgress.current}</div>
+                  <div className="stat-label">Proofs Attempted</div>
                 </div>
                 <div className="stat">
                   <div className="stat-value">{evalProgress.solved}</div>
-                  <div className="stat-label">Solved</div>
-                </div>
-                <div className="stat">
-                  <div className="stat-value">{evalProgress.errors}</div>
-                  <div className="stat-label">Errors</div>
+                  <div className="stat-label">Proofs Found</div>
                 </div>
                 <div className="stat">
                   <div className="stat-value">
-                    {evalProgress.total > 0 
-                      ? ((evalProgress.solved / Math.max(evalProgress.current, 1)) * 100).toFixed(1) 
+                    {evalProgress.current > 0 
+                      ? ((evalProgress.solved / evalProgress.current) * 100).toFixed(1) 
                       : 0}%
                   </div>
-                  <div className="stat-label">Success</div>
+                  <div className="stat-label">Success Rate</div>
+                </div>
+                <div className="stat">
+                  <div className="stat-value" style={{ color: evalProgress.errors > 0 ? 'var(--accent-red)' : undefined }}>
+                    {evalProgress.errors}
+                  </div>
+                  <div className="stat-label">Errors</div>
                 </div>
               </div>
 
@@ -123,8 +125,9 @@ export function StatsPanel({ collection, training, phase, replayBufferSize, eval
                   style={{ width: `${evalProgress.progress_percent}%` }} 
                 />
               </div>
-              <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4, textAlign: 'center' }}>
-                Evaluating {evalProgress.dataset} ({evalProgress.progress_percent.toFixed(1)}%)
+              <div style={{ fontSize: 'var(--font-sm)', color: 'var(--text-secondary)', marginTop: 4, textAlign: 'center' }}>
+                {evalProgress.dataset}: {evalProgress.current} / {evalProgress.total} ({evalProgress.progress_percent.toFixed(1)}%)
+                {evalProgress.errors > 0 && <span style={{ color: 'var(--accent-red)' }}> · {evalProgress.errors} errors</span>}
               </div>
             </>
           ) : (
@@ -132,12 +135,6 @@ export function StatsPanel({ collection, training, phase, replayBufferSize, eval
               Preparing evaluation...
             </div>
           )}
-          <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-secondary)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span>Replay buffer:</span>
-              <span style={{ color: 'var(--accent-cyan)', fontWeight: 600 }}>{replayBufferSize.toLocaleString()}</span>
-            </div>
-          </div>
         </>
       )}
 
@@ -146,8 +143,8 @@ export function StatsPanel({ collection, training, phase, replayBufferSize, eval
           <div style={{ textAlign: 'center', padding: 20, color: 'var(--text-muted)' }}>
             Idle
           </div>
-          <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+          <div className="stats-details">
+            <div className="stats-detail-row">
               <span>Replay buffer:</span>
               <span style={{ color: 'var(--accent-cyan)', fontWeight: 600 }}>{replayBufferSize.toLocaleString()}</span>
             </div>

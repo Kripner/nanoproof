@@ -112,10 +112,12 @@ def create_remote_prover_worker(
     
     def on_result(theorem_id: str, theorem: str, game: Optional["Game"], error: str | None):
         """Submit proof result to coordinator."""
+        # Only include proof_tree if actually solved
+        is_solved = game and game.root and game.root.is_solved
         result = {
             "id": theorem_id,
             "theorem": theorem,
-            "proof_tree": game.root.serialize() if game and game.root else None,
+            "proof_tree": game.root.serialize() if is_solved else None,
             "error": error,
         }
         
