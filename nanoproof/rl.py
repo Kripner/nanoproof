@@ -7,7 +7,6 @@ import sys
 from contextlib import nullcontext
 import random
 import time
-import gc
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -15,7 +14,7 @@ import wandb
 import torch
 import torch.distributed as dist
 
-from nanoproof.common import compute_init, compute_cleanup, get_base_dir, DummyWandb, autodetect_device_type, SimpleTimer
+from nanoproof.common import compute_init, compute_cleanup, get_base_dir, DummyWandb, autodetect_device_type, SimpleTimer, flush
 from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
 from nanoproof.data.leantree import iter_data
@@ -232,6 +231,8 @@ if distributed:
 # Go!
 step = 0
 timer = SimpleTimer()
+minif2f_results = None
+leanworkbook_results = None
 
 # Register cleanup to run on exit (handles normal exit, sys.exit, and unhandled exceptions)
 def cleanup():
@@ -240,7 +241,7 @@ def cleanup():
     # Shutdown the batched tactic model to unblock any waiting threads
     if tactic_model is not None:
         tactic_model.shutdown()
-    if distributed and 'inference_model' in dir():
+    if distributed:
         inference_model.shutdown()
     log("Shutdown complete", component="Main")
 
@@ -264,7 +265,6 @@ while True:
                     replay_buffer=replay_buffer,
                 )
                 # Signal completion to other ranks via store (avoid NCCL timeout)
-                dist.get_rank()  # Ensure distributed is initialized
                 store = dist.distributed_c10d._get_default_store()
                 store.set(f"collection_done_{step}", "1")
             else:
@@ -287,6 +287,7 @@ while True:
         
         model.train()
         timer.end("collect")
+        flush()  # Free memory from collection before training
         replay_buffer.synchronize()
         rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
         rl_monitor.display()
@@ -375,22 +376,27 @@ while True:
 
         model.train()
         timer.end("eval")
+        flush()  # Free memory from evaluation
         rl_monitor.display()
 
     if step > 0 and step % save_every == 0 and master_process:
         checkpoint_dir = os.path.join(output_dir, "checkpoints")
         model_config_kwargs = model.config.__dict__  # slightly naughty, abusing the simplicity of GPTConfig, TODO nicer
+        # Note: eval results might not exist if save_every % eval_every != 0
+        checkpoint_meta = {
+            "step": step,
+            "model_config": model_config_kwargs,
+        }
+        if minif2f_results:
+            checkpoint_meta["minif2f_val"] = minif2f_results['success_rate']
+        if leanworkbook_results:
+            checkpoint_meta["leanworkbook_val"] = leanworkbook_results['success_rate']
         save_checkpoint(
             checkpoint_dir,
             step,
             model.state_dict(),
             [opt.state_dict() for opt in optimizers],  # optimizer states
-            {
-                "step": step,
-                "model_config": model_config_kwargs,
-                "minif2f_val": minif2f_results['success_rate'],
-                "leanworkbook_val": leanworkbook_results['success_rate'],
-            },
+            checkpoint_meta,
             rank=ddp_rank,
         )
 
@@ -431,8 +437,7 @@ while True:
     # Resume inference server after training
     if distributed:
         # Clear CUDA cache before resuming inference (frees training memory)
-        gc.collect()
-        torch.cuda.empty_cache()
+        flush()
         inference_model.resume()
     
     timer.end("train")
