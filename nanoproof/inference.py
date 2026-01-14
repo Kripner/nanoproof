@@ -182,15 +182,15 @@ class BlockingTacticModel:
     """
     Thread-safe wrapper around TacticModel that batches LLM calls from multiple threads.
     
-    Requests are queued and processed in batches when either:
-    1. batch_size requests have accumulated, or
+    Batches are processed when either:
+    1. pending items exceed max_batch_tokens, or
     2. timeout_seconds has elapsed since the first pending request
     """
 
-    def __init__(self, inner_model: TacticModel, batch_size: int = 32, timeout_seconds: float = 0.1):
+    def __init__(self, inner_model: TacticModel, timeout_seconds: float, max_batch_tokens: int):
         self.inner_model = inner_model
-        self.batch_size = batch_size
         self.timeout_seconds = timeout_seconds
+        self.max_batch_tokens = max_batch_tokens
 
         self._lock = threading.Lock()
         self._batch_ready = threading.Condition(self._lock)
@@ -271,8 +271,8 @@ class BlockingTacticModel:
             if self._first_request_time is None:
                 self._first_request_time = time.time()
 
-            # Trigger batch if ready
-            if len(self._pending) >= self.batch_size and not self._batch_in_progress:
+            # Trigger batch if we have enough tokens queued
+            if not self._batch_in_progress and self._pending_tokens() >= self.max_batch_tokens:
                 self._process_batch_locked()
 
         # Wait for all results
@@ -280,6 +280,15 @@ class BlockingTacticModel:
             self._wait_for_result(event)
 
         return [slot[0] if slot else ValueOrError.from_error("No result") for _, _, slot in entries]
+
+    def _pending_tokens(self) -> int:
+        """Estimate total tokens in pending queue (assumes padding to max length)."""
+        if not self._pending:
+            return 0
+        # Estimate tokens as chars/4 (rough average for code/math text)
+        max_len = max(len(item[0]) // 4 + 1 for item in self._pending)
+        # Memory scales with max_len * batch_size * num_samples (due to padding + sample expansion)
+        return max_len * len(self._pending) * self.inner_model.num_samples
 
     def _wait_for_result(self, event: threading.Event):
         """Wait for a result, triggering batch processing if needed."""
@@ -291,10 +300,10 @@ class BlockingTacticModel:
                 # Check if we should trigger processing
                 if self._first_request_time is not None:
                     elapsed = time.time() - self._first_request_time
-                    if (elapsed >= self.timeout_seconds or len(self._pending) >= self.batch_size):
-                        if not self._batch_in_progress and self._pending:
-                            self._process_batch_locked()
-                            continue
+                    should_trigger = elapsed >= self.timeout_seconds or self._pending_tokens() >= self.max_batch_tokens
+                    if should_trigger and not self._batch_in_progress and self._pending:
+                        self._process_batch_locked()
+                        continue
 
                 self._batch_ready.wait(timeout=0.1)
 
@@ -307,8 +316,9 @@ class BlockingTacticModel:
         self._total_batches += 1
         batch_num = self._total_batches
 
-        # Take current batch
+        # Take all pending items
         batch = self._pending[:]
+        approx_tokens = self._pending_tokens()
         self._pending = []
         self._first_request_time = None
 
@@ -322,8 +332,9 @@ class BlockingTacticModel:
             results = self.inner_model.sample_tactic_from_str_batch(state_strs)
             elapsed = time.time() - start
             
-            if elapsed > 2.0:
-                log(f"Batch #{batch_num}: took {elapsed:.1f}s", component="BlockingTacticModel")
+            # log(f"Batch #{batch_num}: processed {len(batch)} samples (~{approx_tokens} tokens), took {elapsed:.1f}s", component="BlockingTacticModel")
+            # if elapsed > 2.0:
+            #     log(f"Batch #{batch_num}: took {elapsed:.1f}s", component="BlockingTacticModel")
 
             # Distribute results
             for i, (_, event, slot) in enumerate(batch):
@@ -494,8 +505,8 @@ def main():
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=5000, help="Port to bind to")
     parser.add_argument("--num-samples", type=int, default=6, help="Tactics to sample per state")
-    parser.add_argument("--batch-size", type=int, default=32, help="Batch size for batching requests")
     parser.add_argument("--batch-timeout", type=float, default=0.1, help="Timeout for batching (seconds)")
+    parser.add_argument("--max-batch-tokens", type=int, default=32000, help="Max total tokens per batch (controls memory)")
     parser.add_argument("--model-source", default="sft", help="Model source (sft, pretrain, etc)")
     parser.add_argument("--model-tag", default="d26", help="Model tag")
     args = parser.parse_args()
@@ -505,14 +516,18 @@ def main():
     model, tokenizer, _ = load_model(args.model_source, device, phase="eval", model_tag=args.model_tag)
     engine = Engine(model, tokenizer)
     tactic_model = TacticModel(model, tokenizer, engine, num_samples=args.num_samples)
-    blocking_model = BlockingTacticModel(tactic_model, batch_size=args.batch_size, timeout_seconds=args.batch_timeout)
+    blocking_model = BlockingTacticModel(
+        tactic_model, 
+        timeout_seconds=args.batch_timeout,
+        max_batch_tokens=args.max_batch_tokens
+    )
     
     app = create_blocking_model_app(blocking_model)
     
     print(f"[Inference] Server starting on {args.host}:{args.port}")
     print(f"[Inference] Device: {device}")
     print(f"[Inference] Samples per state: {args.num_samples}")
-    print(f"[Inference] Batch size: {args.batch_size}, timeout: {args.batch_timeout}s")
+    print(f"[Inference] Timeout: {args.batch_timeout}s, max tokens: {args.max_batch_tokens}")
     
     app.run(host=args.host, port=args.port, threaded=True)
 

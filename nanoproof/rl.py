@@ -55,8 +55,8 @@ collect_transitions = 100  # how many proof transitions to collect in one collec
 # parallel experience collection (local mode only)
 num_actors = 32  # number of parallel actor threads for experience collection and evaluation
 num_sampled_tactics = 6  # number of tactics to sample per state in MCTS
-batch_timeout = 0.1  # timeout in seconds for batching LLM calls
-max_batch_size = 16  # max batch size for inference (limits memory usage)
+batch_timeout = 0.2  # timeout in seconds for batching LLM calls
+max_batch_tokens = 32000  # max total tokens per inference batch (controls memory usage)
 # optimization
 target_examples_per_step = 512
 unembedding_lr = 0.004
@@ -67,7 +67,7 @@ init_lr_frac = 0.02
 # evaluation and logging there of
 eval_every = 50
 eval_start = 0  # step to start evaluation at (skip evaluation before this step)
-save_every = 1000
+save_every = 500
 # resuming from a previous run
 resume_from = ""  # path to a previous run's output directory to resume from (uses its replay buffers)
 # now allow CLI to override the settings via the configurator lol
@@ -126,8 +126,8 @@ if distributed:
 else:
     tactic_model = BlockingTacticModel(
         inner_model=inner_tactic_model,
-        batch_size=min(num_actors, max_batch_size),
-        timeout_seconds=batch_timeout
+        timeout_seconds=batch_timeout,
+        max_batch_tokens=max_batch_tokens
     )
     model = tactic_model.network
 
@@ -205,12 +205,10 @@ for opt in optimizers:
 # Start inference servers in distributed mode (each rank runs one)
 if distributed:
     # Create BlockingTacticModel for the inference server
-    # Cap batch size to avoid OOM (large batches need too much memory)
-    inference_batch_size = min(num_actors, max_batch_size)
     inference_model = BlockingTacticModel(
         inner_model=inner_tactic_model,
-        batch_size=inference_batch_size,
-        timeout_seconds=batch_timeout
+        timeout_seconds=batch_timeout,
+        max_batch_tokens=max_batch_tokens
     )
     # Each rank starts an inference server on its own port
     inference_port = inference_server_port + 1 + ddp_rank  # ports 5001, 5002, ...
