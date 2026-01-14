@@ -47,7 +47,7 @@ device_batch_size = 8  # (maybe) max to avoid OOM (on A100 40GB)
 distributed = True  # enable distributed mode (provers on separate nodes)
 inference_server_port = 5000  # port for inference server (distributed mode only)
 poll_interval = 3.0  # how often to poll provers for transitions (seconds)
-lean_servers = "10.10.25.40:8000,10.10.25.36:8000"  # comma-separated list of lean server URLs for monitoring (e.g., "host1:8080,host2:8080") - just for monitoring
+lean_servers = "10.10.25.35:8000,10.10.25.36:8000"  # comma-separated list of lean server URLs for monitoring (e.g., "host1:8080,host2:8080") - just for monitoring
 # data
 fraction_sft = 0.5  # 50% of data will come from Mathlib (leantree), 50% from replay buffer
 collect_every = 1  # how many steps to train between RL data collections  # TODO: when collect_every>1, we need some warmup (collect collect_every*collect_transitions)
@@ -66,7 +66,10 @@ weight_decay = 0.0
 init_lr_frac = 0.02
 # evaluation and logging there of
 eval_every = 50
+eval_start = 0  # step to start evaluation at (skip evaluation before this step)
 save_every = 1000
+# resuming from a previous run
+resume_from = ""  # path to a previous run's output directory to resume from (uses its replay buffers)
 # now allow CLI to override the settings via the configurator lol
 config_keys = [k for k, v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open(os.path.join("nanoproof", "configurator.py")).read())  # overrides from command line or config file
@@ -249,52 +252,61 @@ atexit.register(cleanup)
 
 while True:
     if step % collect_every == 0:
-        # collect proofs
-        timer.start("collect")
-        model.eval()
-        rl_monitor.start_collection(target_samples=collect_transitions, num_actors=num_actors)
-        rl_monitor.set_step(step)
-        
-        if distributed:
-            if master_process:
-                # Distributed mode: coordinate remote provers (only master does this)
-                distributed_collect(
-                    sampler=theorems_sampler,
-                    target_transitions=collect_transitions,
-                    poll_interval=poll_interval,
-                    replay_buffer=replay_buffer,
-                )
-                # Signal completion to other ranks via store (avoid NCCL timeout)
-                store = dist.distributed_c10d._get_default_store()
-                store.set(f"collection_done_{step}", "1")
-            else:
-                # Non-master ranks wait for master to finish (without NCCL barrier)
-                store = dist.distributed_c10d._get_default_store()
-                while True:
-                    try:
-                        done = store.get(f"collection_done_{step}")
-                        if done == b"1":
-                            break
-                    except Exception:
-                        pass
-                    time.sleep(1.0)
-            
-            # Wait for provers to abort their MCTS searches and release Lean processes
-            time.sleep(3.0)
+        # Check if we can resume from a previous run's replay buffer
+        resume_file = os.path.join(resume_from, f"replay_buffer_{step:05d}.json") if resume_from else None
+        if resume_file and os.path.exists(resume_file):
+            log(f"Loading replay buffer at step {step} from {resume_file}", component="Main")
+            with open(resume_file, "r") as f:
+                replay_buffer.buffer = json.load(f)
+            rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
+            log(f"Loaded {len(replay_buffer.buffer)} transitions at step {step} from previous run", component="Main")
         else:
-            # Local mode: run actors locally
-            run_actor(collect_transitions, config, tactic_model, replay_buffer, theorems_sampler)
-        
-        model.train()
-        timer.end("collect")
-        flush()  # Free memory from collection before training
-        replay_buffer.synchronize()
-        rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
-        rl_monitor.display()
-        with open(os.path.join(output_dir, f"replay_buffer_{step:05d}.json"), "w") as f:
-            json.dump(replay_buffer.buffer, f)
+            # collect proofs
+            timer.start("collect")
+            model.eval()
+            rl_monitor.start_collection(target_samples=collect_transitions, num_actors=num_actors)
+            rl_monitor.set_step(step)
+            
+            if distributed:
+                if master_process:
+                    # Distributed mode: coordinate remote provers (only master does this)
+                    distributed_collect(
+                        sampler=theorems_sampler,
+                        target_transitions=collect_transitions,
+                        poll_interval=poll_interval,
+                        replay_buffer=replay_buffer,
+                    )
+                    # Signal completion to other ranks via store (avoid NCCL timeout)
+                    store = dist.distributed_c10d._get_default_store()
+                    store.set(f"collection_done_{step}", "1")
+                else:
+                    # Non-master ranks wait for master to finish (without NCCL barrier)
+                    store = dist.distributed_c10d._get_default_store()
+                    while True:
+                        try:
+                            done = store.get(f"collection_done_{step}")
+                            if done == b"1":
+                                break
+                        except Exception:
+                            pass
+                        time.sleep(1.0)
+                
+                # Wait for provers to abort their MCTS searches and release Lean processes
+                time.sleep(3.0)
+            else:
+                # Local mode: run actors locally
+                run_actor(collect_transitions, config, tactic_model, replay_buffer, theorems_sampler)
+            
+            model.train()
+            timer.end("collect")
+            flush()  # Free memory from collection before training
+            replay_buffer.synchronize()
+            rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
+            rl_monitor.display()
+            with open(os.path.join(output_dir, f"replay_buffer_{step:05d}.json"), "w") as f:
+                json.dump(replay_buffer.buffer, f)
 
-    if step % eval_every == 0:
+    if step % eval_every == 0 and step >= eval_start:
         timer.start("eval")
         model.eval()
         rl_monitor.set_phase("evaluating")
