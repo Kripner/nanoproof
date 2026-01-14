@@ -258,6 +258,7 @@ while True:
                 replay_buffer.buffer = json.load(f)
             rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
             log(f"Loaded {len(replay_buffer.buffer)} transitions at step {step} from previous run", component="Main")
+            flush()  # Free any GPU memory from inference before training
         else:
             # collect proofs
             timer.start("collect")
