@@ -45,7 +45,7 @@ class Config:
     training_steps: int = int(500e3)
     batch_size: int = 64
     sequence_length: int = 32
-    window_size: int = 20000
+    window_size: int = 60_000_000
     lr: float = 1e-4
     value_weight: float = 0.002
 

@@ -231,7 +231,6 @@ if distributed:
 
 # Go!
 step = 0
-timer = SimpleTimer()
 minif2f_results = None
 leanworkbook_results = None
 
@@ -252,6 +251,8 @@ def cleanup():
 atexit.register(cleanup)
 
 while True:
+    timer = SimpleTimer()
+    
     if step % collect_every == 0:
         # Check if we can resume from a previous run's replay buffer
         resume_file = os.path.join(resume_from, f"replay_buffer_{step:05d}.json") if resume_from else None
