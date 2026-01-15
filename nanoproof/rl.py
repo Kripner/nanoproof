@@ -56,7 +56,7 @@ collect_transitions = 100  # how many proof transitions to collect in one collec
 num_actors = 32  # number of parallel actor threads for experience collection and evaluation
 num_sampled_tactics = 6  # number of tactics to sample per state in MCTS
 batch_timeout = 0.2  # timeout in seconds for batching LLM calls
-max_batch_tokens = 32000  # max total tokens per inference batch (controls memory usage)
+max_batch_tokens = 16000  # max total tokens per inference batch (controls memory usage)
 # optimization
 target_examples_per_step = 512
 unembedding_lr = 0.004
@@ -257,12 +257,18 @@ while True:
         # Check if we can resume from a previous run's replay buffer
         resume_file = os.path.join(resume_from, f"replay_buffer_{step:05d}.json") if resume_from else None
         if resume_file and os.path.exists(resume_file):
-            log(f"Loading replay buffer at step {step} from {resume_file}", component="Main")
+            if master_process:
+                log(f"Loading replay buffer at step {step} from {resume_file}", component="Main")
             with open(resume_file, "r") as f:
                 replay_buffer.buffer = json.load(f)
             rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
-            log(f"Loaded {len(replay_buffer.buffer)} transitions at step {step} from previous run", component="Main")
+            if master_process:
+                log(f"Loaded {len(replay_buffer.buffer)} transitions at step {step} from previous run", component="Main")
             flush()  # Free any GPU memory from inference before training
+            
+            # Synchronize all ranks after loading
+            if ddp:
+                dist.barrier()
         else:
             # collect proofs
             timer.start("collect")
@@ -305,7 +311,6 @@ while True:
             flush()  # Free memory from collection before training
             replay_buffer.synchronize()
             rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
-            rl_monitor.display()
             with open(os.path.join(output_dir, f"replay_buffer_{step:05d}.json"), "w") as f:
                 json.dump(replay_buffer.buffer, f)
 
@@ -401,7 +406,6 @@ while True:
         model.train()
         timer.end("eval")
         flush()  # Free memory from evaluation
-        rl_monitor.display()
 
     if step > 0 and step % save_every == 0 and master_process:
         checkpoint_dir = os.path.join(output_dir, "checkpoints")
@@ -470,8 +474,8 @@ while True:
     train_loss_item = train_loss.item()
     num_tokens_item = num_tokens.item()
     rl_monitor.update_training(step, train_loss_item, num_tokens_item)
-    rl_monitor.display()
-    log(f"Step {step:05d} | Training loss: {train_loss_item:.6f} | num_tokens: {num_tokens_item:,} | replay_buffer_size: {len(replay_buffer.buffer)}", component="Train")
+    if master_process:
+        log(f"Step {step:05d} | Training loss: {train_loss_item:.6f} | num_tokens: {num_tokens_item:,} | replay_buffer_size: {len(replay_buffer.buffer)}", component="Train")
     wandb_run.log({
         "step": step,
         "train_loss": train_loss_item,

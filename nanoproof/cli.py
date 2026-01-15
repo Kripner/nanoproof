@@ -1186,16 +1186,6 @@ class WebMonitor:
             gpu.inference_queue_size = inference_queue_size
             gpu.avg_wait_time_ms = avg_wait_time_ms
 
-    # --- Compatibility methods ---
-
-    def display(self):
-        """No-op for compatibility with old terminal-based monitor."""
-        pass
-
-    def cleanup(self):
-        """No-op for compatibility."""
-        pass
-
 
 # Alias for backwards compatibility
 RLMonitor = WebMonitor
