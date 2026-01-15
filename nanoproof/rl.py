@@ -24,7 +24,7 @@ from nanoproof.inference import TacticModel, BlockingTacticModel
 from nanoproof.data import minif2f
 from nanoproof.data import leanworkbook
 from nanoproof.cli import create_monitor, configure_logging, log
-from nanoproof.rl_server import distributed_collect, distributed_eval, start_coordinator
+from nanoproof.rl_server import distributed_collect, distributed_eval, start_coordinator, shutdown_coordinator
 from nanoproof.inference import start_inference_server
 from scripts.prover_eval import eval_success_rate
 
@@ -68,7 +68,7 @@ init_lr_frac = 0.02
 eval_every = 50
 eval_start = 0  # step to start evaluation at (skip evaluation before this step)
 save_every = 500
-# resuming from a previous run
+# resuming from a previous run - Note: don't forget to also set eval_start and seed!
 resume_from = ""  # path to a previous run's output directory to resume from (uses its replay buffers)
 # now allow CLI to override the settings via the configurator lol
 config_keys = [k for k, v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
@@ -239,6 +239,9 @@ leanworkbook_results = None
 def cleanup():
     """Cleanup function to ensure resources are released on shutdown."""
     log("Shutting down...", component="Main")
+    # In distributed mode, shutdown coordinator first to stop provers from retrying
+    if distributed and master_process:
+        shutdown_coordinator()
     # Shutdown the batched tactic model to unblock any waiting threads
     if tactic_model is not None:
         tactic_model.shutdown()
@@ -328,11 +331,20 @@ while True:
                                        leanworkbook_results['solved'], leanworkbook_results['total'],
                                        leanworkbook_results['errors'])
 
-                log(f"Step {step:05d} | minif2f: {minif2f_results['success_rate']:.4%} ({minif2f_results['solved']}/{minif2f_results['total']}, errors={minif2f_results['errors']}) | leanworkbook: {leanworkbook_results['success_rate']:.4%} ({leanworkbook_results['solved']}/{leanworkbook_results['total']}, errors={leanworkbook_results['errors']})", component="Eval")
+                # Log results (with timeout warning if applicable)
+                minif2f_status = f"minif2f: {minif2f_results['success_rate']:.4%} ({minif2f_results['solved']}/{minif2f_results['total']}, errors={minif2f_results['errors']})"
+                if minif2f_results.get('timed_out'):
+                    minif2f_status += " [TIMED OUT]"
+                leanworkbook_status = f"leanworkbook: {leanworkbook_results['success_rate']:.4%} ({leanworkbook_results['solved']}/{leanworkbook_results['total']}, errors={leanworkbook_results['errors']})"
+                if leanworkbook_results.get('timed_out'):
+                    leanworkbook_status += " [TIMED OUT]"
+                log(f"Step {step:05d} | {minif2f_status} | {leanworkbook_status}", component="Eval")
                 wandb_run.log({
                     "step": step,
                     "minif2f_val": minif2f_results['success_rate'],
+                    "minif2f_timed_out": minif2f_results.get('timed_out', False),
                     "leanworkbook_val": leanworkbook_results['success_rate'],
+                    "leanworkbook_timed_out": leanworkbook_results.get('timed_out', False),
                 })
                 
                 # Signal completion to other ranks via store (avoid NCCL blocking GPU)
