@@ -14,7 +14,7 @@ official AlphaProof pseudocode (together with many open-source datasets and tool
   - CPU nodes for actors (provers)
   - CPU nodes for the LeanTree servers
 
-The best score achieved so far is **36.1% on MiniF2F**.
+The best score achieved so far is **36.5% on MiniF2F**.
 
 This project is in early stages and still a bit hard to work with. If you want to contribute, the best way to start is to write me an email!
 
