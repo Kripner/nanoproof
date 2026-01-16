@@ -56,7 +56,7 @@ collect_transitions = 100  # how many proof transitions to collect in one collec
 num_actors = 32  # number of parallel actor threads for experience collection and evaluation
 num_sampled_tactics = 6  # number of tactics to sample per state in MCTS
 batch_timeout = 0.2  # timeout in seconds for batching LLM calls
-max_batch_tokens = 16000  # max total tokens per inference batch (controls memory usage)
+max_batch_tokens = 12000  # max total tokens per inference batch (A100 40GB)
 # optimization
 target_examples_per_step = 512
 unembedding_lr = 0.004
@@ -75,6 +75,9 @@ config_keys = [k for k, v in globals().items() if not k.startswith('_') and isin
 exec(open(os.path.join("nanoproof", "configurator.py")).read())  # overrides from command line or config file
 user_config = {k: globals()[k] for k in config_keys}  # possibly useful for logging
 # -----------------------------------------------------------------------------
+
+# TODO (!): add augmentations, similar to SFT
+# TODO: simplify the barrier logic
 
 # Compute init
 device_type = autodetect_device_type() if device_type == "" else device_type
@@ -279,12 +282,17 @@ while True:
             if distributed:
                 if master_process:
                     # Distributed mode: coordinate remote provers (only master does this)
-                    distributed_collect(
-                        sampler=theorems_sampler,
-                        target_transitions=collect_transitions,
-                        poll_interval=poll_interval,
-                        replay_buffer=replay_buffer,
-                    )
+                    # Retry until we have enough transitions
+                    while len(replay_buffer.local_buffer) < collect_transitions:
+                        collected = distributed_collect(
+                            sampler=theorems_sampler,
+                            target_transitions=collect_transitions,
+                            poll_interval=poll_interval,
+                            replay_buffer=replay_buffer,
+                        )
+                        if collected < collect_transitions:
+                            log(f"Collection incomplete ({collected}/{collect_transitions}), retrying...", 
+                                component="Coordinator")
                     # Signal completion to other ranks via store (avoid NCCL timeout)
                     store = dist.distributed_c10d._get_default_store()
                     store.set(f"collection_done_{step}", "1")
@@ -345,13 +353,18 @@ while True:
                 if leanworkbook_results.get('timed_out'):
                     leanworkbook_status += " [TIMED OUT]"
                 log(f"Step {step:05d} | {minif2f_status} | {leanworkbook_status}", component="Eval")
-                wandb_run.log({
-                    "step": step,
-                    "minif2f_val": minif2f_results['success_rate'],
-                    "minif2f_timed_out": minif2f_results.get('timed_out', False),
-                    "leanworkbook_val": leanworkbook_results['success_rate'],
-                    "leanworkbook_timed_out": leanworkbook_results.get('timed_out', False),
-                })
+                
+                # Only log scores to wandb if eval completed (not timed out)
+                wandb_data = {"step": step}
+                if not minif2f_results.get('timed_out'):
+                    wandb_data["minif2f_val"] = minif2f_results['success_rate']
+                else:
+                    wandb_data["minif2f_timed_out"] = True
+                if not leanworkbook_results.get('timed_out'):
+                    wandb_data["leanworkbook_val"] = leanworkbook_results['success_rate']
+                else:
+                    wandb_data["leanworkbook_timed_out"] = True
+                wandb_run.log(wandb_data)
                 
                 # Signal completion to other ranks via store (avoid NCCL blocking GPU)
                 store = dist.distributed_c10d._get_default_store()

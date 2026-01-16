@@ -26,7 +26,7 @@ from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
 from nanoproof.data.leantree import iter_data
 from nanoproof.data.leantree_dataloader import sft_data_generator
-from scripts.policy_eval import eval_tactic_accuracy
+from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
 
 # -----------------------------------------------------------------------------
 # SFT Hyperparameters
@@ -98,7 +98,7 @@ augmentations = [
 train_ds = list(iter_data(split="train", augmentations=augmentations))
 random.Random(seed).shuffle(train_ds)
 val_ds = list(iter_data(split="val"))
-print0(f"Train dataset size: {len(train_ds)} | Val dataset size: {len(val_ds)}")
+print0(f"Train transitions count: {len(train_ds)} | Val transitions count: {len(val_ds)}")
 
 # if num_iterations == -1:
 #     # derive num_iterations from num_epochs and the size of the dataset
@@ -167,15 +167,28 @@ while True:
         val_loss = val_loss.item()
 
         with autocast_ctx:
-            results = eval_tactic_accuracy(model, build_val_loader(), max_steps=eval_steps)
+            tactic_results = eval_tactic_accuracy(model, tokenizer, build_val_loader(), max_steps=eval_steps)
+            critic_results = eval_critic_errors(model, tokenizer, build_val_loader(), max_steps=eval_steps)
 
-        print0(f"Step {step:05d} | Validation loss: {val_loss:.6f} | Tactic full accuracy: {results['full_acc']:.4%} | Tactic first token accuracy: {results['first_token_acc']:.4%}")
+        print0(f"Step {step:05d} | Validation loss: {val_loss:.6f} | Tactic full accuracy: {tactic_results['full_acc']:.4%} | Tactic first token accuracy: {tactic_results['first_token_acc']:.4%} | Critic MSE: {critic_results['mse']:.4f}")
 
+        # Create confusion matrix heatmap for wandb
+        confusion_matrix = critic_results["confusion"].tolist()
+        bin_labels = [str(i) for i in range(1, 65)]
+        
         wandb_run.log({
             "step": step,
             "val_loss": val_loss,
-            "val_full_acc": results["full_acc"],
-            "val_first_token_acc": results["first_token_acc"],
+            "val_full_acc": tactic_results["full_acc"],
+            "val_first_token_acc": tactic_results["first_token_acc"],
+            "val_critic_mse": critic_results["mse"],
+            "val_critic_samples": critic_results["total_samples"],
+            "val_critic_confusion": wandb.plots.HeatMap(
+                x_labels=bin_labels,
+                y_labels=bin_labels,
+                matrix_values=confusion_matrix,
+                show_text=False,
+            ),
         })
 
         model.train()
@@ -327,7 +340,8 @@ from nanoproof.report import get_report
 get_report().log(section="SFT", data=[
     user_config, # CLI args
     {
-        "Training rows": len(train_ds),
+        "Training transitions": len(train_ds),
+        "Validation transitions": len(val_ds),
         "Number of iterations": step,
         "Training loss": train_loss_item,
         "Validation loss": val_loss,

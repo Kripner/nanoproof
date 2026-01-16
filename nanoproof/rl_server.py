@@ -370,6 +370,7 @@ def distributed_collect(
     target_transitions: int,
     poll_interval: float,
     replay_buffer,  # ReplayBuffer
+    no_progress_timeout: float = 300.0,  # 5 minute timeout if no progress
 ) -> int:
     """
     Collect transitions from distributed provers.
@@ -379,9 +380,10 @@ def distributed_collect(
         target_transitions: Target number of transitions to collect
         poll_interval: How often to check progress
         replay_buffer: Buffer to add extracted transitions to
+        no_progress_timeout: Maximum time to wait without any progress (seconds)
     
     Returns:
-        Number of transitions collected.
+        Number of transitions collected. May be less than target if stalled.
     """
     registry = get_registry()
     dispatcher = get_dispatcher()
@@ -455,6 +457,8 @@ def distributed_collect(
         start_all_provers(registry.get_all())
         
         collected = 0
+        last_progress_time = time.time()
+        last_collected = 0
         
         while collected < target_transitions:
             time.sleep(poll_interval)
@@ -469,6 +473,20 @@ def distributed_collect(
                     monitor.set_replay_buffer_size(len(replay_buffer.local_buffer))
                 
                 log(f"Transitions: {collected}/{target_transitions}", component="Coordinator")
+            
+            # Track progress for timeout detection
+            if collected > last_collected:
+                last_progress_time = time.time()
+                last_collected = collected
+            
+            # Check for no-progress timeout or provers disconnected
+            no_progress_elapsed = time.time() - last_progress_time
+            prover_count = registry.count()
+            if no_progress_elapsed > no_progress_timeout or prover_count == 0:
+                log(f"Collection stalled: no progress for {no_progress_elapsed:.0f}s, "
+                    f"provers={prover_count}, collected={collected}/{target_transitions}", 
+                    component="Coordinator")
+                break
             
             # Poll prover servers for status updates (and get expansions)
             total_expansions = poll_all_provers(registry.get_all(), monitor)
@@ -493,14 +511,14 @@ def distributed_collect(
         registry.set_collecting(False)
 
 
-def distributed_eval(theorems: list[str], dataset_name: str = "eval", timeout: float = 600.0) -> dict:
+def distributed_eval(theorems: list[str], dataset_name: str = "eval", no_progress_timeout: float = 120.0) -> dict:
     """
     Evaluate theorems using distributed provers.
     
     Args:
         theorems: List of theorem strings to evaluate
         dataset_name: Name of the dataset for monitor display
-        timeout: Maximum time to wait for results (seconds), default 10 minutes
+        no_progress_timeout: Maximum time to wait without progress (seconds), default 2 minutes
     
     Returns:
         Dict with 'success_rate', 'solved', 'total', 'errors', 'timed_out'.
@@ -577,7 +595,8 @@ def distributed_eval(theorems: list[str], dataset_name: str = "eval", timeout: f
     
     # Poll for results with progress updates
     poll_interval = 2.0
-    start_time = time.time()
+    last_progress_time = time.time()
+    last_result_count = 0
     
     while not done.wait(timeout=poll_interval):
         # Update monitor with current progress
@@ -589,15 +608,23 @@ def distributed_eval(theorems: list[str], dataset_name: str = "eval", timeout: f
                 errors=metrics['errors']
             )
         
+        # Track progress for stall detection
+        current_count = len(results)
+        if current_count > last_result_count:
+            last_progress_time = time.time()
+            last_result_count = current_count
+        
         # Poll prover servers for status updates
         poll_all_provers(registry.get_all(), monitor)
         
-        # Check overall timeout
-        if time.time() - start_time > timeout:
+        # Check for no-progress timeout or provers disconnected
+        no_progress_elapsed = time.time() - last_progress_time
+        prover_count = registry.count()
+        if no_progress_elapsed > no_progress_timeout or prover_count == 0:
+            missing = expected - len(results)
+            log(f"Eval stalled: no progress for {no_progress_elapsed:.0f}s, "
+                f"provers={prover_count}, missing {missing} results", component="Coordinator")
             timed_out = True
-            with results_lock:
-                missing = expected - len(results)
-            log(f"Eval timed out after {timeout:.0f}s, missing {missing} results", component="Coordinator")
             break
     
     pause_all_provers(registry.get_all())

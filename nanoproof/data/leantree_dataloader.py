@@ -66,13 +66,10 @@ def sft_data_generator(dataset, batch_size, device="cuda"):
                 state_toks + [tactic_delim_tok] + tactic_toks,
                 [0] * (len(state_toks) + 1) + [1] * len(tactic_toks)
             ))
-            # TODO: uncomment this once we are using <|value|>
-            # TODO: we also need to change the dataset size calculation in SFT.py accordingly!
-            # TODO: we also need to change the tactic_eval script to distinguish between tactic and value samples
-            # batch.append((
-            #     state_toks + [value_delim_tok] + value_toks,
-            #     [0] * (len(state_toks) + 1) + [1] * len(value_toks)
-            # ))
+            batch.append((
+                state_toks + [value_delim_tok] + value_toks,
+                [0] * (len(state_toks) + 1) + [1] * len(value_toks)
+            ))
 
             approx_progress = i / len(dataset)
             last_step = last_step or (i + ddp_world_size >= len(dataset))
