@@ -28,6 +28,8 @@ from nanoproof.data.leantree import iter_data
 from nanoproof.data.leantree_dataloader import sft_data_generator
 from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
 
+# TODO: if training policy+critic at once does not work, try training just policy first, then critic+policy
+
 # -----------------------------------------------------------------------------
 # SFT Hyperparameters
 run = "dummy" # wandb run name default ("dummy" is special - we won't log to wandb)
@@ -41,7 +43,7 @@ device_type = "" # cuda|cpu|mps (empty => autodetect)
 dtype = "bfloat16"
 device_batch_size = 8 # (maybe) max to avoid OOM (on A100 40GB)
 # optimization
-num_epochs = 1
+num_epochs = 100
 num_iterations = -1 # override number of iterations (-1 = disable, use num_epochs to derive it)
 target_examples_per_step = 512
 unembedding_lr = 0.004
@@ -98,7 +100,7 @@ augmentations = [
 train_ds = list(iter_data(split="train", augmentations=augmentations))
 random.Random(seed).shuffle(train_ds)
 val_ds = list(iter_data(split="val"))
-print0(f"Train transitions count: {len(train_ds)} | Val transitions count: {len(val_ds)}")
+print0(f"Train rows count: {len(train_ds)} | Val rows count: {len(val_ds)}")
 
 # if num_iterations == -1:
 #     # derive num_iterations from num_epochs and the size of the dataset
@@ -281,10 +283,17 @@ hx0 : P x0
         #     # For display, replace pad tokens with None
         #     input_str = tokenizer.decode([t for t in input_tokens if t != tokenizer.encode_special("<|pad|>")])
         #     # For targets, skip ignore indices (-1), pad tokens, and detokenize
-        #     target_str = tokenizer.decode([t for t in target_tokens if t >= 0 and t != tokenizer.encode_special("<|pad|>")])
-        #     print0(f"Input {i} tokens: {input_tokens.tolist()}")
+        #     target_str = tokenizer.decode([t for t in target_tokens if t != -1 and t != tokenizer.encode_special("<|pad|>")])
+
+        #     # Print (token, target) pairs with tokens rather than token ids
+        #     input_tokens_list = input_tokens.tolist()
+        #     target_tokens_list = target_tokens.tolist()
+        #     input_tokens_strs = [tokenizer.decode([tok]) for tok in input_tokens_list]
+        #     target_tokens_strs = [tokenizer.decode([tok]) if tok != -1 and tok != tokenizer.encode_special("<|pad|>") else "<pad/-1>" for tok in target_tokens_list]
+        #     pairs = list(zip(input_tokens_strs, target_tokens_strs))
+        #     print0(f"Input {i} (token, target) pairs: {pairs}")
+
         #     print0(f"Input {i} detokenized: {input_str!r}")
-        #     print0(f"Target {i} tokens: {target_tokens.tolist()}")
         #     print0(f"Target {i} detokenized: {target_str!r}")
         #     print0("-" * 40)
 
@@ -357,8 +366,8 @@ from nanoproof.report import get_report
 get_report().log(section="SFT", data=[
     user_config, # CLI args
     {
-        "Training transitions": len(train_ds),
-        "Validation transitions": len(val_ds),
+        "Training rows": len(train_ds),
+        "Validation rows": len(val_ds),
         "Number of iterations": step,
         "Training loss": train_loss_item,
         "Validation loss": val_loss,
