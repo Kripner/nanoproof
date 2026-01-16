@@ -74,9 +74,10 @@ class ConnectionFailureTracker:
     def record_success(self):
         self.consecutive_failures = 0
     
-    def record_failure(self, error: Exception):
+    def record_failure(self, error: Exception, url: str = ""):
         self.consecutive_failures += 1
-        print(f"[Prover] Failed to get theorem ({self.consecutive_failures}/{self.max_failures}): {error}")
+        url_info = f" (url={url})" if url else ""
+        print(f"[Prover] Failed to get theorem ({self.consecutive_failures}/{self.max_failures}): {error}{url_info}")
         if self.consecutive_failures >= self.max_failures:
             raise RuntimeError(f"RL server unreachable after {self.max_failures} consecutive failures")
 
@@ -98,8 +99,9 @@ def create_remote_prover_worker(
     
     def get_theorem() -> Optional[tuple[str, str]]:
         """Request next theorem from coordinator."""
+        url = f"{coordinator_url}/get_theorem"
         try:
-            response = requests.get(f"{coordinator_url}/get_theorem", timeout=5.0)
+            response = requests.get(url, timeout=5.0)
             response.raise_for_status()
             data = response.json()
             failure_tracker.record_success()
@@ -107,7 +109,7 @@ def create_remote_prover_worker(
                 return None
             return data["id"], data["theorem"]
         except Exception as e:
-            failure_tracker.record_failure(e)
+            failure_tracker.record_failure(e, url)
             return None
     
     def on_result(theorem_id: str, theorem: str, game: Optional["Game"], error: str | None):
@@ -130,15 +132,12 @@ def create_remote_prover_worker(
             buffer.record_game(False)
         
         # Submit to coordinator
+        url = f"{coordinator_url}/submit_result"
         try:
-            response = requests.post(
-                f"{coordinator_url}/submit_result",
-                json=result,
-                timeout=30.0
-            )
+            response = requests.post(url, json=result, timeout=30.0)
             response.raise_for_status()
         except Exception as e:
-            print(f"[Prover] Failed to submit result: {e}")
+            print(f"[Prover] Failed to submit result to {url}: {e}")
     
     return ProverWorker(
         config=config,

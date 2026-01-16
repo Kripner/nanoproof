@@ -409,10 +409,10 @@ class RemoteTacticModel:
             
             return result["tactics"][0]
         except http_requests.exceptions.Timeout:
-            self._record_failure("Timeout calling inference server")
+            self._record_failure(f"Timeout calling inference server at {self.server_address} (timeout={self.timeout})")
             return []
         except http_requests.exceptions.RequestException as e:
-            self._record_failure(f"Error calling inference server: {e}")
+            self._record_failure(f"Error calling inference server at {self.server_address}: {e}")
             return []
     
     def _record_failure(self, message: str):

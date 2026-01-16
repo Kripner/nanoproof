@@ -221,7 +221,7 @@ class ProverWorker:
                 consecutive_errors += 1
                 self._set_thread_state(actor_id, "error")
                 self.on_result(theorem_id, theorem, None, str(e))
-                log(f"[Actor {actor_id}] Error: {e}", component="Collection")
+                log(f"[Actor {actor_id}] Error (lean={self.lean_address}:{self.lean_port}): {e}", component="Collection")
                 if consecutive_errors >= max_consecutive_errors:
                     break
         
