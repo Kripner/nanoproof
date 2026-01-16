@@ -151,17 +151,23 @@ class HuggingFaceTokenizer:
         self.tokenizer.save(tokenizer_path)
         print(f"Saved tokenizer to {tokenizer_path}")
 
-# TODO: use special tokens!
 def value_to_token_ids(tokenizer, value: int) -> list[int]:
+    """Convert a value (1-64) to a single bin token ID."""
     assert value >= _MIN_VALUE
     value = min(value, _MAX_VALUE)
-    return tokenizer.encode(str(value))
-    
-def token_ids_to_value(tokenizer, token_ids: list[int]) -> float | None:
-    try:
-        return int(tokenizer.decode(token_ids))
-    except ValueError:
+    bin_token = f"<|bin_{value:02d}|>"
+    return [tokenizer.encode_special(bin_token)]
+
+def token_ids_to_value(tokenizer, token_ids: list[int]) -> int | None:
+    """Convert a bin token ID back to a value (1-64). Returns None if not a valid bin token."""
+    if len(token_ids) != 1:
         return None
+    token_id = token_ids[0]
+    # Check each bin token
+    for i in range(_MIN_VALUE, _MAX_VALUE + 1):
+        if tokenizer.encode_special(f"<|bin_{i:02d}|>") == token_id:
+            return i
+    return None
 
 def get_tokenizer():
     # return HuggingFaceTokenizer.from_pretrained("gpt2")
