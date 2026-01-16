@@ -172,8 +172,7 @@ while True:
 
         print0(f"Step {step:05d} | Validation loss: {val_loss:.6f} | Tactic full accuracy: {tactic_results['full_acc']:.4%} | Tactic first token accuracy: {tactic_results['first_token_acc']:.4%} | Critic argmax MSE: {critic_results['argmax_mse']:.4f} | Critic soft MSE: {critic_results['soft_mse']:.4f}")
 
-        # Create confusion matrix heatmap for wandb
-        confusion_matrix = critic_results["confusion"].tolist()
+        # Create confusion matrix for wandb
         bin_labels = [str(i) for i in range(1, 65)]
         
         wandb_run.log({
@@ -184,11 +183,10 @@ while True:
             "val_critic_argmax_mse": critic_results["argmax_mse"],
             "val_critic_soft_mse": critic_results["soft_mse"],
             "val_critic_samples": critic_results["total_samples"],
-            "val_critic_confusion": wandb.plot.HeatMap(
-                x_labels=bin_labels,
-                y_labels=bin_labels,
-                matrix_values=confusion_matrix,
-                show_text=False,
+            "val_critic_confusion": wandb.plot.confusion_matrix(
+                y_true=critic_results["y_true"],
+                preds=critic_results["y_pred"],
+                class_names=bin_labels,
             ),
         })
 

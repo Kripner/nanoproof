@@ -21,7 +21,8 @@ def eval_critic_errors(model, tokenizer, leantree_batches, max_steps=None):
     Only processes samples where x contains the value_delim_tok.
     
     Returns:
-        confusion: 64x64 confusion matrix (rows=actual, cols=predicted)
+        y_true: list of actual bin values (1-64)
+        y_pred: list of predicted bin values (1-64)
         argmax_mse: MSE using argmax prediction over bin tokens
         soft_mse: MSE using softmax-weighted expected value
         total_samples: number of samples evaluated
@@ -36,9 +37,9 @@ def eval_critic_errors(model, tokenizer, leantree_batches, max_steps=None):
     # Reverse mapping: token_id -> bin_index (0-based)
     token_to_bin_idx = {tok.item(): i for i, tok in enumerate(bin_token_ids)}
     
-    confusion = torch.zeros(_MAX_VALUE, _MAX_VALUE, dtype=torch.int64)
+    y_true = []  # actual bin values (1-64)
+    y_pred = []  # predicted bin values (1-64)
     soft_squared_error_sum = 0.0
-    total_samples = 0
     
     for x, y, _, _ in leantree_batches if max_steps is None else islice(leantree_batches, max_steps):
         has_value = (x == value_delim_tok).any(dim=1)
@@ -61,27 +62,28 @@ def eval_critic_errors(model, tokenizer, leantree_batches, max_steps=None):
         bin_values = torch.arange(1, _MAX_VALUE + 1, dtype=bin_probs.dtype, device=x.device)
         soft_predictions = (bin_probs * bin_values).sum(dim=-1)  # (B,)
         
-        # Update metrics for samples with valid actual bin token
+        # Collect predictions for samples with valid actual bin token
         for i, actual_tok in enumerate(actual_tokens.tolist()):
             if actual_tok in token_to_bin_idx:
                 actual_idx = token_to_bin_idx[actual_tok]
-                confusion[actual_idx, argmax_bin_idx[i].item()] += 1
+                pred_idx = argmax_bin_idx[i].item()
+                y_true.append(actual_idx + 1)  # 1-indexed bin value
+                y_pred.append(pred_idx + 1)    # 1-indexed bin value
                 soft_squared_error_sum += (actual_idx + 1 - soft_predictions[i].item()) ** 2
-                total_samples += 1
     
+    total_samples = len(y_true)
     if total_samples == 0:
-        return {"confusion": confusion, "argmax_mse": float('nan'), "soft_mse": float('nan'), "total_samples": 0}
+        return {"y_true": [], "y_pred": [], "argmax_mse": float('nan'), "soft_mse": float('nan'), "total_samples": 0}
     
-    # Argmax MSE from confusion matrix
-    indices = torch.arange(1, _MAX_VALUE + 1)
-    squared_errors = (indices.unsqueeze(1) - indices.unsqueeze(0)) ** 2
-    argmax_mse = (confusion * squared_errors).sum().item() / total_samples
+    # Argmax MSE
+    argmax_mse = sum((a - p) ** 2 for a, p in zip(y_true, y_pred)) / total_samples
     
     # Soft MSE
     soft_mse = soft_squared_error_sum / total_samples
     
     return {
-        "confusion": confusion,
+        "y_true": y_true,
+        "y_pred": y_pred,
         "argmax_mse": argmax_mse,
         "soft_mse": soft_mse,
         "total_samples": total_samples,
