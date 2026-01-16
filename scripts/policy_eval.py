@@ -124,6 +124,7 @@ def eval_tactic_accuracy(model, tokenizer, leantree_batches, max_steps=None):
     return {
         "full_acc": total_full_correct / total_samples,
         "first_token_acc": total_first_token_correct / total_samples,
+        "total_samples": total_samples,
     }
 
 

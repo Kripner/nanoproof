@@ -180,6 +180,7 @@ while True:
             "val_loss": val_loss,
             "val_full_acc": tactic_results["full_acc"],
             "val_first_token_acc": tactic_results["first_token_acc"],
+            "val_tactic_samples": tactic_results["total_samples"],
             "val_critic_argmax_mse": critic_results["argmax_mse"],
             "val_critic_soft_mse": critic_results["soft_mse"],
             "val_critic_samples": critic_results["total_samples"],
@@ -191,9 +192,6 @@ while True:
         })
 
         model.train()
-
-    # TODO: eval tactic accuracy
-    # TODO: eval value MSE
 
     # evaluate accuracy of the multiple choice tasks (which are quick to run)
     if last_step or (step > 0 and step % sample_every == 0):
@@ -234,11 +232,11 @@ h : ∀ (x : α), P x
 x0 : α := default
 hx0 : P x0
 ⊢ ∃ x, P x
-<|tactic|> """,
+<|tactic|>""",
 
             """p q : Prop
 ⊢ p ∧ q → p
-<|value|> """,
+<|value|>""",
             """α : Type
 P : α → Prop
 inst✝ : Inhabited α
@@ -246,7 +244,7 @@ h : ∀ (x : α), P x
 x0 : α := default
 hx0 : P x0
 ⊢ ∃ x, P x
-<|value|> """,
+<|value|>""",
         ]
         engine = Engine(orig_model, tokenizer) # use orig_model to avoid recompilation
         for prompt in prompts:
@@ -271,6 +269,26 @@ hx0 : P x0
     for micro_step in range(grad_accum_steps):
         train_inputs, train_targets, approx_progress, last_step = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
         progress = max(progress, approx_progress) # only increase progress monotonically
+
+        # # Detokenize and print train_inputs and train_targets for inspection
+        # # We'll decode each input/target sequence in the batch.
+        # tokens_to_decode = train_inputs.detach().cpu().numpy()
+        # targets_to_decode = train_targets.detach().cpu().numpy()
+        # print0("Sample detokenized inputs/targets:")
+        # for i in range(min(3, tokens_to_decode.shape[0])):  # Print up to 3 samples
+        #     input_tokens = tokens_to_decode[i]
+        #     target_tokens = targets_to_decode[i]
+        #     # For display, replace pad tokens with None
+        #     input_str = tokenizer.decode([t for t in input_tokens if t != tokenizer.encode_special("<|pad|>")])
+        #     # For targets, skip ignore indices (-1), pad tokens, and detokenize
+        #     target_str = tokenizer.decode([t for t in target_tokens if t >= 0 and t != tokenizer.encode_special("<|pad|>")])
+        #     print0(f"Input {i} tokens: {input_tokens.tolist()}")
+        #     print0(f"Input {i} detokenized: {input_str!r}")
+        #     print0(f"Target {i} tokens: {target_tokens.tolist()}")
+        #     print0(f"Target {i} detokenized: {target_str!r}")
+        #     print0("-" * 40)
+
+        
         with autocast_ctx:
             loss = model(train_inputs, train_targets)
         train_loss = loss.detach() # for logging
