@@ -170,7 +170,7 @@ while True:
             tactic_results = eval_tactic_accuracy(model, tokenizer, build_val_loader(), max_steps=eval_steps)
             critic_results = eval_critic_errors(model, tokenizer, build_val_loader(), max_steps=eval_steps)
 
-        print0(f"Step {step:05d} | Validation loss: {val_loss:.6f} | Tactic full accuracy: {tactic_results['full_acc']:.4%} | Tactic first token accuracy: {tactic_results['first_token_acc']:.4%} | Critic MSE: {critic_results['mse']:.4f}")
+        print0(f"Step {step:05d} | Validation loss: {val_loss:.6f} | Tactic full accuracy: {tactic_results['full_acc']:.4%} | Tactic first token accuracy: {tactic_results['first_token_acc']:.4%} | Critic argmax MSE: {critic_results['argmax_mse']:.4f} | Critic soft MSE: {critic_results['soft_mse']:.4f}")
 
         # Create confusion matrix heatmap for wandb
         confusion_matrix = critic_results["confusion"].tolist()
@@ -181,9 +181,10 @@ while True:
             "val_loss": val_loss,
             "val_full_acc": tactic_results["full_acc"],
             "val_first_token_acc": tactic_results["first_token_acc"],
-            "val_critic_mse": critic_results["mse"],
+            "val_critic_argmax_mse": critic_results["argmax_mse"],
+            "val_critic_soft_mse": critic_results["soft_mse"],
             "val_critic_samples": critic_results["total_samples"],
-            "val_critic_confusion": wandb.plots.HeatMap(
+            "val_critic_confusion": wandb.plot.HeatMap(
                 x_labels=bin_labels,
                 y_labels=bin_labels,
                 matrix_values=confusion_matrix,

@@ -19,59 +19,72 @@ def eval_critic_errors(model, tokenizer, leantree_batches, max_steps=None):
     
     Returns confusion matrix and MSE for value bin predictions.
     Only processes samples where x contains the value_delim_tok.
+    
+    Returns:
+        confusion: 64x64 confusion matrix (rows=actual, cols=predicted)
+        argmax_mse: MSE using argmax prediction over bin tokens
+        soft_mse: MSE using softmax-weighted expected value
+        total_samples: number of samples evaluated
     """
     value_delim_tok = tokenizer.encode_special("<|value|>")
     
-    # Build mapping from bin token IDs to bin values (1-64)
-    bin_tok_to_value = {
-        tokenizer.encode_special(f"<|bin_{i:02d}|>"): i 
+    # Bin token IDs in order: index i corresponds to bin value (i+1)
+    bin_token_ids = torch.tensor([
+        tokenizer.encode_special(f"<|bin_{i:02d}|>") 
         for i in range(_MIN_VALUE, _MAX_VALUE + 1)
-    }
+    ])
+    # Reverse mapping: token_id -> bin_index (0-based)
+    token_to_bin_idx = {tok.item(): i for i, tok in enumerate(bin_token_ids)}
     
-    # Confusion matrix: rows are actual, columns are predicted (0-indexed for bins 1-64)
     confusion = torch.zeros(_MAX_VALUE, _MAX_VALUE, dtype=torch.int64)
+    soft_squared_error_sum = 0.0
+    total_samples = 0
     
     for x, y, _, _ in leantree_batches if max_steps is None else islice(leantree_batches, max_steps):
-        # Only process samples where input contains value_delim_tok
         has_value = (x == value_delim_tok).any(dim=1)
         if not has_value.any():
             continue
         x, y = x[has_value], y[has_value]
         
         logits = model(x)  # (B, T, V)
-        predictions = torch.argmax(logits, dim=-1)  # (B, T)
         
-        # Find the index of value_delim_tok in each sample (first occurrence)
+        # Find value position and extract logits there
         value_positions = (x == value_delim_tok).int().argmax(dim=1)
         batch_indices = torch.arange(x.shape[0], device=x.device)
-        
-        # Get actual and predicted tokens at value position
         actual_tokens = y[batch_indices, value_positions]
-        predicted_tokens = predictions[batch_indices, value_positions]
+        value_logits = logits[batch_indices, value_positions]  # (B, V)
         
-        # Convert to bin values and update confusion matrix
-        for actual_tok, pred_tok in zip(actual_tokens.tolist(), predicted_tokens.tolist()):
-            if actual_tok in bin_tok_to_value:
-                actual_bin = bin_tok_to_value[actual_tok]
-                pred_bin = bin_tok_to_value.get(pred_tok)
-                if pred_bin is not None:
-                    confusion[actual_bin - 1, pred_bin - 1] += 1
+        # Extract bin logits and compute predictions
+        bin_logits = value_logits[:, bin_token_ids.to(x.device)]  # (B, 64)
+        argmax_bin_idx = bin_logits.argmax(dim=-1)  # (B,) 0-indexed
+        bin_probs = torch.softmax(bin_logits, dim=-1)  # (B, 64)
+        bin_values = torch.arange(1, _MAX_VALUE + 1, dtype=bin_probs.dtype, device=x.device)
+        soft_predictions = (bin_probs * bin_values).sum(dim=-1)  # (B,)
+        
+        # Update metrics for samples with valid actual bin token
+        for i, actual_tok in enumerate(actual_tokens.tolist()):
+            if actual_tok in token_to_bin_idx:
+                actual_idx = token_to_bin_idx[actual_tok]
+                confusion[actual_idx, argmax_bin_idx[i].item()] += 1
+                soft_squared_error_sum += (actual_idx + 1 - soft_predictions[i].item()) ** 2
+                total_samples += 1
     
-    # Calculate MSE from confusion matrix
-    total_samples = confusion.sum().item()
     if total_samples == 0:
-        return {"confusion": confusion, "mse": float('nan'), "total_samples": 0}
+        return {"confusion": confusion, "argmax_mse": float('nan'), "soft_mse": float('nan'), "total_samples": 0}
     
-    # MSE = sum over all (actual - predicted)^2 * count / total_count
-    actual_indices = torch.arange(1, _MAX_VALUE + 1).unsqueeze(1)  # (64, 1)
-    pred_indices = torch.arange(1, _MAX_VALUE + 1).unsqueeze(0)    # (1, 64)
-    squared_errors = (actual_indices - pred_indices) ** 2          # (64, 64)
-    mse = (confusion * squared_errors).sum().item() / total_samples
+    # Argmax MSE from confusion matrix
+    indices = torch.arange(1, _MAX_VALUE + 1)
+    squared_errors = (indices.unsqueeze(1) - indices.unsqueeze(0)) ** 2
+    argmax_mse = (confusion * squared_errors).sum().item() / total_samples
+    
+    # Soft MSE
+    soft_mse = soft_squared_error_sum / total_samples
     
     return {
         "confusion": confusion,
-        "mse": mse,
-        "total_samples": int(total_samples),
+        "argmax_mse": argmax_mse,
+        "soft_mse": soft_mse,
+        "total_samples": total_samples,
     }
 
 
