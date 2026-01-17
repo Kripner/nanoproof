@@ -121,6 +121,18 @@ def eval_tactic_accuracy(model, tokenizer, leantree_batches, max_steps=None):
         batch_indices = torch.arange(logits.shape[0], device=logits.device)
         total_first_token_correct += correct[batch_indices, first_token_indices].sum().item()
 
+        # Print predicted vs correct for each sample
+        # for i in range(x.shape[0]):
+        #     sample_mask = mask[i]
+        #     pred_tokens = predictions[i][sample_mask].tolist()
+        #     correct_tokens = y[i][sample_mask].tolist()
+        #     pred_str = tokenizer.decode(pred_tokens)
+        #     correct_str = tokenizer.decode(correct_tokens)
+        #     is_correct = pred_tokens == correct_tokens
+        #     print(f"[{'OK' if is_correct else 'X'}] Pred: {pred_str!r}")
+        #     print(f"     Correct: {correct_str!r}")
+        #     print()
+
     return {
         "full_acc": total_full_correct / total_samples,
         "first_token_acc": total_first_token_correct / total_samples,
@@ -135,7 +147,7 @@ def main():
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
     
     print0("Loading model...")
-    model, tokenizer, meta = load_model("sft", device, phase="eval", model_tag="d26")
+    model, tokenizer, meta = load_model("sft", device, phase="eval", model_tag="d26", step=903)
     model.eval()
 
     print0(f"Model loaded. Config: {meta.get('model_config', 'N/A')}")

@@ -29,6 +29,8 @@ from nanoproof.data.leantree_dataloader import sft_data_generator
 from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
 
 # TODO: if training policy+critic at once does not work, try training just policy first, then critic+policy
+#  .. or maybe there's some other problem since First Token Accuracy is quite high? - but that's kind of easy since most tactics are rw
+#  .. or maybe the eval script is wrong? - try it with and without value samples in the dataloader
 
 # -----------------------------------------------------------------------------
 # SFT Hyperparameters
@@ -38,12 +40,13 @@ seed = 0
 source = "mid" # base|mid , which checkpoint to load the model from (base model or midtrained model)
 model_tag = "d26" # model tag to load the model from (base model or midtrained model)
 step = None # step to load the model from (base model or midtrained model)
+resume_from = None # step to resume from (None = don't resume, int = specific step, "latest" = auto-detect latest)
 # compute/precision
 device_type = "" # cuda|cpu|mps (empty => autodetect)
 dtype = "bfloat16"
 device_batch_size = 8 # (maybe) max to avoid OOM (on A100 40GB)
 # optimization
-num_epochs = 100
+num_epochs = 5
 num_iterations = -1 # override number of iterations (-1 = disable, use num_epochs to derive it)
 target_examples_per_step = 512
 unembedding_lr = 0.004
@@ -75,7 +78,16 @@ use_dummy_wandb = run == "dummy" or not master_process
 wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-sft", name=run, config=user_config, save_code=True)
 
 # Load the model and tokenizer
-model, tokenizer, meta = load_model(source, device, phase="train", model_tag=model_tag, step=step)
+if resume_from is not None:
+    # Resume from an SFT checkpoint
+    resume_step = resume_from if resume_from != "latest" else None
+    model, tokenizer, meta = load_model("sft", device, phase="train", model_tag=model_tag, step=resume_step)
+    start_step = meta.get("step", 0)
+    print0(f"Resuming from SFT checkpoint at step {start_step}")
+else:
+    # Start fresh from base/mid checkpoint
+    model, tokenizer, meta = load_model(source, device, phase="train", model_tag=model_tag, step=step)
+    start_step = 0
 orig_model = model # original, uncompiled model
 # model = torch.compile(model, dynamic=True) # doesn't work super well because of variable lengths of inputs
 engine = Engine(model, tokenizer) # will be used for inline model evaluation only
@@ -142,7 +154,7 @@ def get_lr_multiplier(progress):
 
 # Go!
 progress = 0 # will go from 0 to 1 over the course of the epoch
-step = 0
+step = start_step
 epoch = 0
 x, y, approx_progress, last_step = next(train_loader) # prefetch the very first batch of data
 while True:
