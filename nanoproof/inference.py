@@ -68,15 +68,6 @@ class TacticModel:
         self.rng = torch.Generator(device=self.network.get_device())
         self.rng.manual_seed(0)
 
-    def tactic_and_value(self, state: State) -> ValueOrError[tuple[list[str], float]]:
-        tactics = self.sample_tactic(state)
-        if not tactics.is_success():
-            return ValueOrError.from_error(tactics.error)
-        value = self.predict_value(state)
-        if not value.is_success():
-            return ValueOrError.from_error(value.error)
-        return ValueOrError.from_success((tactics.value, value.value))
-
     def sample_tactic(self, state: State) -> ValueOrError[list[str]]:
         assert len(state) == 1, \
             f"expected single branch in state when generating tactic, got {len(state)} - choose one goal first"
@@ -204,8 +195,6 @@ class TacticModel:
         bin_values = torch.arange(_MIN_VALUE, _MAX_VALUE + 1, dtype=bin_probs.dtype, device=device)
         values = (bin_probs * bin_values).sum(dim=-1)  # (B,)
 
-        # Convert to MCTS value scale (negative proof depth)
-        # and handle too-long states with a pessimistic default
         results = []
         for idx, value in enumerate(values.tolist()):
             if idx in too_long_indices:
@@ -220,17 +209,78 @@ class TacticModel:
         pass
 
     @classmethod
-    def create(cls, num_samples: int = 6) -> Self:
+    def create(cls, num_samples: int = 6, model_tag: str = "d26", step: int | None = None) -> Self:
         # Lazy imports - only load heavy dependencies when actually creating the model
         
         source = "sft"  # which checkpoint to load the model from
-        model_tag = "d26"  # model tag to load the model from
         device = torch.device("cuda")
-        step = 903  # TODO
 
         model, tokenizer, _ = load_model(source, device, phase="eval", model_tag=model_tag, step=step)
         engine = Engine(model, tokenizer)
         return cls(model, tokenizer, engine, num_samples=num_samples)
+
+
+class RequestQueue:
+    """
+    Manages a queue of pending requests for batched processing.
+    
+    This class handles the queue state (pending items, timing) but does not
+    own synchronization primitives - those are managed by the parent BlockingTacticModel.
+    """
+    
+    def __init__(self, name: str, num_samples_for_estimation: int):
+        """
+        Args:
+            name: Queue name for logging
+            num_samples_for_estimation: Number of samples used for token estimation
+                (e.g., 6 for tactics, 1 for values)
+        """
+        self.name = name
+        self.num_samples = num_samples_for_estimation
+        self._pending: list[tuple[str, threading.Event, list]] = []
+        self._first_request_time: float | None = None
+        self._total_batches = 0
+    
+    def add(self, entries: list[tuple[str, threading.Event, list]]):
+        """Add entries to the pending queue. Sets first_request_time if queue was empty."""
+        if self._first_request_time is None and entries:
+            self._first_request_time = time.time()
+        self._pending.extend(entries)
+    
+    def take_batch(self) -> list[tuple[str, threading.Event, list]]:
+        """Remove and return all pending items. Increments batch counter."""
+        batch = self._pending[:]
+        self._pending = []
+        self._first_request_time = None
+        self._total_batches += 1
+        return batch
+    
+    def pending_tokens(self) -> int:
+        """Estimate total tokens in pending queue (assumes padding to max length)."""
+        if not self._pending:
+            return 0
+        # Estimate tokens as chars/4 (rough average for code/math text)
+        max_len = max(len(item[0]) // 4 + 1 for item in self._pending)
+        # Memory scales with max_len * batch_size * num_samples (due to padding + sample expansion)
+        return max_len * len(self._pending) * self.num_samples
+    
+    def should_process(self, timeout_seconds: float, max_batch_tokens: int) -> bool:
+        """Check if batch should be processed based on timeout or token count."""
+        if not self._pending or self._first_request_time is None:
+            return False
+        elapsed = time.time() - self._first_request_time
+        return elapsed >= timeout_seconds or self.pending_tokens() >= max_batch_tokens
+    
+    def has_pending(self) -> bool:
+        return len(self._pending) > 0
+    
+    def shutdown_all(self):
+        """Signal shutdown to all pending requests."""
+        for _, event, slot in self._pending:
+            slot.append(ValueOrError.from_error("Model shutdown"))
+            event.set()
+        self._pending = []
+        self._first_request_time = None
 
 
 class BlockingTacticModel:
@@ -240,6 +290,8 @@ class BlockingTacticModel:
     Batches are processed when either:
     1. pending items exceed max_batch_tokens, or
     2. timeout_seconds has elapsed since the first pending request
+    
+    Supports both tactic generation and value prediction through separate request queues.
     """
 
     def __init__(self, inner_model: TacticModel, timeout_seconds: float, max_batch_tokens: int):
@@ -247,14 +299,16 @@ class BlockingTacticModel:
         self.timeout_seconds = timeout_seconds
         self.max_batch_tokens = max_batch_tokens
 
+        # Shared synchronization primitives
         self._lock = threading.Lock()
         self._batch_ready = threading.Condition(self._lock)
-        self._pending: list[tuple[str, threading.Event, list]] = []
-        self._first_request_time: float | None = None
         self._batch_in_progress = False
         self._shutdown = False
         self._paused = False
-        self._total_batches = 0
+
+        # Separate queues for tactics and values
+        self._tactic_queue = RequestQueue("tactics", self.inner_model.num_samples)
+        self._value_queue = RequestQueue("values", 1)  # Value prediction uses num_samples=1
 
     @property
     def network(self):
@@ -264,10 +318,8 @@ class BlockingTacticModel:
         """Signal shutdown to unblock all waiting threads."""
         with self._lock:
             self._shutdown = True
-            for _, event, slot in self._pending:
-                slot.append(ValueOrError.from_error("Model shutdown"))
-                event.set()
-            self._pending = []
+            self._tactic_queue.shutdown_all()
+            self._value_queue.shutdown_all()
             self._batch_ready.notify_all()
     
     def pause(self):
@@ -293,10 +345,60 @@ class BlockingTacticModel:
         assert len(state) == 1
         return self.sample_tactic_from_str(str(state[0].state).strip())
 
+    def sample_tactic_from_str(self, state_str: str) -> ValueOrError[list[str]]:
+        """Sample tactics for a single state string."""
+        results = self.sample_tactic_from_str_batch([state_str])
+        return results[0]
+
     def sample_tactic_from_str_batch(self, state_strs: list[str]) -> list[ValueOrError[list[str]]]:
         """
         Thread-safe batch tactic generation. All states are queued together
         and will be processed in the same or consecutive GPU batches.
+        """
+        return self._submit_batch(
+            state_strs,
+            self._tactic_queue,
+            self.inner_model.sample_tactic_from_str_batch
+        )
+
+    def predict_value(self, state: State) -> ValueOrError[float]:
+        """Thread-safe value prediction that batches calls from multiple threads."""
+        assert len(state) == 1, \
+            f"expected single branch in state when predicting value, got {len(state)} - choose one goal first"
+        return self.predict_value_from_str(str(state[0].state).strip())
+
+    def predict_value_from_str(self, state_str: str) -> ValueOrError[float]:
+        """Predict value for a single state string."""
+        results = self.predict_value_from_str_batch([state_str])
+        return results[0]
+
+    def predict_value_from_str_batch(self, state_strs: list[str]) -> list[ValueOrError[float]]:
+        """
+        Thread-safe batch value prediction. All states are queued together
+        and will be processed in the same or consecutive GPU batches.
+        """
+        return self._submit_batch(
+            state_strs,
+            self._value_queue,
+            self.inner_model.predict_value_from_str_batch
+        )
+
+    def _submit_batch(
+        self,
+        state_strs: list[str],
+        queue: RequestQueue,
+        process_fn
+    ) -> list:
+        """
+        Submit a batch of requests to the specified queue and wait for results.
+        
+        Args:
+            state_strs: List of state strings to process
+            queue: The RequestQueue to submit to
+            process_fn: Function to call for batch processing (from inner_model)
+        
+        Returns:
+            List of results (ValueOrError objects)
         """
         if not state_strs:
             return []
@@ -315,84 +417,68 @@ class BlockingTacticModel:
                 return [ValueOrError.from_error("Model paused for training") for _ in state_strs]
 
             # Add all to pending queue
-            for entry in entries:
-                self._pending.append(entry)
-            
-            if self._first_request_time is None:
-                self._first_request_time = time.time()
+            queue.add(entries)
 
             # Trigger batch if we have enough tokens queued
-            if not self._batch_in_progress and self._pending_tokens() >= self.max_batch_tokens:
-                self._process_batch_locked()
+            if not self._batch_in_progress and queue.should_process(self.timeout_seconds, self.max_batch_tokens):
+                self._process_queue_locked(queue, process_fn)
 
         # Wait for all results
         for _, event, _ in entries:
-            self._wait_for_result(event)
+            self._wait_for_result(event, queue, process_fn)
 
         return [slot[0] if slot else ValueOrError.from_error("No result") for _, _, slot in entries]
 
-    def _pending_tokens(self) -> int:
-        """Estimate total tokens in pending queue (assumes padding to max length)."""
-        if not self._pending:
-            return 0
-        # Estimate tokens as chars/4 (rough average for code/math text)
-        max_len = max(len(item[0]) // 4 + 1 for item in self._pending)
-        # Memory scales with max_len * batch_size * num_samples (due to padding + sample expansion)
-        return max_len * len(self._pending) * self.inner_model.num_samples
-
-    def _wait_for_result(self, event: threading.Event):
+    def _wait_for_result(self, event: threading.Event, queue: RequestQueue, process_fn):
         """Wait for a result, triggering batch processing if needed."""
         while not event.is_set():
             with self._lock:
                 if self._shutdown or self._paused or event.is_set():
                     return
                 
-                # Check if we should trigger processing
-                if self._first_request_time is not None:
-                    elapsed = time.time() - self._first_request_time
-                    should_trigger = elapsed >= self.timeout_seconds or self._pending_tokens() >= self.max_batch_tokens
-                    if should_trigger and not self._batch_in_progress and self._pending:
-                        self._process_batch_locked()
+                # Check if we should trigger processing for any queue
+                if not self._batch_in_progress:
+                    # Check tactic queue
+                    if self._tactic_queue.should_process(self.timeout_seconds, self.max_batch_tokens):
+                        self._process_queue_locked(
+                            self._tactic_queue,
+                            self.inner_model.sample_tactic_from_str_batch
+                        )
+                        continue
+                    # Check value queue
+                    if self._value_queue.should_process(self.timeout_seconds, self.max_batch_tokens):
+                        self._process_queue_locked(
+                            self._value_queue,
+                            self.inner_model.predict_value_from_str_batch
+                        )
                         continue
 
                 self._batch_ready.wait(timeout=0.1)
 
-    def _process_batch_locked(self):
-        """Process pending batch. Must be called with lock held."""
-        if not self._pending or self._batch_in_progress:
+    def _process_queue_locked(self, queue: RequestQueue, process_fn):
+        """Process pending batch from the specified queue. Must be called with lock held."""
+        if not queue.has_pending() or self._batch_in_progress:
             return
 
         self._batch_in_progress = True
-        self._total_batches += 1
-        batch_num = self._total_batches
+        batch_num = queue._total_batches + 1  # Will be incremented by take_batch
 
         # Take all pending items
-        batch = self._pending[:]
-        approx_tokens = self._pending_tokens()
-        self._pending = []
-        self._first_request_time = None
-
-        # log(f"Batch #{batch_num}: processing {len(batch)} requests", component="BlockingTacticModel")
+        batch = queue.take_batch()
 
         # Release lock during inference
         self._lock.release()
         try:
             state_strs = [item[0] for item in batch]
-            start = time.time()
-            results = self.inner_model.sample_tactic_from_str_batch(state_strs)
-            elapsed = time.time() - start
-            
-            # log(f"Batch #{batch_num}: processed {len(batch)} samples (~{approx_tokens} tokens), took {elapsed:.1f}s", component="BlockingTacticModel")
-            # if elapsed > 2.0:
-            #     log(f"Batch #{batch_num}: took {elapsed:.1f}s", component="BlockingTacticModel")
+            results = process_fn(state_strs)
 
             # Distribute results
             for i, (_, event, slot) in enumerate(batch):
-                slot.append(ValueOrError.from_success(results[i]))
+                slot.append(results[i])
                 event.set()
                 
         except Exception as e:
-            log(f"Batch #{batch_num}: FAILED - {e}", component="BlockingTacticModel")
+            log(f"Batch #{batch_num} ({queue.name}): FAILED - {e}", component="BlockingTacticModel")
             for _, event, slot in batch:
                 slot.append(ValueOrError.from_error(str(e)))
                 event.set()
@@ -437,33 +523,49 @@ class RemoteTacticModel:
         self._error_log_interval = 5.0  # Only log errors every N seconds
         self._lock = threading.Lock()
     
-    def sample_tactic(self, state) -> list[str]:
+    def sample_tactic(self, state) -> ValueOrError[list[str]]:
         """Sample tactics for a single state by calling the remote inference server."""
         assert len(state) == 1, \
             f"expected single branch in state, got {len(state)}"
-        
         state_str = str(state[0].state).strip()
+        return self.sample_tactic_from_str(state_str)
+
+    def sample_tactic_from_str(self, state_str: str) -> ValueOrError[list[str]]:
+        """Sample tactics for a single state string."""
+        results = self.sample_tactic_from_str_batch([state_str])
+        return results[0]
+
+    def sample_tactic_from_str_batch(self, state_strs: list[str]) -> list[ValueOrError[list[str]]]:
+        """Sample tactics for multiple state strings by calling the remote inference server."""
+        if not state_strs:
+            return []
         
         try:
             response = self._session.post(
                 f"http://{self.server_address}/generate",
-                json={"states": [state_str]},
+                json={"states": state_strs},
                 timeout=self.timeout
             )
             response.raise_for_status()
-            result = response.json()
+            data = response.json()
             
             # Reset failure counter on success
             with self._lock:
                 self._consecutive_failures = 0
             
-            return result["tactics"][0]
+            results = []
+            for item in data["results"]:
+                if "error" in item:
+                    results.append(ValueOrError.from_error(item["error"]))
+                else:
+                    results.append(ValueOrError.from_success(item["tactics"]))
+            return results
         except http_requests.exceptions.Timeout:
             self._record_failure(f"Timeout calling inference server at {self.server_address} (timeout={self.timeout})")
-            return []
+            return [ValueOrError.from_error("Timeout") for _ in state_strs]
         except http_requests.exceptions.RequestException as e:
             self._record_failure(f"Error calling inference server at {self.server_address}: {e}")
-            return []
+            return [ValueOrError.from_error(str(e)) for _ in state_strs]
     
     def _record_failure(self, message: str):
         """Record a failure and potentially raise if too many consecutive failures."""
@@ -483,27 +585,48 @@ class RemoteTacticModel:
                     f"Inference server appears disconnected after {failures} consecutive failures"
                 )
 
-    def predict_value(self, state_str: str) -> float:
-        """Predict value by calling the remote inference server."""
+    def predict_value(self, state: State) -> ValueOrError[float]:
+        """Predict value for a single state by calling the remote inference server."""
+        assert len(state) == 1, \
+            f"expected single branch in state, got {len(state)}"
+        state_str = str(state[0].state).strip()
+        return self.predict_value_from_str(state_str)
+
+    def predict_value_from_str(self, state_str: str) -> ValueOrError[float]:
+        """Predict value for a single state string."""
+        results = self.predict_value_from_str_batch([state_str])
+        return results[0]
+
+    def predict_value_from_str_batch(self, state_strs: list[str]) -> list[ValueOrError[float]]:
+        """Predict values for multiple state strings by calling the remote inference server."""
+        if not state_strs:
+            return []
+        
         try:
             response = self._session.post(
                 f"http://{self.server_address}/predict_value",
-                json={"states": [state_str]},
+                json={"states": state_strs},
                 timeout=self.timeout
             )
             response.raise_for_status()
-            result = response.json()
+            data = response.json()
             
             with self._lock:
                 self._consecutive_failures = 0
             
-            return result["values"][0]
+            results = []
+            for item in data["results"]:
+                if "error" in item:
+                    results.append(ValueOrError.from_error(item["error"]))
+                else:
+                    results.append(ValueOrError.from_success(float(item["value"])))
+            return results
         except http_requests.exceptions.Timeout:
             self._record_failure(f"Timeout calling inference server for value prediction")
-            return -float(_MAX_VALUE)  # Pessimistic default
+            return [ValueOrError.from_error("Timeout") for _ in state_strs]
         except http_requests.exceptions.RequestException as e:
             self._record_failure(f"Error calling inference server for value prediction: {e}")
-            return -float(_MAX_VALUE)  # Pessimistic default
+            return [ValueOrError.from_error(str(e)) for _ in state_strs]
     
     def shutdown(self):
         """No-op, exists for API compatibility."""
@@ -532,20 +655,29 @@ def create_blocking_model_app(model: BlockingTacticModel):
         data = request.get_json()
         states = data.get("states", [])
         if not states:
-            return jsonify({"tactics": []})
+            return jsonify({"results": []})
         # Submit all states at once - they'll be batched together
         results = model.sample_tactic_from_str_batch(states)
-        tactics = [r.value if r.is_success() else [] for r in results]
-        return jsonify({"tactics": tactics})
+        return jsonify({
+            "results": [
+                {"tactics": r.value} if r.is_success() else {"error": r.error}
+                for r in results
+            ]
+        })
 
     @app.route("/predict_value", methods=["POST"])
     def predict_value():
         data = request.get_json()
         states = data.get("states", [])
         if not states:
-            return jsonify({"values": []})
-        values = model.predict_value_batch(states)
-        return jsonify({"values": values})
+            return jsonify({"results": []})
+        results = model.predict_value_from_str_batch(states)
+        return jsonify({
+            "results": [
+                {"value": r.value} if r.is_success() else {"error": r.error}
+                for r in results
+            ]
+        })
     
     return app
 

@@ -374,7 +374,7 @@ def main():
     device_type = autodetect_device_type()
     compute_init(device_type)
 
-    tactic_model = TacticModel.create()
+    tactic_model = TacticModel.create(model_tag="d32", step=4515)
     minif2f_theorems = minif2f.list_theorems(split="Valid")
     leanworkbook_theorems = leanworkbook.list_theorems(split="val")
     if args.max_theorems:

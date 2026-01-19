@@ -32,7 +32,7 @@ import requests
 from flask import Flask, request as flask_request, jsonify
 
 from nanoproof.search import Node, extract_transitions
-from nanoproof.experience_collection import TheoremsSampler
+from nanoproof.experience_collection import TheoremsSampler, ReplayBuffer
 from nanoproof.cli import log, get_monitor
 
 
@@ -145,15 +145,22 @@ class InferenceRouter:
         self._next_idx = 0
         self._lock = threading.Lock()
     
-    def forward_request(self, states: list[str]) -> list[list[str]]:
-        """Forward inference request to next backend server."""
-        if not states:
-            return []
-        
+    def _get_next_endpoint(self) -> str:
+        """Get next endpoint in round-robin fashion."""
         with self._lock:
             idx = self._next_idx
             self._next_idx = (self._next_idx + 1) % len(self.endpoints)
-            endpoint = self.endpoints[idx]
+            return self.endpoints[idx]
+    
+    def forward_generate(self, states: list[str]) -> list[dict]:
+        """Forward tactic generation request to next backend server.
+        
+        Returns list of dicts, each containing either {"tactics": [...]} or {"error": "..."}.
+        """
+        if not states:
+            return []
+        
+        endpoint = self._get_next_endpoint()
         
         try:
             response = requests.post(
@@ -162,10 +169,32 @@ class InferenceRouter:
                 timeout=self.timeout
             )
             response.raise_for_status()
-            return response.json().get("tactics", [])
+            return response.json().get("results", [])
         except Exception as e:
             log(f"Inference to {endpoint} failed: {e}", component="Coordinator")
-            return [[] for _ in states]
+            return [{"error": str(e)} for _ in states]
+
+    def forward_predict_value(self, states: list[str]) -> list[dict]:
+        """Forward value prediction request to next backend server.
+        
+        Returns list of dicts, each containing either {"value": ...} or {"error": "..."}.
+        """
+        if not states:
+            return []
+        
+        endpoint = self._get_next_endpoint()
+        
+        try:
+            response = requests.post(
+                f"{endpoint}/predict_value",
+                json={"states": states},
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return response.json().get("results", [])
+        except Exception as e:
+            log(f"Value prediction to {endpoint} failed: {e}", component="Coordinator")
+            return [{"error": str(e)} for _ in states]
 
 
 # -----------------------------------------------------------------------------
@@ -192,11 +221,21 @@ def create_coordinator_app(registry: ProverRegistry, router: InferenceRouter, di
     def generate():
         """Proxy inference request to backend servers."""
         if _coordinator_shutdown.is_set():
-            return jsonify({"tactics": [], "error": "shutting_down"}), 503
+            return jsonify({"results": [{"error": "shutting_down"}]}), 503
         data = flask_request.get_json()
         states = data.get("states", [])
-        tactics = router.forward_request(states)
-        return jsonify({"tactics": tactics})
+        results = router.forward_generate(states)
+        return jsonify({"results": results})
+
+    @app.route("/predict_value", methods=["POST"])
+    def predict_value():
+        """Proxy value prediction request to backend servers."""
+        if _coordinator_shutdown.is_set():
+            return jsonify({"results": [{"error": "shutting_down"}]}), 503
+        data = flask_request.get_json()
+        states = data.get("states", [])
+        results = router.forward_predict_value(states)
+        return jsonify({"results": results})
     
     @app.route("/get_theorem", methods=["GET"])
     def get_theorem():
@@ -369,7 +408,7 @@ def distributed_collect(
     sampler: TheoremsSampler,
     target_transitions: int,
     poll_interval: float,
-    replay_buffer,  # ReplayBuffer
+    replay_buffer: ReplayBuffer,
     no_progress_timeout: float = 300.0,  # 5 minute timeout if no progress
 ) -> int:
     """
@@ -465,7 +504,7 @@ def distributed_collect(
             
             new_transitions = extract_new_transitions()
             if new_transitions:
-                replay_buffer.local_buffer.extend(new_transitions)
+                replay_buffer.add_transitions(new_transitions)
                 collected += len(new_transitions)
                 
                 if monitor:

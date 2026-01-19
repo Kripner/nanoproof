@@ -53,7 +53,7 @@ if MODE == "raw_engine":
     predict_value = predict_value_
 
 elif MODE == "tactic_model":
-    tactic_model = TacticModel.create()
+    tactic_model = TacticModel.create(model_tag="d26", step=903)
 
     def generate_(inp_) -> list[str]:
         tactics = tactic_model.sample_tactic_from_str(inp_.strip())

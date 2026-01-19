@@ -39,6 +39,8 @@ from scripts.prover_eval import eval_success_rate
 # RL Hyperparameters
 run = "dummy"  # wandb run name default ("dummy" is special - we won't log to wandb)
 seed = 0
+model_tag = "d26"
+model_step = 903
 # compute/precision
 device_type = ""  # cuda|cpu|mps (empty => autodetect)
 dtype = "bfloat16"
@@ -120,7 +122,7 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-r
 # In distributed mode, we use BlockingTacticModel for inference servers (started later)
 # In local mode, we use BlockingTacticModel for parallel actors
 log(f"Distributed mode: {distributed}", component="Config")
-inner_tactic_model = TacticModel.create(num_samples=num_sampled_tactics)
+inner_tactic_model = TacticModel.create(num_samples=num_sampled_tactics, model_tag=model_tag, step=model_step)
 if distributed:
     # In distributed mode, we don't need BlockingTacticModel here - 
     # inference servers are started later with their own BlockingTacticModel
@@ -318,9 +320,10 @@ while True:
             timer.end("collect")
             flush()  # Free memory from collection before training
             replay_buffer.synchronize()
-            rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
-            with open(os.path.join(output_dir, f"replay_buffer_{step:05d}.json"), "w") as f:
-                json.dump(replay_buffer.buffer, f)
+            if master_process:
+                rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
+                with open(os.path.join(output_dir, f"replay_buffer_{step:05d}.json"), "w") as f:
+                    json.dump(replay_buffer.buffer, f)
 
     if step % eval_every == 0 and step >= eval_start:
         timer.start("eval")

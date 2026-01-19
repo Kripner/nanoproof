@@ -85,7 +85,7 @@ class Node:
     children: dict[Action, Self] | None = None
 
     # Not used in search, but used as a regression target in RL.
-    value_target: float = 0
+    value_target: float | None = None
 
     def expanded(self) -> bool:
         return self.children is not None
@@ -210,6 +210,24 @@ class MockProofBranch:
         return self.state
 
 
+def compute_value_target(node: Node) -> float:
+    """Computes the actual value for a node, to be used as a target in learning."""
+    assert node.is_solved, f"Node is not solved in compute_value_target (is root={node.action is None}, is terminal={node.is_terminal}, to_play={node.to_play})"
+    if node.is_terminal:
+        node.value_target = 0
+        return 0
+    elif node.to_play == Player.OR:
+        max_child_value = max(compute_value_target(child) for child in node.children.values() if child.is_solved)
+        value = -1 + max_child_value
+        node.value_target = value
+        return value
+    elif node.to_play == Player.AND:
+        value = min(compute_value_target(child) for child in node.children.values())
+        node.value_target = value
+        return value
+    else:
+        raise ValueError(f"Unknown to_play: {node.to_play}")
+
 def extract_transitions(node: Node) -> list[tuple[str, str, float]]:
     """
     Extract (context, tactic, value_target) transitions from a solved proof tree.
@@ -223,7 +241,6 @@ def extract_transitions(node: Node) -> list[tuple[str, str, float]]:
     transitions = []
     _extract_transitions_recursive(node, transitions)
     return transitions
-
 
 def _extract_transitions_recursive(node: Node, transitions: list):
     """Recursively extract transitions from solved paths."""
@@ -259,7 +276,6 @@ def _extract_transitions_recursive(node: Node, transitions: list):
 
 class Game:
     """A single episode of interaction with the environment."""
-
     def __init__(self, theorem: str, num_simulations: int | None = None):
         self.theorem = theorem
         # Number of simulations to run.
@@ -302,11 +318,16 @@ def run_mcts(config: Config, game: Game, model: "TacticModel | BlockingTacticMod
             search_path.append(node)
 
         assert node.state is not None
-        tactics_and_value_result = model.tactic_and_value(node.state)
-        if not tactics_and_value_result.is_success():
-            raise RuntimeError(f"Tactic and value generation failed: {tactics_and_value_result.error}")
-        tactics, value = tactics_and_value_result.value
+        tactics = model.sample_tactic(node.state)
+        if not tactics.is_success():
+            raise RuntimeError(f"Tactic generation failed: {tactics.error}")
+        tactics = tactics.value
         tactic_logprobs = [1.0] * len(tactics)  # TODO (!): use the actual action logprobs
+
+        value = model.predict_value(node.state)
+        if not value.is_success():
+            raise RuntimeError(f"Value prediction failed: {value.error}")
+        value = -value.value  # convert to MCTS value scale (negative proof depth)
 
         expand_node(node, tactics, tactic_logprobs, config.prior_temperature)
 

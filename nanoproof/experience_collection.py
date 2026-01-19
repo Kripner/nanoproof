@@ -9,13 +9,15 @@ import asyncio
 import random
 import threading
 import time
+from typing import Callable, Optional
+import traceback
 
 import torch
 import torch.distributed as dist
 
 from leantree.repl_adapter.server import LeanClient
 from nanoproof.common import get_dist_info
-from nanoproof.search import Node, Player, Config, Game, run_mcts, extract_transitions
+from nanoproof.search import Node, Player, Config, Game, run_mcts, extract_transitions, compute_value_target
 from nanoproof.inference import BlockingTacticModel, TacticModel
 from nanoproof.cli import get_monitor, log
 from nanoproof.data.leanworkbook import list_theorems
@@ -50,6 +52,15 @@ class ReplayBuffer:
         self.rng = random.Random(seed)
         self._lock = threading.Lock()  # Thread-safe access to local_buffer
 
+    def add_transitions(self, transitions: list[tuple[str, str, float]]):
+        with self._lock:
+            log(f"Adding {len(transitions)} transitions to replay buffer:", "\n".join(f"  {context} {tactic} {value_target}" for context, tactic, value_target in transitions), component="Collection")
+            for context, tactic, value_target in transitions:
+                assert len(context) != 0, f"Empty context in transition: tactic={tactic}, value_target={value_target}"
+                assert len(tactic) != 0, f"Empty tactic in transition: context={context}, value_target={value_target}"
+                assert value_target is not None, f"None value_target in transition: context={context}, tactic={tactic}"
+            self.local_buffer.extend(transitions)
+
     def synchronize(self):
         """Synchronize local buffers across all DDP ranks."""
         ddp, _, _, world_size = get_dist_info()
@@ -67,9 +78,6 @@ class ReplayBuffer:
 
     def sample_transition(self) -> tuple[str, str, float]:
         return self.rng.choice(self.buffer)
-
-
-from typing import Callable, Optional
 
 
 class ProverWorker:
@@ -222,6 +230,7 @@ class ProverWorker:
                 self._set_thread_state(actor_id, "error")
                 self.on_result(theorem_id, theorem, None, str(e))
                 log(f"[Actor {actor_id}] Error (lean={self.lean_address}:{self.lean_port}): {e}", component="Collection")
+                traceback.print_exc()
                 if consecutive_errors >= max_consecutive_errors:
                     break
         
@@ -262,8 +271,9 @@ class ProverWorker:
                 self.config, game, self.tactic_model,
                 expansion_callback=on_expansion,
             )
+            if game.root.is_solved:
+                compute_value_target(game.root)
             return game
-
 
 @torch.no_grad()
 def run_actor(
@@ -305,8 +315,7 @@ def run_actor(
             return
         # Extract transitions and add to buffer
         transitions = extract_transitions(game.root)
-        with replay_buffer._lock:
-            replay_buffer.local_buffer.extend(transitions)
+        replay_buffer.add_transitions(transitions)
         # Update monitor
         monitor = get_monitor()
         if monitor is not None:
