@@ -227,6 +227,9 @@ class ProverWorker:
                     pass
             except Exception as e:
                 consecutive_errors += 1
+                if self._paused and "Model paused for training" in str(e):
+                    self._set_thread_state(actor_id, "idle")
+                    continue
                 self._set_thread_state(actor_id, "error")
                 self.on_result(theorem_id, theorem, None, str(e))
                 log(f"[Actor {actor_id}] Error (lean={self.lean_address}:{self.lean_port}): {e}", component="Collection")

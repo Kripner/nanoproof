@@ -22,15 +22,12 @@ import socket
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Optional, TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from nanoproof.search import Game
+from typing import Optional
 
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify
 
-from nanoproof.search import Config
+from nanoproof.search import Config, Game
 from nanoproof.experience_collection import ProverWorker
 from nanoproof.inference import RemoteTacticModel
 
@@ -116,6 +113,7 @@ def create_remote_prover_worker(
         """Submit proof result to coordinator."""
         # Only include proof_tree if actually solved
         is_solved = game and game.root and game.root.is_solved
+        print(game.root.pp_tree())
         result = {
             "id": theorem_id,
             "theorem": theorem,

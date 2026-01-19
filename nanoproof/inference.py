@@ -402,19 +402,15 @@ class BlockingTacticModel:
         """
         if not state_strs:
             return []
-        if self._shutdown:
-            return [ValueOrError.from_error("Model shutdown") for _ in state_strs]
-        if self._paused:
-            return [ValueOrError.from_error("Model paused for training") for _ in state_strs]
-
-        # Create events and slots for all states
-        entries = [(s, threading.Event(), []) for s in state_strs]
 
         with self._lock:
             if self._shutdown:
                 return [ValueOrError.from_error("Model shutdown") for _ in state_strs]
             if self._paused:
                 return [ValueOrError.from_error("Model paused for training") for _ in state_strs]
+
+            # Create events and slots for all states
+            entries = [(s, threading.Event(), []) for s in state_strs]
 
             # Add all to pending queue
             queue.add(entries)
@@ -426,6 +422,12 @@ class BlockingTacticModel:
         # Wait for all results
         for _, event, _ in entries:
             self._wait_for_result(event, queue, process_fn)
+
+        # If we shutdown/paused, _wait_for_result returns early. Here we return nicer messages instead of "No result".
+        if self._shutdown:
+            return [ValueOrError.from_error("Model shutdown") for _ in state_strs]
+        if self._paused:
+            return [ValueOrError.from_error("Model paused for training") for _ in state_strs]
 
         return [slot[0] if slot else ValueOrError.from_error("No result") for _, _, slot in entries]
 
