@@ -33,7 +33,7 @@ from flask import Flask, request as flask_request, jsonify
 
 from nanoproof.search import Node, extract_transitions
 from nanoproof.experience_collection import TheoremsSampler, ReplayBuffer
-from nanoproof.cli import log, get_monitor
+from nanoproof.cli import log, get_monitor, log_tactic
 
 
 # -----------------------------------------------------------------------------
@@ -380,6 +380,7 @@ def poll_all_provers(prover_addresses: list[str], monitor) -> int:
     """Poll all prover servers for their status and update the monitor.
     
     Returns total expansions across all provers.
+    Also collects tactics and writes them to tactics.txt.
     """
     total_expansions = 0
     
@@ -389,6 +390,16 @@ def poll_all_provers(prover_addresses: list[str], monitor) -> int:
             response.raise_for_status()
             data = response.json()
             total_expansions += data.get("expansions", 0)
+            
+            # Collect tactics from this prover and log them locally
+            tactics = data.get("tactics", [])
+            for t in tactics:
+                log_tactic(t.get("state", ""), t.get("tactic", ""), t.get("status", "error"))
+            
+            # Also add to monitor's live tactics for the UI
+            if monitor and tactics:
+                monitor.record_tactics(tactics)
+            
             if monitor:
                 monitor.update_prover_server(
                     address=addr,

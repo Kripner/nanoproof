@@ -1,21 +1,12 @@
-import os
 from dataclasses import dataclass
 import enum
-import time
-from typing import Self, Protocol, TYPE_CHECKING
+from typing import Self, TYPE_CHECKING
 import math
 
-# Lightweight imports (fast)
-from leantree.repl_adapter.server import LeanClient, LeanProofBranch
+from leantree.repl_adapter.server import LeanProofBranch
 from nanoproof.common import pretty_print_tree, ValueOrError
-from nanoproof.cli import get_monitor, log, log_tactic
-
-if TYPE_CHECKING:
-    from nanoproof.inference import TacticModel, BlockingTacticModel
-
-"""
-leanserver --project-path ~/troja/nanoproof/leantree_project/ --repl-exe ~/repos/leantree/lean-repl/.lake/build/bin/repl --imports Mathlib FormalConjectures.ForMathlib.Analysis.SpecialFunctions.NthRoot FormalConjectures.Util.Answer --max-processes 2 --address=<PUBLIC_IP> --log-level=DEBUG
-"""
+from nanoproof.cli import get_monitor, log_tactic
+from nanoproof.inference import TacticModel, BlockingTacticModel
 
 
 @dataclass
@@ -67,6 +58,7 @@ State = list[LeanProofBranch]
 @dataclass
 class Node:
     """Node in the search tree."""
+    parent: Self | None = None  # Not serialized.
     # Action that was taken to reach this node.
     action: Action | None
     # Prior probability of the node according to the policy.
@@ -399,6 +391,14 @@ def ucb_score(config: Config, parent: Node, child: Node) -> float:
             value_score = -1e9
     return prior_score + value_score
 
+# If a new state is equal to the state of a parent, we are in a cycle.
+def is_cycling(node: Node, new_branches: list[LeanProofBranch]) -> bool:
+    p = node.parent
+    while p is not None:
+        if len(p.state) == len(new_branches) and all(branch.state.semantic_equals(p_branch.state) for branch, p_branch in zip(new_branches, p.state)):
+            return True
+        p = p.parent
+    return False
 
 # We expand a node using the value and sampled actions obtained from the neural
 # network. Immediately attempt the actions in the environment.
@@ -426,15 +426,16 @@ def expand_node(
         new_branches = branch.try_apply_tactic(action)
         if not new_branches.is_success():
             # Invalid action encountered.
-            log_tactic(state_str, action, success=False)
+            log_tactic(state_str, action, status="error")
             continue
-        if len(new_branches.value) == 1 and new_branches.value[0].state.semantic_equals(node.state[0].state):
-            # Tactic made no progress.
-            log_tactic(state_str, action, success=False)
+        if is_cycling(node, new_branches.value):
+            # Cycle detected.
+            log_tactic(state_str, action, status="cycle")
             continue
-        log_tactic(state_str, action, success=True)
+        log_tactic(state_str, action, status="success")
         new_branches = [b for b in new_branches.value if not b.state.is_solved()]
         child = Node(
+            parent=node,
             action=action,
             prior=p,
             state=new_branches,
@@ -450,6 +451,7 @@ def expand_node(
             child.children = {}
             for i, branch in enumerate(new_branches):
                 grandchild = Node(
+                    parent=child,
                     action=i,
                     prior=1.0 / len(new_branches),
                     state=[branch],
@@ -540,6 +542,7 @@ def run_bfs(game: Game, model: "TacticModel"):
         print(f"Got {len(new_branches)} new branch(es)!")
         if len(new_branches) <= 1:
             child = Node(
+                parent=node,
                 action=tactic,
                 to_play=Player.OR,
                 prior=None,
@@ -551,6 +554,7 @@ def run_bfs(game: Game, model: "TacticModel"):
                 open_nodes.append(child)
         else:
             child = Node(
+                parent=node,
                 action=tactic,
                 prior=None,
                 state=new_branches,
@@ -560,6 +564,7 @@ def run_bfs(game: Game, model: "TacticModel"):
             node.children[tactic] = child
             for i, branch in enumerate(new_branches):
                 grandchild = Node(
+                    parent=child,
                     action=i,
                     prior=None,
                     state=[branch],

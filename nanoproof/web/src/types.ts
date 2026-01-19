@@ -103,7 +103,7 @@ export interface Transition {
 }
 
 export interface TacticEntry {
-  success: boolean;
+  status: 'success' | 'error' | 'cycle';
   state: string;
   tactic: string;
 }

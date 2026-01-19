@@ -12,8 +12,6 @@ from nanoproof.data.leantree_dataloader import sft_data_generator
 _MIN_VALUE = 1
 _MAX_VALUE = 64
 
-# TODO: don't we need attention masks?
-
 @torch.inference_mode()
 def eval_critic_errors(model, tokenizer, leantree_batches, max_steps=None):
     """Evaluate critic accuracy on value prediction.

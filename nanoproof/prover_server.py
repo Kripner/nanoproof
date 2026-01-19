@@ -30,6 +30,7 @@ from flask import Flask, jsonify
 from nanoproof.search import Config, Game
 from nanoproof.experience_collection import ProverWorker
 from nanoproof.inference import RemoteTacticModel
+from nanoproof.cli import get_and_clear_tactics_buffer
 
 
 # -----------------------------------------------------------------------------
@@ -222,10 +223,12 @@ def create_app(prover_worker: ProverWorker, buffer: LocalBuffer):
     
     @app.route("/poll", methods=["GET"])
     def poll():
-        """Poll for stats."""
+        """Poll for stats and tactics."""
         result = buffer.get_stats()
         result["thread_states"] = prover_worker.get_thread_states()
         result["expansions"] = prover_worker.get_expansions()
+        # Include tactics collected since last poll
+        result["tactics"] = get_and_clear_tactics_buffer()
         return jsonify(result)
     
     @app.route("/stats", methods=["GET"])

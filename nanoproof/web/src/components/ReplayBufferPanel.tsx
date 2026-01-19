@@ -8,7 +8,7 @@ interface ModalData {
   type: 'transition' | 'tactic';
   state: string;
   tactic: string;
-  success?: boolean;
+  status?: 'success' | 'error' | 'cycle';
 }
 
 export function ReplayBufferPanel() {
@@ -189,17 +189,21 @@ export function ReplayBufferPanel() {
             {tactics.length === 0 ? (
               <div className="replay-empty">No tactics logged yet</div>
             ) : (
-              tactics.slice(-50).reverse().map((t, i) => (
-                <div 
-                  key={i} 
-                  className={`tactic-item clickable ${t.success ? 'success' : 'failure'}`}
-                  onClick={() => setModalData({ type: 'tactic', state: t.state, tactic: t.tactic, success: t.success })}
-                >
-                  <span className="tactic-status">{t.success ? '✓' : '✗'}</span>
-                  <span className="tactic-text">{t.tactic}</span>
-                  <span className="tactic-state" title={t.state}>{t.state}</span>
-                </div>
-              ))
+              tactics.slice(-50).reverse().map((t, i) => {
+                const statusClass = t.status === 'success' ? 'success' : t.status === 'cycle' ? 'cycle' : 'failure';
+                const statusIcon = t.status === 'success' ? '✓' : t.status === 'cycle' ? '↻' : '✗';
+                return (
+                  <div 
+                    key={i} 
+                    className={`tactic-item clickable ${statusClass}`}
+                    onClick={() => setModalData({ type: 'tactic', state: t.state, tactic: t.tactic, status: t.status })}
+                  >
+                    <span className="tactic-status">{statusIcon}</span>
+                    <span className="tactic-text">{t.tactic}</span>
+                    <span className="tactic-state" title={t.state}>{t.state}</span>
+                  </div>
+                );
+              })
             )}
           </div>
         </div>
@@ -209,7 +213,7 @@ export function ReplayBufferPanel() {
         isOpen={modalData !== null} 
         onClose={() => setModalData(null)}
         title={modalData?.type === 'tactic' 
-          ? `Tactic ${modalData?.success ? '(Success)' : '(Failed)'}` 
+          ? `Tactic (${modalData?.status === 'success' ? 'Success' : modalData?.status === 'cycle' ? 'Cycle' : 'Error'})` 
           : 'Transition'}
       >
         {modalData && (

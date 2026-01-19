@@ -266,6 +266,7 @@ class ProverWorker:
             
             game = Game(theorem, self.config.num_simulations)
             game.root = Node(
+                parent=None,
                 action=None,
                 prior=None,
                 state=[init_branch],

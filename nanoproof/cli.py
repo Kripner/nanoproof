@@ -37,6 +37,10 @@ _log_lock = threading.Lock()
 _log_file: TextIO | None = None
 _tactics_file: TextIO | None = None
 
+# In-memory tactics buffer for distributed mode (provers collect and report)
+_tactics_buffer: deque = deque(maxlen=1000)
+_tactics_buffer_lock = threading.Lock()
+
 # In-memory log buffers for web streaming
 _log_buffers: dict[str, deque] = {}
 _log_buffers_lock = threading.Lock()
@@ -145,14 +149,42 @@ def log_error(msg: str, exception: Exception | None = None, component: str | Non
             traceback.print_exc()
 
 
-def log_tactic(state: str, tactic: str, success: bool):
-    """Log a generated tactic to the tactics file."""
+def log_tactic(state: str, tactic: str, status: str):
+    """Log a generated tactic to the tactics file and in-memory buffer.
+    
+    Args:
+        state: The proof state (goal)
+        tactic: The tactic that was attempted
+        status: One of "success", "error", or "cycle"
+    """
+    state_oneline = state.replace("\n", "\\n")
+    
     with _log_lock:
         if _tactics_file is not None:
-            status = "+" if success else "-"
-            state_oneline = state.replace("\n", "\\n")
             _tactics_file.write(f"{status}\t{state_oneline}\t{tactic}\n")
             _tactics_file.flush()
+    
+    # Also add to in-memory buffer (for distributed mode collection)
+    with _tactics_buffer_lock:
+        _tactics_buffer.append({
+            "status": status,
+            "state": state_oneline,
+            "tactic": tactic,
+        })
+
+
+def get_and_clear_tactics_buffer() -> list[dict]:
+    """Get all tactics from the buffer and clear it.
+    
+    Used by prover servers to collect tactics and report them to the coordinator.
+    
+    Returns:
+        List of {"status": str, "state": str, "tactic": str} dicts.
+    """
+    with _tactics_buffer_lock:
+        tactics = list(_tactics_buffer)
+        _tactics_buffer.clear()
+        return tactics
 
 
 # -----------------------------------------------------------------------------
@@ -719,7 +751,7 @@ class WebMonitor:
                                 parts = line.strip().split("\t")
                                 if len(parts) >= 3:
                                     tactics.append({
-                                        "success": parts[0] == "+",
+                                        "status": parts[0],
                                         "state": parts[1],
                                         "tactic": parts[2],
                                     })
@@ -729,7 +761,7 @@ class WebMonitor:
             # Also include live tactics from distributed mode
             for t in live_tactics:
                 tactics.append({
-                    "success": t.get("success", False),
+                    "status": t.get("status", "error"),
                     "state": str(t.get("state", "")),
                     "tactic": t.get("tactic", ""),
                 })

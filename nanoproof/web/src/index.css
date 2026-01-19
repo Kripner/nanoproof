@@ -625,6 +625,10 @@ body {
   color: var(--accent-red);
 }
 
+.tactic-item.cycle .tactic-status {
+  color: var(--accent-yellow);
+}
+
 .tactic-text {
   color: var(--accent-cyan);
   flex-shrink: 0;

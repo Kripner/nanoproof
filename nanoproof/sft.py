@@ -57,7 +57,6 @@ init_lr_frac = 0.02
 # evaluation and logging there of
 eval_every = 100
 eval_steps = 100
-# eval_metrics_every = 200
 sample_every = 100
 eval_metrics_max_problems = 1024
 # now allow CLI to override the settings via the configurator lol
