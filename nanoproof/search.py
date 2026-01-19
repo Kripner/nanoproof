@@ -58,7 +58,7 @@ State = list[LeanProofBranch]
 @dataclass
 class Node:
     """Node in the search tree."""
-    parent: Self | None = None  # Not serialized.
+    parent: Self | None  # Not serialized.
     # Action that was taken to reach this node.
     action: Action | None
     # Prior probability of the node according to the policy.
@@ -114,7 +114,8 @@ class Node:
             state_str = "\n\n".join(str(branch.state) for branch in node.state) if len(node.state) > 0 else "<empty>"
             type_str = "AND" if node.to_play == Player.AND else "OR"
             solved_str = " (SOLVED)" if node.is_solved else ""
-            return f"[{type_str}{solved_str}]\nvis={node.visit_count} evals={node.evaluations} val={node.value():.2f}\n{state_str}"
+            value_target_str = f"[v={node.value_target:.2f}]" if node.value_target is not None else ""
+            return f"[{type_str}{solved_str}{value_target_str}]\nvis={node.visit_count} evals={node.evaluations} val={node.value():.2f}\n{state_str}"
 
         def get_edge_label(node: Node):
             if node.action is None:

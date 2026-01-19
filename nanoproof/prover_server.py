@@ -19,6 +19,7 @@ import atexit
 import logging
 import signal
 import socket
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -114,7 +115,6 @@ def create_remote_prover_worker(
         """Submit proof result to coordinator."""
         # Only include proof_tree if actually solved
         is_solved = game and game.root and game.root.is_solved
-        print(game.root.pp_tree())
         result = {
             "id": theorem_id,
             "theorem": theorem,
@@ -290,8 +290,14 @@ def main():
     
     app = create_app(prover_worker, buffer)
     
-    # Setup cleanup on exit
+    # Shutdown coordination
+    shutdown_event = threading.Event()
+    cleanup_done = threading.Event()
+    
     def cleanup():
+        if cleanup_done.is_set():
+            return  # Already cleaned up
+        cleanup_done.set()
         print("Shutting down...")
         prover_worker.stop()
         unregister_from_rl_server(args.rl_server, my_address)
@@ -300,8 +306,12 @@ def main():
     
     # Handle signals for graceful shutdown
     def signal_handler(signum, frame):
-        cleanup()
-        exit(0)
+        if shutdown_event.is_set():
+            # Second Ctrl+C - exit via sys.exit so atexit handlers run
+            print("\nExiting...")
+            sys.exit(0)
+        print("\nShutdown requested (press Ctrl+C again to force)...")
+        shutdown_event.set()
     
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -344,13 +354,14 @@ def main():
     
     # Main loop: wait for actors to start, then monitor for exit
     try:
-        while not prover_worker.has_started_actors():
-            time.sleep(1.0)
+        while not prover_worker.has_started_actors() and not shutdown_event.is_set():
+            time.sleep(0.5)
         
-        while not prover_worker.all_actors_exited():
-            time.sleep(1.0)
+        while not prover_worker.all_actors_exited() and not shutdown_event.is_set():
+            time.sleep(0.5)
         
-        print("\n[ProverServer] All actors have exited. Shutting down...")
+        if not shutdown_event.is_set():
+            print("\n[ProverServer] All actors have exited. Shutting down...")
     except KeyboardInterrupt:
         print("\n[ProverServer] Interrupted by user")
     
