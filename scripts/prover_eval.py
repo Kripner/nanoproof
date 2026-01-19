@@ -181,7 +181,7 @@ def eval_success_rate(
         progress.on_start("", len(theorems))
     
     if num_actors > 1:
-        return _eval_parallel(tactic_model, theorems, theorems_subset, progress, num_actors)
+        return _eval_parallel(tactic_model, theorems_subset, progress, num_actors)
     else:
         return _eval_sequential(tactic_model, theorems_subset, use_tqdm, progress)
 
@@ -229,7 +229,6 @@ def _eval_sequential(
 
 def _eval_parallel(
     tactic_model: Union[TacticModel, BlockingTacticModel],
-    theorems: list[str],
     theorems_subset: list[str],
     progress: Optional[EvalProgressCallback],
     num_actors: int,
@@ -240,7 +239,7 @@ def _eval_parallel(
     
     # Wrap in BlockingTacticModel if necessary
     if isinstance(tactic_model, TacticModel):
-        model = BlockingTacticModel(tactic_model, batch_size=num_actors, timeout_seconds=0.1)
+        model = BlockingTacticModel(tactic_model, max_batch_tokens=8000, timeout_seconds=0.1)
         owns_model = True
     else:
         model = tactic_model
@@ -248,20 +247,16 @@ def _eval_parallel(
     
     device = model.network.get_device()
     
-    # Thread-safe state - use separate lists to avoid any aliasing issues
+    # Thread-safe state for work-stealing and progress tracking
     lock = threading.Lock()
-    results = []  # List of (solved: bool, is_error: bool) tuples
     next_idx = [0]
-    stop_flag = threading.Event()
-    done_flag = threading.Event()  # Set when all workers are done
-    
-    # Thread-safe counters for live progress tracking
     counters = {"processed": 0, "solved": 0, "errors": 0}
     
     def actor_loop(actor_id: int):
         """Single actor thread that evaluates theorems until done."""
+        # LeanClient may use asyncio internally, so each thread needs its own event loop
         asyncio.set_event_loop(asyncio.new_event_loop())
-        local_results = []  # Collect results locally first
+        local_processed = 0
         
         log(f"[Eval Actor {actor_id}] Connecting to {config.server_address}:{config.server_port}")
         
@@ -281,7 +276,7 @@ def _eval_parallel(
                 env.send_command(LEAN_OPEN_SCOPED_COMMANDS)
                 log(f"[Eval Actor {actor_id}] Ready")
                 
-                while not stop_flag.is_set():
+                while True:
                     # Get next theorem (work stealing)
                     with lock:
                         if next_idx[0] >= len(theorems_subset):
@@ -291,9 +286,9 @@ def _eval_parallel(
                     
                     theorem = theorems_subset[my_idx]
                     solved, is_error = evaluate_theorem(theorem, env, config, model)
-                    local_results.append((solved, is_error))
+                    local_processed += 1
                     
-                    # Update live counters for progress tracking
+                    # Update counters for progress tracking
                     with lock:
                         counters["processed"] += 1
                         if solved and not is_error:
@@ -304,13 +299,9 @@ def _eval_parallel(
                     if is_error:
                         log(f"[Eval Actor {actor_id}] Error: {theorem[:50]}...")
                 
-                log(f"[Eval Actor {actor_id}] Done, processed {len(local_results)} theorems")
+                log(f"[Eval Actor {actor_id}] Done, processed {local_processed} theorems")
         except Exception as e:
             log(f"[Eval Actor {actor_id}] Error: {e}")
-        
-        # Merge local results into global results under lock
-        with lock:
-            results.extend(local_results)
     
     # Run actors in parallel
     with ThreadPoolExecutor(max_workers=num_actors) as executor:
@@ -353,10 +344,10 @@ def _eval_parallel(
     if owns_model:
         model.shutdown()
     
-    # Count results from the collected tuples
-    solved_count = sum(1 for solved, is_error in results if solved and not is_error)
-    error_count = sum(1 for solved, is_error in results if is_error)
-    processed_count = len(results)
+    # Extract final counts from thread-safe counters
+    solved_count = counters["solved"]
+    error_count = counters["errors"]
+    processed_count = counters["processed"]
     
     log(f"[Eval] Parallel evaluation complete: {solved_count} solved, {error_count} errors, {processed_count} processed out of {len(theorems_subset)} theorems")
     
@@ -368,12 +359,13 @@ def _eval_parallel(
     if progress is not None:
         broadcast_progress(progress, processed_count, solved_count, error_count, device, ddp, ddp_rank, use_allreduce=True)
     
-    return aggregate_results(solved_count, error_count, processed_count, device, ddp)
+    # Use len(theorems_subset) as total to be consistent with _eval_sequential
+    return aggregate_results(solved_count, error_count, len(theorems_subset), device, ddp)
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--max-theorems", type=int, default=50, help="Max theorems to evaluate")
+    parser.add_argument("--max-theorems", type=int, default=None, help="Max theorems to evaluate")
     parser.add_argument("--num-actors", type=int, default=4, help="Number of parallel actors (1 for sequential)")
     args = parser.parse_args()
 
@@ -381,8 +373,11 @@ def main():
     compute_init(device_type)
 
     tactic_model = TacticModel.create()
-    minif2f_theorems = minif2f.list_theorems(split="Valid")[:args.max_theorems]
-    leanworkbook_theorems = leanworkbook.list_theorems(split="val")[:args.max_theorems]
+    minif2f_theorems = minif2f.list_theorems(split="Valid")
+    leanworkbook_theorems = leanworkbook.list_theorems(split="val")
+    if args.max_theorems:
+        minif2f_theorems = minif2f_theorems[:args.max_theorems]
+        leanworkbook_theorems = leanworkbook_theorems[:args.max_theorems]
 
     def print_results(results, name):
         print0("-" * 80)

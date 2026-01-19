@@ -50,7 +50,7 @@ class Config:
     value_weight: float = 0.002
 
     # Lean server
-    server_address: str = "10.10.25.40"
+    server_address: str = "10.10.25.35"
     server_port: int = 8000
 
 
