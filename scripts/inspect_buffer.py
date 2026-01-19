@@ -13,6 +13,39 @@ def load_buffer(path: str) -> list[tuple[str, str, float]]:
         return json.load(f)
 
 
+def transition_to_theorem(context: str, tactic: str, value: float) -> str:
+    """Convert a proof state to a theorem declaration.
+    
+    Example input:
+        x : ℕ
+        h₀ : 4 * x % 128 = 12
+        ⊢ x % 32 = 3
+    
+    Example output:
+        example (x : ℕ) (h₀ : 4 * x % 128 = 12) : x % 32 = 3 := by
+          sorry
+    """
+    lines = context.strip().split("\n")
+    binders = []
+    goal = ""
+    
+    for line in lines:
+        line = line.strip()
+        if line.startswith("case"):
+            continue
+        if line.startswith("⊢"):
+            goal = line[1:].strip()
+        elif line:
+            binders.append(f"({line})")
+    
+    binder_str = " ".join(binders)
+    body = f"  {tactic}\n  sorry  -- {-value - 1} more steps" if value != -1 else f"  {tactic}"
+    if binder_str:
+        return f"example {binder_str} : {goal} := by\n{body}"
+    else:
+        return f"example : {goal} := by\n{body}"
+
+
 def cmd_view(args):
     """View transitions from the buffer."""
     buffer = load_buffer(args.path)
@@ -33,9 +66,12 @@ def cmd_view(args):
         print(f"{'=' * 60}")
         print(f"Transition {i + 1} {idx}")
         print(f"{'=' * 60}")
-        print(f"State:")
-        print(f"{state}")
-        print(f"Tactic: {tactic}")
+        if args.theorem:
+            print(transition_to_theorem(state, tactic, value))
+        else:
+            print(f"State:")
+            print(f"{state}")
+            print(f"Tactic: {tactic}")
         print(f"Value: {value}")
         print()
 
@@ -84,14 +120,13 @@ def cmd_stats(args):
     print(f"  Max tactic length: {max(len(t) for t in tactics)} chars")
     print()
     
-    # Top tactics
-    tactic_counts = Counter(tactics)
+    # Top tactics (by first word only, e.g. "rw [x]" counts as "rw")
+    tactic_names = [t.split()[0] if t.split() else t for t in tactics]
+    tactic_counts = Counter(tactic_names)
     print(f"Top 10 Most Common Tactics:")
     for tactic, count in tactic_counts.most_common(10):
         pct = 100 * count / len(buffer)
-        # Truncate long tactics for display
-        display = tactic if len(tactic) <= 50 else tactic[:47] + "..."
-        print(f"  {count:6,} ({pct:5.1f}%): {display}")
+        print(f"  {count:6,} ({pct:5.1f}%): {tactic}")
 
 
 def main():
@@ -115,6 +150,10 @@ def main():
     view_parser.add_argument(
         "--offset", "-o", type=int, default=0,
         help="Offset to start from when not random (default: 0)"
+    )
+    view_parser.add_argument(
+        "--theorem", "-t", action="store_true",
+        help="Format states as theorem declarations"
     )
     view_parser.set_defaults(func=cmd_view)
     
