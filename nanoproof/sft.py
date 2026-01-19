@@ -38,7 +38,7 @@ run = "dummy" # wandb run name default ("dummy" is special - we won't log to wan
 seed = 0
 # input model options
 source = "mid" # base|mid , which checkpoint to load the model from (base model or midtrained model)
-model_tag = "d26" # model tag to load the model from (base model or midtrained model)
+model_tag = "d32" # model tag to load the model from (base model or midtrained model)
 step = None # step to load the model from (base model or midtrained model)
 resume_from = None # step to resume from (None = don't resume, int = specific step, "latest" = auto-detect latest)
 # compute/precision

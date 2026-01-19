@@ -345,25 +345,35 @@ while True:
                                        leanworkbook_results['solved'], leanworkbook_results['total'],
                                        leanworkbook_results['errors'])
 
-                # Log results (with timeout warning if applicable)
+                # Log results (with timeout/invalid warning if applicable)
                 minif2f_status = f"minif2f: {minif2f_results['success_rate']:.4%} ({minif2f_results['solved']}/{minif2f_results['total']}, errors={minif2f_results['errors']})"
                 if minif2f_results.get('timed_out'):
                     minif2f_status += " [TIMED OUT]"
+                if minif2f_results.get('invalid'):
+                    minif2f_status += " [INVALID]"
                 leanworkbook_status = f"leanworkbook: {leanworkbook_results['success_rate']:.4%} ({leanworkbook_results['solved']}/{leanworkbook_results['total']}, errors={leanworkbook_results['errors']})"
                 if leanworkbook_results.get('timed_out'):
                     leanworkbook_status += " [TIMED OUT]"
+                if leanworkbook_results.get('invalid'):
+                    leanworkbook_status += " [INVALID]"
                 log(f"Step {step:05d} | {minif2f_status} | {leanworkbook_status}", component="Eval")
                 
-                # Only log scores to wandb if eval completed (not timed out)
+                # Only log scores to wandb if eval completed (not timed out or invalid)
                 wandb_data = {"step": step}
-                if not minif2f_results.get('timed_out'):
+                if not minif2f_results.get('timed_out') and not minif2f_results.get('invalid'):
                     wandb_data["minif2f_val"] = minif2f_results['success_rate']
                 else:
-                    wandb_data["minif2f_timed_out"] = True
-                if not leanworkbook_results.get('timed_out'):
+                    if minif2f_results.get('timed_out'):
+                        wandb_data["minif2f_timed_out"] = True
+                    if minif2f_results.get('invalid'):
+                        wandb_data["minif2f_invalid"] = True
+                if not leanworkbook_results.get('timed_out') and not leanworkbook_results.get('invalid'):
                     wandb_data["leanworkbook_val"] = leanworkbook_results['success_rate']
                 else:
-                    wandb_data["leanworkbook_timed_out"] = True
+                    if leanworkbook_results.get('timed_out'):
+                        wandb_data["leanworkbook_timed_out"] = True
+                    if leanworkbook_results.get('invalid'):
+                        wandb_data["leanworkbook_invalid"] = True
                 wandb_run.log(wandb_data)
                 
                 # Signal completion to other ranks via store (avoid NCCL blocking GPU)

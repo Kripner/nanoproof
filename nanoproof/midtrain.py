@@ -29,12 +29,12 @@ from nanoproof.data.leangithubraw import iter_data
 # -----------------------------------------------------------------------------
 run = "dummy" # wandb run name default ("dummy" is special - we won't log to wandb)
 device_type = "" # cuda|cpu|mps (empty => autodetect)
-model_tag = "d26" # model tag to load the model from (base model or midtrained model)
+model_tag = "d32" # model tag to load the model from (base model or midtrained model)
 step = None # step to load the model from (base model or midtrained model)
 dtype = "bfloat16"
 num_iterations = -1 # explicit number of steps of the optimization (-1 = disable)
 max_seq_len = 768
-device_batch_size = 32 # H100
+device_batch_size = 16 # H100
 # device_batch_size = 8 # A100 40GB
 unembedding_lr = 0.004
 embedding_lr = 0.2

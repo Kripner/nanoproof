@@ -536,6 +536,11 @@ def distributed_eval(theorems: list[str], dataset_name: str = "eval", no_progres
     index = 0
     expected = len(theorems)
     timed_out = False
+    invalid = False  # Set if we receive mismatched/duplicate/unknown results
+    
+    # Track sent theorems for validation: id -> theorem
+    sent_theorems: dict[str, str] = {}
+    received_ids: set[str] = set()
     
     def get_theorem() -> Optional[tuple[str, str]]:
         """Supply theorems from the list, None when exhausted."""
@@ -545,16 +550,41 @@ def distributed_eval(theorems: list[str], dataset_name: str = "eval", no_progres
                 return None
             theorem = theorems[index]
             tid = f"eval_{index}"
+            sent_theorems[tid] = theorem
             index += 1
             return (tid, theorem)
     
     def submit_result(result: ProofResult):
         """Collect proof results and signal done when complete."""
+        nonlocal invalid
+        
         # Ignore straggler results from previous collection phase
         if not result.theorem_id.startswith("eval_"):
             return
         
         with results_lock:
+            # Validate that we actually sent this theorem
+            if result.theorem_id not in sent_theorems:
+                log(f"Received result for unknown theorem ID: {result.theorem_id}", component="Dispatcher")
+                invalid = True
+                return
+            
+            # Validate theorem content matches what we sent
+            expected_theorem = sent_theorems[result.theorem_id]
+            if result.theorem != expected_theorem:
+                log(f"Theorem mismatch for {result.theorem_id}: "
+                    f"expected {expected_theorem[:50]!r}..., got {result.theorem[:50]!r}...", 
+                    component="Dispatcher")
+                invalid = True
+                return
+            
+            # Check for duplicate results
+            if result.theorem_id in received_ids:
+                log(f"Duplicate result for {result.theorem_id}", component="Dispatcher")
+                invalid = True
+                return
+            
+            received_ids.add(result.theorem_id)
             results.append(result)
             n = len(results)
             solved = sum(1 for r in results if r.is_solved)
@@ -575,6 +605,7 @@ def distributed_eval(theorems: list[str], dataset_name: str = "eval", no_progres
                 "total": total,
                 "errors": errors,
                 "timed_out": timed_out,
+                "invalid": invalid,
             }
     
     # Update monitor to show eval is starting
@@ -632,6 +663,15 @@ def distributed_eval(theorems: list[str], dataset_name: str = "eval", no_progres
     # Clear dispatcher
     dispatcher.get_theorem = lambda: None
     dispatcher.submit_result = lambda r: None
+    
+    # Check for missing results (only if we didn't time out - timeout is expected to have missing results)
+    with results_lock:
+        missing_ids = set(sent_theorems.keys()) - received_ids
+        if missing_ids and not timed_out:
+            log(f"Missing results for {len(missing_ids)} theorems: "
+                f"{sorted(missing_ids)[:10]}{'...' if len(missing_ids) > 10 else ''}", 
+                component="Dispatcher")
+            invalid = True
     
     metrics = get_metrics()
     status = "timed out" if timed_out else "complete"
