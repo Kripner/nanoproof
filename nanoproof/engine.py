@@ -117,15 +117,19 @@ class Engine:
         self.tokenizer = tokenizer
 
     @torch.no_grad()
-    def generate(self, tokens, num_samples=1, max_tokens=None, min_tokens=None, temperature=1.0, top_k=None, seed=42):
+    def generate(self, tokens, num_samples=1, max_tokens=None, min_tokens=None, temperature=1.0, top_k=None, seed=42, return_logits=False):
         """
         Generate tokens from prompt(s). Accepts either list[int] (single prompt) or
         list[list[int]] (batched prompts).
 
         Yields:
-            (token_column, token_masks) tuples where both are nested list[list[int]] of
-            shape (num_prompts, num_samples) for batched input, or list[int] of shape
-            (num_samples,) for single prompt. Masks: 1=sampled, 0=forced.
+            If return_logits=False (default):
+                (token_column, token_masks) tuples where both are nested list[list[int]] of
+                shape (num_prompts, num_samples) for batched input, or list[int] of shape
+                (num_samples,) for single prompt. Masks: 1=sampled, 0=forced.
+            If return_logits=True:
+                (token_column, token_masks, logits_column) triples where logits_column is
+                a tensor of shape (total_rows, vocab_size) containing the logits used for sampling.
         """
         assert isinstance(tokens, list), "tokens must be a list"
 
@@ -206,13 +210,6 @@ class Engine:
         num_generated = 0
 
         while True:
-            # Stop condition: we've reached max tokens
-            if max_tokens is not None and num_generated >= max_tokens:
-                break
-            # Stop condition: all rows are completed
-            if all(state.completed for state in row_states):
-                break
-
             if min_tokens is not None and num_generated < min_tokens:
                 logits[:, eos] = float('-inf')
                 logits[:, bos] = float('-inf')
@@ -235,16 +232,26 @@ class Engine:
 
             if is_batched:
                 # Yield shape (num_prompts, num_samples)
-                yield ([token_column[i * num_samples:(i + 1) * num_samples] for i in range(num_prompts)],
-                       [token_masks[i * num_samples:(i + 1) * num_samples] for i in range(num_prompts)])
+                result = ([token_column[i * num_samples:(i + 1) * num_samples] for i in range(num_prompts)],
+                          [token_masks[i * num_samples:(i + 1) * num_samples] for i in range(num_prompts)])
             else:
                 # Yield shape (num_samples,)
-                yield token_column, token_masks
+                result = (token_column, token_masks)
+            
+            if return_logits:
+                result = result + (logits,)
+            yield result
             num_generated += 1
+
+            # Stop condition: we've reached max tokens
+            if max_tokens is not None and num_generated >= max_tokens:
+                break
+            # Stop condition: all rows are completed
+            if all(state.completed for state in row_states):
+                break
 
             # Prepare logits for next iteration
             ids = torch.tensor(token_column, dtype=torch.long, device=device).unsqueeze(1)
-
 
             if decode_mask is not None:
                 # Extend decode_mask with True for the new tokens
@@ -260,15 +267,19 @@ class Engine:
                 logits = self.model.forward(ids, kv_cache=kv_cache_decode)
             logits = logits[:, -1, :]  # (B, vocab_size)
 
-    def generate_batch(self, tokens, num_samples=1, **kwargs):
+    def generate_batch(self, tokens, num_samples=1, return_logits=False, **kwargs):
         """
         Non-streaming batch generation that returns the final token sequences.
         Terminal tokens (assistant_end, bos) are not included in the results.
 
         Returns:
-            (results, masks): For batched input, both are list[list[list[int]]] of shape
-            (num_prompts, num_samples, seq_len). For single prompt, both are
-            list[list[int]] of shape (num_samples, seq_len). Masks: 1=sampled, 0=forced.
+            If return_logits=False (default):
+                (results, masks): For batched input, both are list[list[list[int]]] of shape
+                (num_prompts, num_samples, seq_len). For single prompt, both are
+                list[list[int]] of shape (num_samples, seq_len). Masks: 1=sampled, 0=forced.
+            If return_logits=True:
+                (results, masks, all_logits): all_logits has the same structure as results/masks,
+                but contains logits tensors (or None for prompt tokens).
         """
         eos = self.tokenizer.get_eos_token_id()
         bos = self.tokenizer.get_bos_token_id()
@@ -280,10 +291,17 @@ class Engine:
         # Work with flat structure internally (prompt0_sample0, prompt0_sample1, ..., prompt1_sample0, ...)
         results = [p.copy() for p in prompts for _ in range(num_samples)]
         masks = [[0] * len(p) for p in prompts for _ in range(num_samples)]
+        # Logits are None for prompt tokens
+        all_logits = [[None] * len(p) for p in prompts for _ in range(num_samples)] if return_logits else None
         completed = [False] * len(results)
 
+        for gen_output in self.generate(tokens, num_samples, return_logits=return_logits, **kwargs):
+            if return_logits:
+                token_column, token_masks, logits_batch = gen_output
+            else:
+                token_column, token_masks = gen_output
+                logits_batch = None
 
-        for token_column, token_masks in self.generate(tokens, num_samples, **kwargs):
             # Flatten nested output from generate() if batched
             if is_batched:
                 token_column = [t for row in token_column for t in row]
@@ -296,6 +314,8 @@ class Engine:
                     else:
                         results[i].append(token)
                         masks[i].append(mask)
+                        if return_logits:
+                            all_logits[i].append(logits_batch[i])
             # Stop if all rows are completed
             if all(completed):
                 break
@@ -304,4 +324,9 @@ class Engine:
         if is_batched:
             results = [results[i * num_samples:(i + 1) * num_samples] for i in range(len(prompts))]
             masks = [masks[i * num_samples:(i + 1) * num_samples] for i in range(len(prompts))]
+            if return_logits:
+                all_logits = [all_logits[i * num_samples:(i + 1) * num_samples] for i in range(len(prompts))]
+        
+        if return_logits:
+            return results, masks, all_logits
         return results, masks

@@ -5,26 +5,73 @@ import torch
 from nanoproof.common import compute_init, compute_cleanup, get_base_dir, print0, DummyWandb, autodetect_device_type
 from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
+from nanoproof.inference import TacticModel
 
-source = "sft" # which checkpoint to load the model from
-model_tag = "d26" # model tag to load the model from
-device_type = "" # cuda|cpu|mps (empty => autodetect)
-dtype = "bfloat16"
-base_dir = get_base_dir()
+MODE = "raw_engine"  # raw_engine | tactic_model
+generate = None
+predict_value = None
 
-device_type = autodetect_device_type() if device_type == "" else device_type
-device = torch.device(device_type)
-ptdtype = torch.float32 if dtype == "float32" else torch.bfloat16
-autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
+if MODE == "raw_engine":
+    source = "sft" # which checkpoint to load the model from
+    model_tag = "d26" # model tag to load the model from
+    device_type = "" # cuda|cpu|mps (empty => autodetect)
+    dtype = "bfloat16"
+    step = 903  # TODO
 
-model, tokenizer, meta = load_model(source, device, phase="eval", model_tag=model_tag)
-engine = Engine(model, tokenizer)
+    device_type = autodetect_device_type() if device_type == "" else device_type
+    device = torch.device(device_type)
+    ptdtype = torch.float32 if dtype == "float32" else torch.bfloat16
+    autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
-def generate(inp_) -> str:
-    tokens = tokenizer(inp_.strip() + "\n<|tactic|>", prepend="<|bos|>")
-    with autocast_ctx:
-        sample_toks, _ = engine.generate_batch(tokens, num_samples=1, min_tokens=1, max_tokens=64)
-    return tokenizer.decode(sample_toks[0])
+    model, tokenizer, meta = load_model(source, device, phase="eval", model_tag=model_tag, step=step)
+    engine = Engine(model, tokenizer)
+    value_token_ids = tokenizer.get_value_token_ids()
+    value_bins = tokenizer.get_value_bins()
+
+    def generate_(inp_) -> list[str]:
+        tokens = tokenizer(inp_.strip() + "\n<|tactic|>", prepend=tokenizer.get_bos_token_id())
+        with autocast_ctx:
+            sample_toks, _ = engine.generate_batch(tokens, num_samples=6, min_tokens=1, max_tokens=64)
+        return [tokenizer.decode(sample_toks[i]) for i in range(6)]
+
+    def predict_value_(inp_) -> float:
+        tokens = tokenizer(inp_.strip() + "\n<|value|>", prepend=tokenizer.get_bos_token_id())
+        with autocast_ctx:
+            _, _, value_logits = engine.generate_batch(tokens, num_samples=1, min_tokens=1, max_tokens=1, return_logits=True)
+            value_logits = value_logits[0]
+            value_logits = value_logits[-1]
+            value_probs = torch.softmax(value_logits, dim=-1)
+            value_probs = torch.gather(value_probs, 0, torch.tensor(value_token_ids, device=device))
+            for i, prob in enumerate(value_probs):
+                print(f"BIN {value_bins[i]}: {prob.item()}")
+            print("LEFTOVER_PROB:", 1 - value_probs.sum())
+            value_probs = value_probs * torch.tensor(value_bins, device=device, dtype=value_probs.dtype)
+            value_probs = value_probs.sum()
+            return value_probs.item()
+
+    generate = generate_
+    predict_value = predict_value_
+
+elif MODE == "tactic_model":
+    tactic_model = TacticModel.create()
+
+    def generate_(inp_) -> list[str]:
+        tactics = tactic_model.sample_tactic_from_str(inp_.strip())
+        if not tactics.is_success():
+            raise RuntimeError(f"Tactic generation failed: {tactics.error}")
+        return tactics.value
+
+    def predict_value_(inp_) -> float:
+        value = tactic_model.predict_value_from_str(inp_.strip())
+        if not value.is_success():
+            raise RuntimeError(f"Value prediction failed: {value.error}")
+        return value.value
+
+    generate = generate_
+    predict_value = predict_value_
+
+else:
+    raise ValueError(f"Invalid mode: {MODE}")
 
 def get_input() -> str:
     lines = []
@@ -37,9 +84,15 @@ def get_input() -> str:
 
 inp = get_input()
 while inp.strip() not in ["q", "quit", "exit"]:
-    print(f"Generating ...")
-    tactic = generate(inp)
-    print(f"Tactic:\n--\n'{tactic}'\n--")
+    print(f"Generating tactics ...")
+    tactics = generate(inp)
+    for tactic in tactics:
+        print(f"Tactic:\n--\n'{tactic}'\n--")
+        print()
+    print(f"Predicting value...")
+    value = predict_value(inp)
+    print(f"Value: {value}")
+    print()
     inp = get_input()
 print("Done.")
 

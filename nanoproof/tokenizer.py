@@ -151,6 +151,12 @@ class HuggingFaceTokenizer:
         self.tokenizer.save(tokenizer_path)
         print(f"Saved tokenizer to {tokenizer_path}")
 
+    def get_value_token_ids(self) -> list[int]:
+        return [self.encode_special(f"<|bin_{i:02d}|>") for i in range(_MIN_VALUE, _MAX_VALUE + 1)]
+
+    def get_value_bins(self) -> list[int]:
+        return list(range(_MIN_VALUE, _MAX_VALUE + 1))
+
 def value_to_token_ids(tokenizer, value: int) -> list[int]:
     """Convert a value (1-64) to a single bin token ID."""
     assert value >= _MIN_VALUE

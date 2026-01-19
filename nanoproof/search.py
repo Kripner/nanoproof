@@ -302,17 +302,11 @@ def run_mcts(config: Config, game: Game, model: "TacticModel | BlockingTacticMod
             search_path.append(node)
 
         assert node.state is not None
-        tactics_result = model.sample_tactic(node.state)
-        if isinstance(tactics_result, ValueOrError):
-            if not tactics_result.is_success():
-                raise RuntimeError(f"Tactic generation failed: {tactics_result.error}")
-            tactics = tactics_result.value
-        else:
-            tactics = tactics_result
-        tactic_logprobs = [1.0] * len(tactics)  # TODO: use the actual action logprobs
-
-        # Get state string for tactic callback
-        state_str = str(node.state[0].state).strip() if len(node.state) == 1 else ""
+        tactics_and_value_result = model.tactic_and_value(node.state)
+        if not tactics_and_value_result.is_success():
+            raise RuntimeError(f"Tactic and value generation failed: {tactics_and_value_result.error}")
+        tactics, value = tactics_and_value_result.value
+        tactic_logprobs = [1.0] * len(tactics)  # TODO (!): use the actual action logprobs
 
         expand_node(node, tactics, tactic_logprobs, config.prior_temperature)
 
@@ -328,11 +322,11 @@ def run_mcts(config: Config, game: Game, model: "TacticModel | BlockingTacticMod
             for tactic, child in node.children.items():
                 # A tactic is successful if it led to a valid state
                 success = child.state is not None and len(child.state) > 0
-                tactic_callback(state_str, tactic, success)
+                tactic_callback(str(node.state[0].state).strip(), tactic, success)
 
         backpropagate(
             search_path,
-            1.0,  # TODO: use the actual value
+            value,
             config,
         )
 

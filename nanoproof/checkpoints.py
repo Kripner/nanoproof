@@ -98,7 +98,16 @@ def find_last_step(checkpoint_dir):
     checkpoint_files = glob.glob(os.path.join(checkpoint_dir, "model_*.pt"))
     if not checkpoint_files:
         raise FileNotFoundError(f"No checkpoints found in {checkpoint_dir}")
-    last_step = int(max(os.path.basename(f).split("_")[-1].split(".")[0] for f in checkpoint_files))
+    last_step = None
+    for f in checkpoint_files:
+        step = os.path.basename(f).split("_")[-1].split(".")[0]
+        try:
+            step = int(step)
+            last_step = step if last_step is None else max(last_step, step)
+        except ValueError:
+            pass
+    if last_step is None:
+        raise FileNotFoundError(f"No checkpoints found in {checkpoint_dir}")
     return last_step
 
 # -----------------------------------------------------------------------------

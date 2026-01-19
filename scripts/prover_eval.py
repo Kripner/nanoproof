@@ -66,7 +66,7 @@ def evaluate_theorem(
     env,
     config: Config,
     model: Union[TacticModel, BlockingTacticModel],
-) -> tuple[bool, bool]:
+) -> tuple[bool, str | None]:
     """
     Evaluate a single theorem using MCTS.
     
@@ -75,7 +75,7 @@ def evaluate_theorem(
     """
     init_branch = env.proof_from_sorry(theorem)
     if not init_branch.is_success():
-        return False, True  # Error case
+        return False, init_branch.error  # Error case
     
     init_branch = init_branch.value
     game = Game(theorem, num_simulations=config.num_simulations)
@@ -88,7 +88,7 @@ def evaluate_theorem(
     )
     
     run_mcts(config, game, model)
-    return game.root.is_solved, False
+    return game.root.is_solved, None
 
 
 def aggregate_results(
@@ -212,11 +212,11 @@ def _eval_sequential(
             iterator = tqdm(iterator, total=len(theorems_subset), desc=f"Rank {ddp_rank}", position=ddp_rank)
         
         for idx, theorem in iterator:
-            solved, is_error = evaluate_theorem(theorem, env, config, tactic_model)
+            solved, error = evaluate_theorem(theorem, env, config, tactic_model)
             
-            if is_error:
+            if error is not None:
                 counters.errors += 1
-                print0(f"Error on theorem: {theorem[:80]}...")
+                print0(f"Error on theorem: {theorem[:500]}{"..." if len(theorem) > 500 else ""}: {error}")
             elif solved:
                 counters.solved += 1
             counters.processed += 1
@@ -285,23 +285,25 @@ def _eval_parallel(
                         next_idx[0] += 1
                     
                     theorem = theorems_subset[my_idx]
-                    solved, is_error = evaluate_theorem(theorem, env, config, model)
+                    solved, error = evaluate_theorem(theorem, env, config, model)
                     local_processed += 1
                     
                     # Update counters for progress tracking
                     with lock:
                         counters["processed"] += 1
-                        if solved and not is_error:
+                        if solved and error is None:
                             counters["solved"] += 1
-                        if is_error:
+                        if error is not None:
                             counters["errors"] += 1
                     
-                    if is_error:
-                        log(f"[Eval Actor {actor_id}] Error: {theorem[:50]}...")
+                    if error is not None:
+                        log(f"[Eval Actor {actor_id}] Error: {theorem[:500]}{"..." if len(theorem) > 500 else ""}: {error}")
                 
                 log(f"[Eval Actor {actor_id}] Done, processed {local_processed} theorems")
         except Exception as e:
             log(f"[Eval Actor {actor_id}] Error: {e}")
+            with lock:
+                counters["errors"] += 1
     
     # Run actors in parallel
     with ThreadPoolExecutor(max_workers=num_actors) as executor:
@@ -390,10 +392,10 @@ def main():
 
     print0(f"Using {args.num_actors} parallel actor(s)")
     
-    leanworkbook_results = eval_success_rate(
-        tactic_model, leanworkbook_theorems, use_tqdm=True, num_actors=args.num_actors
-    )
-    print_results(leanworkbook_results, "LeanWorkBook")
+    # leanworkbook_results = eval_success_rate(
+    #     tactic_model, leanworkbook_theorems, use_tqdm=True, num_actors=args.num_actors
+    # )
+    # print_results(leanworkbook_results, "LeanWorkBook")
 
     minif2f_results = eval_success_rate(
         tactic_model, minif2f_theorems, use_tqdm=True, num_actors=args.num_actors

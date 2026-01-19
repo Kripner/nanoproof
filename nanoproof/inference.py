@@ -31,6 +31,7 @@ from nanoproof.checkpoints import load_model
 from nanoproof.cli import get_monitor, log
 from nanoproof.common import ValueOrError
 from nanoproof.engine import Engine
+from nanoproof.tokenizer import _MIN_VALUE, _MAX_VALUE
 
 # Heavy imports are done lazily inside TacticModel to speed up prover_server startup
 # These are only imported when TacticModel.create() is called:
@@ -67,8 +68,16 @@ class TacticModel:
         self.rng = torch.Generator(device=self.network.get_device())
         self.rng.manual_seed(0)
 
-    def sample_tactic(self, state: State) -> list[str]:
-        import torch
+    def tactic_and_value(self, state: State) -> ValueOrError[tuple[list[str], float]]:
+        tactics = self.sample_tactic(state)
+        if not tactics.is_success():
+            return ValueOrError.from_error(tactics.error)
+        value = self.predict_value(state)
+        if not value.is_success():
+            return ValueOrError.from_error(value.error)
+        return ValueOrError.from_success((tactics.value, value.value))
+
+    def sample_tactic(self, state: State) -> ValueOrError[list[str]]:
         assert len(state) == 1, \
             f"expected single branch in state when generating tactic, got {len(state)} - choose one goal first"
         device = self.network.get_device()
@@ -80,7 +89,7 @@ class TacticModel:
         # Check if state is too long for the model's rotary cache
         max_prompt_len = self.network.config.sequence_len * 9
         if len(tokens) > max_prompt_len:
-            return []  # State too long, return no tactics
+            return ValueOrError.from_error("State too long for model's rotary cache")
         
         seed = torch.randint(torch.iinfo(torch.int32).max, (1,), device=device, generator=self.rng).item()
         with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -94,24 +103,13 @@ class TacticModel:
             if "sorry" in tactic or "admit" in tactic:
                 continue
             tactics.append(tactic)
-        return tactics
+        return ValueOrError.from_success(tactics)
 
-    def sample_tactic_batch(self, states: list[State]) -> list[list[str]]:
-        """Batched version of sample_tactic for multiple states at once."""
-        state_strs = []
-        for state in states:
-            assert len(state) == 1, \
-                f"expected single branch in state when generating tactic, got {len(state)} - choose one goal first"
-            state_strs.append(str(state[0].state).strip())
-        return self.sample_tactic_from_str_batch(state_strs)
-
-    def sample_tactic_from_str(self, state_str: str) -> list[str]:
-        """Generate tactics from a state string directly (no State object needed)."""
+    def sample_tactic_from_str(self, state_str: str) -> ValueOrError[list[str]]:
         return self.sample_tactic_from_str_batch([state_str])[0]
 
-    def sample_tactic_from_str_batch(self, state_strs: list[str]) -> list[list[str]]:
+    def sample_tactic_from_str_batch(self, state_strs: list[str]) -> list[ValueOrError[list[str]]]:
         """Batched tactic generation from state strings directly."""
-        import torch
         device = self.network.get_device()
         assert device.type == "cuda"
 
@@ -125,7 +123,7 @@ class TacticModel:
             tokens = self.tokenizer(state_str + "\n<|tactic|>", prepend=self.tokenizer.get_bos_token_id())
             if len(tokens) > max_prompt_len:
                 too_long_indices.add(idx)
-                prompts.append([self.tokenizer.get_bos_token_id()])
+                prompts.append([self.tokenizer.get_bos_token_id()])  # dummy prompt
             else:
                 prompts.append(tokens)
 
@@ -140,7 +138,7 @@ class TacticModel:
         for prompt_idx in range(len(state_strs)):
             # Return empty tactics for states that were too long
             if prompt_idx in too_long_indices:
-                results.append([])
+                results.append(ValueOrError.from_error("State too long for model's rotary cache"))
                 continue
             
             tactics = []
@@ -155,7 +153,66 @@ class TacticModel:
                 if "sorry" in tactic or "admit" in tactic:
                     continue
                 tactics.append(tactic)
-            results.append(tactics)
+            results.append(ValueOrError.from_success(tactics))
+        return results
+
+    def predict_value(self, state: State) -> ValueOrError[float]:
+        assert len(state) == 1, \
+            f"expected single branch in state when predicting value, got {len(state)} - choose one goal first"
+        return self.predict_value_from_str_batch([str(state[0].state).strip()])[0]
+
+    def predict_value_from_str(self, state_str: str) -> ValueOrError[float]:
+        return self.predict_value_from_str_batch([state_str])[0]
+
+    def predict_value_from_str_batch(self, state_strs: list[str]) -> list[ValueOrError[float]]:
+        device = self.network.get_device()
+        assert device.type == "cuda"
+
+        # Get special tokens
+        value_delim_tok = self.tokenizer.encode_special("<|value|>")
+        bin_token_ids = self.tokenizer.get_value_token_ids()
+
+        # Maximum prompt length (same as tactic generation)
+        max_prompt_len = self.network.config.sequence_len * 9
+
+        # Tokenize all states
+        prompts = []
+        too_long_indices = set()
+        for idx, state_str in enumerate(state_strs):
+            tokens = self.tokenizer(state_str + "\n<|value|>", prepend=self.tokenizer.get_bos_token_id())
+            if len(tokens) > max_prompt_len:
+                too_long_indices.add(idx)
+                # Use a minimal prompt - will return default value
+                prompts.append([self.tokenizer.get_bos_token_id(), value_delim_tok])
+            else:
+                prompts.append(tokens)
+
+        # Forward pass
+        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+            _, _, value_logits = self.engine.generate_batch(
+                prompts, num_samples=1, min_tokens=1, max_tokens=1, return_logits=True
+            )
+
+        # Get logits at the generated position (first token after <|value|>). Since prompts are left-padded,
+        # the last position in each sequence contains the logits for the bin prediction.
+        # So for each prompt, we select the first sample (there is just one sample), and the last position.
+        value_logits = torch.stack([value_logits[i][0][-1] for i in range(len(prompts))])  # (B, V)
+
+        # Extract bin logits and compute soft predictions
+        bin_probs = torch.softmax(value_logits.float(), dim=-1)  # (B, V)
+        bin_probs = bin_probs[:, bin_token_ids]  # (B, 64)
+        bin_values = torch.arange(_MIN_VALUE, _MAX_VALUE + 1, dtype=bin_probs.dtype, device=device)
+        values = (bin_probs * bin_values).sum(dim=-1)  # (B,)
+
+        # Convert to MCTS value scale (negative proof depth)
+        # and handle too-long states with a pessimistic default
+        results = []
+        for idx, value in enumerate(values.tolist()):
+            if idx in too_long_indices:
+                # State too long to process - return pessimistic value
+                results.append(ValueOrError.from_error("State too long to process"))
+            else:
+                results.append(ValueOrError.from_success(float(value)))
         return results
 
     def shutdown(self):
@@ -165,15 +222,13 @@ class TacticModel:
     @classmethod
     def create(cls, num_samples: int = 6) -> Self:
         # Lazy imports - only load heavy dependencies when actually creating the model
-        import torch
-        from nanoproof.checkpoints import load_model
-        from nanoproof.engine import Engine
         
         source = "sft"  # which checkpoint to load the model from
         model_tag = "d26"  # model tag to load the model from
         device = torch.device("cuda")
+        step = 903  # TODO
 
-        model, tokenizer, _ = load_model(source, device, phase="eval", model_tag=model_tag)
+        model, tokenizer, _ = load_model(source, device, phase="eval", model_tag=model_tag, step=step)
         engine = Engine(model, tokenizer)
         return cls(model, tokenizer, engine, num_samples=num_samples)
 
@@ -237,11 +292,6 @@ class BlockingTacticModel:
         """Thread-safe sample_tactic that batches calls from multiple threads."""
         assert len(state) == 1
         return self.sample_tactic_from_str(str(state[0].state).strip())
-
-    def sample_tactic_from_str(self, state_str: str) -> ValueOrError[list[str]]:
-        """Thread-safe tactic generation from a state string."""
-        results = self.sample_tactic_from_str_batch([state_str])
-        return results[0]
 
     def sample_tactic_from_str_batch(self, state_strs: list[str]) -> list[ValueOrError[list[str]]]:
         """
@@ -432,6 +482,28 @@ class RemoteTacticModel:
                 raise RLServerDisconnectedError(
                     f"Inference server appears disconnected after {failures} consecutive failures"
                 )
+
+    def predict_value(self, state_str: str) -> float:
+        """Predict value by calling the remote inference server."""
+        try:
+            response = self._session.post(
+                f"http://{self.server_address}/predict_value",
+                json={"states": [state_str]},
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            result = response.json()
+            
+            with self._lock:
+                self._consecutive_failures = 0
+            
+            return result["values"][0]
+        except http_requests.exceptions.Timeout:
+            self._record_failure(f"Timeout calling inference server for value prediction")
+            return -float(_MAX_VALUE)  # Pessimistic default
+        except http_requests.exceptions.RequestException as e:
+            self._record_failure(f"Error calling inference server for value prediction: {e}")
+            return -float(_MAX_VALUE)  # Pessimistic default
     
     def shutdown(self):
         """No-op, exists for API compatibility."""
@@ -465,6 +537,15 @@ def create_blocking_model_app(model: BlockingTacticModel):
         results = model.sample_tactic_from_str_batch(states)
         tactics = [r.value if r.is_success() else [] for r in results]
         return jsonify({"tactics": tactics})
+
+    @app.route("/predict_value", methods=["POST"])
+    def predict_value():
+        data = request.get_json()
+        states = data.get("states", [])
+        if not states:
+            return jsonify({"values": []})
+        values = model.predict_value_batch(states)
+        return jsonify({"values": values})
     
     return app
 
