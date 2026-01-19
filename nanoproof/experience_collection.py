@@ -14,13 +14,14 @@ import traceback
 
 import torch
 import torch.distributed as dist
-
 from leantree.repl_adapter.server import LeanClient
+
 from nanoproof.common import get_dist_info
 from nanoproof.search import Node, Player, Config, Game, run_mcts, extract_transitions, compute_value_target
 from nanoproof.inference import BlockingTacticModel, TacticModel
 from nanoproof.cli import get_monitor, log
 from nanoproof.data.leanworkbook import list_theorems
+from nanoproof.data.leantree_dataloader import STATE_MAX_LEN, TACTIC_MAX_LEN
 
 # Re-export for backwards compatibility
 __all__ = ['ReplayBuffer', 'TheoremsSampler', 'ProverWorker', 'Config', 'run_actor']
@@ -54,7 +55,13 @@ class ReplayBuffer:
 
     def add_transitions(self, transitions: list[tuple[str, str, float]]):
         with self._lock:
-            log(f"Adding {len(transitions)} transitions to replay buffer:", "\n".join(f"  {context} {tactic} {value_target}" for context, tactic, value_target in transitions), component="Collection")
+            received_count = len(transitions)
+            transitions = [
+                (context.strip(), tactic.strip(), value_target)
+                for context, tactic, value_target in transitions
+                if len(context.strip()) <= STATE_MAX_LEN and len(tactic.strip()) <= TACTIC_MAX_LEN
+            ]
+            log(f"Adding {len(transitions)}/{received_count} transitions to replay buffer:", "\n".join(f"  {context} {tactic} {value_target}" for context, tactic, value_target in transitions), component="Collection")
             for context, tactic, value_target in transitions:
                 assert len(context) != 0, f"Empty context in transition: tactic={tactic}, value_target={value_target}"
                 assert len(tactic) != 0, f"Empty tactic in transition: context={context}, value_target={value_target}"
