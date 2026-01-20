@@ -23,9 +23,6 @@ from nanoproof.cli import get_monitor, log
 from nanoproof.data.leanworkbook import list_theorems
 from nanoproof.data.leantree_dataloader import STATE_MAX_LEN, TACTIC_MAX_LEN
 
-# Re-export for backwards compatibility
-__all__ = ['ReplayBuffer', 'TheoremsSampler', 'ProverWorker', 'Config', 'run_actor']
-
 
 class TheoremsSampler:
     """Samples theorems for local experience collection."""
@@ -61,7 +58,7 @@ class ReplayBuffer:
                 for context, tactic, value_target in transitions
                 if len(context.strip()) <= STATE_MAX_LEN and len(tactic.strip()) <= TACTIC_MAX_LEN
             ]
-            log(f"Adding {len(transitions)}/{received_count} transitions to replay buffer:", "\n".join(f"  {context} {tactic} {value_target}" for context, tactic, value_target in transitions), component="Collection")
+            # log(f"Adding {len(transitions)}/{received_count} transitions to replay buffer:" + "\n".join(f"  {context} {tactic} {value_target}" for context, tactic, value_target in transitions), component="Collection")
             for context, tactic, value_target in transitions:
                 assert len(context) != 0, f"Empty context in transition: tactic={tactic}, value_target={value_target}"
                 assert len(tactic) != 0, f"Empty tactic in transition: context={context}, value_target={value_target}"

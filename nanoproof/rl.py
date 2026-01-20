@@ -28,7 +28,7 @@ from nanoproof.rl_server import distributed_collect, distributed_eval, start_coo
 from nanoproof.inference import start_inference_server
 from scripts.prover_eval import eval_success_rate
 
-# TODO: if tactic application results in a state that already is on the path from root, skip the tactic (otherwise we sometimes get stuck in loop of eg. rw [add_comm])
+# TODO: load all IP addresses from a config file
 
 # TODO: save all proofs found during evaluation
 # TODO: (maybe) try removing each tactic and if the proof is still valid, do not add the transition to the replay buffer
@@ -39,8 +39,10 @@ from scripts.prover_eval import eval_success_rate
 # RL Hyperparameters
 run = "dummy"  # wandb run name default ("dummy" is special - we won't log to wandb)
 seed = 0
-model_tag = "d26"
-model_step = 903
+# model_tag = "d26"
+# model_step = 903
+model_tag = "d32"
+model_step = 4515
 # compute/precision
 device_type = ""  # cuda|cpu|mps (empty => autodetect)
 dtype = "bfloat16"
@@ -49,7 +51,8 @@ device_batch_size = 8  # (maybe) max to avoid OOM (on A100 40GB)
 distributed = True  # enable distributed mode (provers on separate nodes)
 inference_server_port = 5000  # port for inference server (distributed mode only)
 poll_interval = 3.0  # how often to poll provers for transitions (seconds)
-lean_servers = "10.10.25.35:8000,10.10.25.36:8000"  # comma-separated list of lean server URLs for monitoring (e.g., "host1:8080,host2:8080") - just for monitoring
+# lean_servers = "10.10.25.35:8000,10.10.25.36:8000"  # comma-separated list of lean server URLs for monitoring (e.g., "host1:8080,host2:8080") - just for monitoring
+lean_servers = "10.10.25.31"  # comma-separated list of lean server URLs for monitoring (e.g., "host1:8080,host2:8080") - just for monitoring
 # data
 fraction_sft = 0.5  # 50% of data will come from Mathlib (leantree), 50% from replay buffer
 collect_every = 1  # how many steps to train between RL data collections  # TODO: when collect_every>1, we need some warmup (collect collect_every*collect_transitions)

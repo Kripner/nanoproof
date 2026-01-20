@@ -1,9 +1,10 @@
 from dataclasses import dataclass
 import enum
-from typing import Self, TYPE_CHECKING
+from typing import Self
 import math
 
-from leantree.repl_adapter.server import LeanProofBranch
+from leantree.repl_adapter.server import LeanProofBranch, LeanClient
+
 from nanoproof.common import pretty_print_tree, ValueOrError
 from nanoproof.cli import get_monitor, log_tactic
 from nanoproof.inference import TacticModel, BlockingTacticModel
@@ -179,6 +180,7 @@ class Node:
         state = [MockProofBranch(s) for s in state_strs]
         
         return cls(
+            parent=None,  # TODO: this is not good
             action=data["action"],
             prior=data["prior"],
             state=state,
@@ -191,7 +193,6 @@ class Node:
             value_target=data.get("value_target", 0),
             children=children,
         )
-
 
 class MockProofBranch:
     """Mock proof branch for deserialized nodes. Mimics LeanProofBranch.state."""
@@ -221,6 +222,47 @@ def compute_value_target(node: Node) -> float:
     else:
         raise ValueError(f"Unknown to_play: {node.to_play}")
 
+def extract_minimal_transitions(node: Node) -> list[tuple[str, str, float]]:
+    pass
+
+def verify_node(node: Node, init_branch: LeanProofBranch) -> str | None:
+    assert node.to_play == Player.OR, f"verify_node: Expected OR root, got {node.to_play}"
+    to_verify = [(node, [init_branch])]
+    i = 0
+    while to_verify:
+        node, branches = to_verify.pop(0)
+        if node.to_play == Player.AND:
+            assert len(branches) == len(node.state), f"verify_node: {len(branches)=} != {len(node.state)=}"
+            for (action, child) in node.children.items():
+                assert isinstance(action, int), f"verify_node: Expected int action below AND node, got {type(action)}"
+                assert child.to_play == Player.OR, f"verify_node: Expected OR node below AND node, got {child.to_play}"
+                to_verify.append((child, child.state))
+        elif node.to_play == Player.OR:
+            assert len(branches) == 1, f"verify_node: Expected 1 branch at OR node, got {len(branches)}"
+            branch = branches[0]
+            solved_actions = [a for a in node.children if node.children[a].is_solved]
+            assert len(solved_actions) == 1, f"verify_node: Expected 1 solved action, got {len(solved_actions)}"
+            action = solved_actions[0]
+            child = node.children[action]
+
+            result = branch.try_apply_tactic(action)
+            if not result.is_success():
+                return f"Tactic application error: '{result.error}'; state: '{branch.state}'; action: `{action}`"
+            
+            new_branches = result.value
+            # new_branches = [b for b in new_branches if not b.state.is_solved()]
+            if len(new_branches) != len(child.state):
+                return f"Unexpected number of branches after tactic application: {len(new_branches)=} != {len(child.state)=}; state: '{branch.state}'; action: `{action}`"
+            if len(new_branches) > 0:
+                to_verify.append((child, new_branches))
+        else:
+            raise AssertionError(f"verify_node: Unknown node type: {node.to_play}")
+
+        i += 1
+        if i > 1000:
+            return f"verify_node: Exceeded maximum number of iterations ({i=})"
+    return None  # no error
+
 def extract_transitions(node: Node) -> list[tuple[str, str, float]]:
     """
     Extract (context, tactic, value_target) transitions from a solved proof tree.
@@ -237,8 +279,8 @@ def extract_transitions(node: Node) -> list[tuple[str, str, float]]:
 
 def _extract_transitions_recursive(node: Node, transitions: list):
     """Recursively extract transitions from solved paths."""
-    if not node.is_solved:
-        return
+    # if not node.is_solved:
+    #     return
     
     # Walk down the OR nodes
     while node.to_play == Player.OR and not node.is_terminal:
@@ -249,11 +291,13 @@ def _extract_transitions_recursive(node: Node, transitions: list):
         
         # Find solved actions
         solved_actions = [a for a in node.children if node.children[a].is_solved]
-        if not solved_actions:
-            break
+        # if not solved_actions:
+        #     break
         
+        assert len(solved_actions) == 1, f"Expected 1 solved action, got {len(solved_actions)}"
+        action = solved_actions[0]
         # Pick shortest tactic
-        action = min(solved_actions, key=lambda a: len(a))
+        # action = min(solved_actions, key=lambda a: len(a))
         
         # Extract transition: (context, tactic, value_target)
         context = str(node.state[0].state).strip()
@@ -434,7 +478,7 @@ def expand_node(
             log_tactic(state_str, action, status="cycle")
             continue
         log_tactic(state_str, action, status="success")
-        new_branches = [b for b in new_branches.value if not b.state.is_solved()]
+        # new_branches = [b for b in new_branches.value if not b.state.is_solved()]
         child = Node(
             parent=node,
             action=action,
@@ -521,7 +565,7 @@ def run_bfs(game: Game, model: "TacticModel"):
             for tactic in tactics:
                 new_branches = branch.try_apply_tactic(tactic)
                 if new_branches.is_success():
-                    new_branches = [b for b in new_branches.value if not b.state.is_solved()]
+                    # new_branches = [b for b in new_branches.value if not b.state.is_solved()]
                     if selected_tactic is None or len(tactic) < len(selected_tactic):
                         selected_tactic = tactic
                         selected_new_branches = new_branches
@@ -580,3 +624,106 @@ def run_bfs(game: Game, model: "TacticModel"):
     return True
 
 
+def _main():
+    theorem = "example (n : Nat) : n + 0 = n := by sorry"
+    # theorem = "example : 1 + 2 = 3 := by sorry"
+
+    client = LeanClient(address="10.10.25.30", port=8000)
+    process = client.get_process()
+    with process as env:
+        env.send_command("""
+            open scoped Real
+            open scoped Nat
+            open scoped Topology
+            open scoped Polynomial
+        """)
+        init_branch = env.proof_from_sorry(theorem)
+        assert init_branch.is_success()
+        init_branch = init_branch.value
+        
+        root = Node(
+            parent=None,
+            action=None,
+            prior=None,
+            state=[init_branch],
+            to_play=Player.OR,
+            reward=None,
+        )
+
+        result = init_branch.try_apply_tactic("induction n")
+        assert result.is_success()
+        new_branches = result.value
+        assert len(new_branches) == 2
+        child = Node(
+            parent=root,
+            action="induction n",
+            prior=None,
+            state=new_branches,
+            to_play=Player.AND,
+            reward=None,
+        )
+        root.children = {"induction n": child}
+
+        gchild1 = Node(
+            parent=child,
+            action=0,
+            prior=None,
+            state=[new_branches[0]],
+            to_play=Player.OR,
+            reward=None,
+        )
+        gchild2 = Node(
+            parent=child,
+            action=1,
+            prior=None,
+            state=[new_branches[1]],
+            to_play=Player.OR,
+            reward=None,
+        )
+        child.children = {0: gchild1, 1: gchild2}
+
+        result = gchild1.state[0].try_apply_tactic("rfl")
+        assert result.is_success()
+        new_branches = result.value
+        assert len(new_branches) == 0
+        ggchild1 = Node(
+            parent=gchild1,
+            action="rfl",
+            prior=None,
+            state=[],
+            to_play=Player.OR,
+            reward=None,
+        )
+        gchild1.children = {"rfl": ggchild1}
+
+        result = gchild2.state[0].try_apply_tactic("rfl")
+        assert result.is_success()
+        new_branches = result.value
+        assert len(new_branches) == 0
+        ggchild2 = Node(
+            parent=gchild2,
+            action="rfl",
+            prior=None,
+            state=[],
+            to_play=Player.OR,
+            reward=None,
+        )
+        gchild2.children = {"rfl": ggchild2}
+
+        root.calculate_solved()
+
+        print(root.pp_tree())
+        print()
+
+        verification = verify_node(root, init_branch)
+        print(f"Verification: {verification if verification is not None else 'Success!'}")
+
+        # root = create_node_tree(
+        #     init_branch,
+        #     [
+        #         "rfl"
+        #     ]
+        # )
+
+if __name__ == "__main__":
+    _main()
