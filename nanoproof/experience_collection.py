@@ -17,7 +17,7 @@ import torch.distributed as dist
 from leantree.repl_adapter.server import LeanClient
 
 from nanoproof.common import get_dist_info
-from nanoproof.search import Node, Player, Config, Game, run_mcts, extract_transitions, compute_value_target
+from nanoproof.search import Node, Player, Config, Game, run_mcts, extract_transitions, compute_value_target, verify_node
 from nanoproof.inference import BlockingTacticModel, TacticModel
 from nanoproof.cli import get_monitor, log
 from nanoproof.data.leanworkbook import list_theorems
@@ -281,8 +281,21 @@ class ProverWorker:
             )
             if game.root.is_solved:
                 compute_value_target(game.root)
+
+                print(f"[Prover] Verifying proof tree")
+                try:
+                    verify_node(game.root)
+                    print("Sucess!")
+                except AssertionError as e:
+                    print(f"[Prover] !!! Verification failed: '{e}'")
+                    print(f"Theorem: '{theorem}'")
+                    print(game.root.pp_tree())
+                    print()
+                    game.root.is_solved = False
+
             return game
 
+# TODO: this should utilize more closely the code used when distributed=True
 @torch.no_grad()
 def run_actor(
     total_to_collect: int,

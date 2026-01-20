@@ -122,13 +122,9 @@ def create_remote_prover_worker(
             "error": error,
         }
         
-        # Track stats locally
-        if game and game.root:
-            buffer.record_game(game.root.is_solved)
-            if game.root.is_solved:
-                print(f"[Prover] SOLVED {theorem_id}")
-        else:
-            buffer.record_game(False)
+        buffer.record_game(is_solved)
+        if is_solved:
+            print(f"[Prover] SOLVED {theorem_id}")
         
         # Submit to coordinator
         url = f"{coordinator_url}/submit_result"

@@ -221,6 +221,7 @@ GPU Node (torchrun with DDP)
 - beta and gamma are the same? (as per code)
 - In the pseudocode, is_optimal is not set on the new children/grandchildren created when expanding a node, even if they are terminal.
 - Replay buffer size seems to be 250k in the pseudocode but 60M in the paper (Supplemental Data Table 6)
+- What's the reward of focus_goal action? We assume it's 0.
 
 
 # Cite

@@ -39,10 +39,10 @@ from scripts.prover_eval import eval_success_rate
 # RL Hyperparameters
 run = "dummy"  # wandb run name default ("dummy" is special - we won't log to wandb)
 seed = 0
-# model_tag = "d26"
-# model_step = 903
-model_tag = "d32"
-model_step = 4515
+model_tag = "d26"
+model_step = 903
+# model_tag = "d32"
+# model_step = 4515
 # compute/precision
 device_type = ""  # cuda|cpu|mps (empty => autodetect)
 dtype = "bfloat16"

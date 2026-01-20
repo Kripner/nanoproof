@@ -225,8 +225,10 @@ def compute_value_target(node: Node) -> float:
 def extract_minimal_transitions(node: Node) -> list[tuple[str, str, float]]:
     pass
 
-def verify_node(node: Node, init_branch: LeanProofBranch) -> str | None:
+def verify_node(node: Node):
     assert node.to_play == Player.OR, f"verify_node: Expected OR root, got {node.to_play}"
+    assert len(node.state) == 1, f"verify_node: Expected 1 branch at root, got {len(node.state)}"
+    init_branch = node.state[0]
     to_verify = [(node, [init_branch])]
     i = 0
     while to_verify:
@@ -246,8 +248,7 @@ def verify_node(node: Node, init_branch: LeanProofBranch) -> str | None:
             child = node.children[action]
 
             result = branch.try_apply_tactic(action)
-            if not result.is_success():
-                return f"Tactic application error: '{result.error}'; state: '{branch.state}'; action: `{action}`"
+            assert result.is_success(), f"verify_node: Tactic application error: '{result.error}'; state: '{branch.state}'; action: `{action}`"
             
             new_branches = result.value
             # new_branches = [b for b in new_branches if not b.state.is_solved()]
@@ -260,8 +261,7 @@ def verify_node(node: Node, init_branch: LeanProofBranch) -> str | None:
 
         i += 1
         if i > 1000:
-            return f"verify_node: Exceeded maximum number of iterations ({i=})"
-    return None  # no error
+            raise AssertionError(f"verify_node: Exceeded maximum number of iterations ({i=})")
 
 def extract_transitions(node: Node) -> list[tuple[str, str, float]]:
     """
@@ -415,8 +415,8 @@ def select_child(config: Config, node: Node) -> tuple[Action, Node]:
 # the prior.
 def ucb_score(config: Config, parent: Node, child: Node) -> float:
     pb_c = (
-            math.log((parent.visit_count + config.pb_c_base + 1) / config.pb_c_base)
-            + config.pb_c_init
+        math.log((parent.visit_count + config.pb_c_base + 1) / config.pb_c_base)
+        + config.pb_c_init
     )
     pb_c *= math.sqrt(parent.visit_count) / (child.visit_count + 1)
 
@@ -479,6 +479,7 @@ def expand_node(
             continue
         log_tactic(state_str, action, status="success")
         # new_branches = [b for b in new_branches.value if not b.state.is_solved()]
+        new_branches = new_branches.value
         child = Node(
             parent=node,
             action=action,
@@ -501,7 +502,7 @@ def expand_node(
                     prior=1.0 / len(new_branches),
                     state=[branch],
                     to_play=Player.OR,
-                    reward=None,  # this reward is never used
+                    reward=0.0,
                 )
                 child.children[i] = grandchild
 
@@ -566,6 +567,7 @@ def run_bfs(game: Game, model: "TacticModel"):
                 new_branches = branch.try_apply_tactic(tactic)
                 if new_branches.is_success():
                     # new_branches = [b for b in new_branches.value if not b.state.is_solved()]
+                    new_branches = new_branches.value
                     if selected_tactic is None or len(tactic) < len(selected_tactic):
                         selected_tactic = tactic
                         selected_new_branches = new_branches
@@ -715,8 +717,8 @@ def _main():
         print(root.pp_tree())
         print()
 
-        verification = verify_node(root, init_branch)
-        print(f"Verification: {verification if verification is not None else 'Success!'}")
+        verify_node(root)
+        print("Verification: Success!")
 
         # root = create_node_tree(
         #     init_branch,
