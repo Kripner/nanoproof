@@ -21,30 +21,18 @@ import argparse
 import threading
 import time
 from dataclasses import dataclass
-from typing import Self, TYPE_CHECKING
+from typing import Self
 
 import requests as http_requests
 import torch
 from flask import Flask, request, jsonify
 
 from nanoproof.checkpoints import load_model
-from nanoproof.cli import get_monitor, log
+from nanoproof.cli import log
 from nanoproof.common import ValueOrError
 from nanoproof.engine import Engine
-from nanoproof.tokenizer import _MIN_VALUE, _MAX_VALUE
-
-# Heavy imports are done lazily inside TacticModel to speed up prover_server startup
-# These are only imported when TacticModel.create() is called:
-# - torch
-# - nanoproof.checkpoints (load_model)
-# - nanoproof.engine (Engine)
-# - nanoproof.model (Transformer)
-# - nanoproof.tokenizer (HuggingFaceTokenizer)
-
-if TYPE_CHECKING:
-    # For type hints only - not actually imported at runtime
-    from nanoproof.model import Transformer
-    from nanoproof.tokenizer import HuggingFaceTokenizer
+from nanoproof.tokenizer import _MIN_VALUE, _MAX_VALUE, HuggingFaceTokenizer
+from nanoproof.model import Transformer
 
 
 # Type alias for State - avoid circular import with search.py

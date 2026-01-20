@@ -600,6 +600,19 @@ body {
   margin-top: 2px;
 }
 
+.transition-value {
+  display: inline-block;
+  background: var(--bg-secondary);
+  color: var(--accent-blue);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.85em;
+  font-weight: 500;
+  margin-right: 6px;
+  min-width: 40px;
+  text-align: center;
+}
+
 .tactic-item {
   display: flex;
   gap: 8px;
@@ -883,6 +896,12 @@ body {
 
 .modal-code.state {
   color: var(--text-secondary);
+}
+
+.modal-code.value {
+  color: var(--accent-blue);
+  font-weight: 600;
+  font-size: var(--font-md);
 }
 
 /* Clickable items */

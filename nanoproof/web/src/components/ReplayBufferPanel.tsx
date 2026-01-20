@@ -9,6 +9,7 @@ interface ModalData {
   state: string;
   tactic: string;
   status?: 'success' | 'error' | 'cycle';
+  value?: number;
 }
 
 export function ReplayBufferPanel() {
@@ -135,10 +136,13 @@ export function ReplayBufferPanel() {
                 <div 
                   key={i} 
                   className="transition-item clickable"
-                  onClick={() => setModalData({ type: 'transition', state: String(t[0]), tactic: String(t[1]) })}
+                  onClick={() => setModalData({ type: 'transition', state: String(t[0]), tactic: String(t[1]), value: t[2] })}
                 >
                   <div className="transition-state">{String(t[0])}</div>
-                  <div className="transition-tactic">→ {t[1]}</div>
+                  <div className="transition-tactic">
+                    <span className="transition-value">{typeof t[2] === 'number' ? t[2].toFixed(2) : '?'}</span>
+                    → {t[1]}
+                  </div>
                 </div>
               ))
             )}
@@ -172,10 +176,13 @@ export function ReplayBufferPanel() {
                 <div 
                   key={i} 
                   className="transition-item clickable"
-                  onClick={() => setModalData({ type: 'transition', state: String(t[0]), tactic: String(t[1]) })}
+                  onClick={() => setModalData({ type: 'transition', state: String(t[0]), tactic: String(t[1]), value: t[2] })}
                 >
                   <div className="transition-state">{String(t[0])}</div>
-                  <div className="transition-tactic">→ {t[1]}</div>
+                  <div className="transition-tactic">
+                    <span className="transition-value">{typeof t[2] === 'number' ? t[2].toFixed(2) : '?'}</span>
+                    → {t[1]}
+                  </div>
                 </div>
               ))
             )}
@@ -226,6 +233,12 @@ export function ReplayBufferPanel() {
               <div className="modal-label">Tactic</div>
               <div className="modal-code tactic">{modalData.tactic}</div>
             </div>
+            {modalData.type === 'transition' && modalData.value !== undefined && (
+              <div className="modal-section">
+                <div className="modal-label">Value Target</div>
+                <div className="modal-code value">{modalData.value.toFixed(4)}</div>
+              </div>
+            )}
           </>
         )}
       </Modal>
