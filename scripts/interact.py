@@ -54,18 +54,28 @@ if MODE == "raw_engine":
 
 elif MODE == "tactic_model":
     tactic_model = TacticModel.create(model_tag="d26", step=903)
+    _cached_value = None  # Cache value from tactic generation
 
     def generate_(inp_) -> list[str]:
-        tactics = tactic_model.sample_tactic_from_str(inp_.strip())
-        if not tactics.is_success():
-            raise RuntimeError(f"Tactic generation failed: {tactics.error}")
-        return tactics.value
+        global _cached_value
+        result = tactic_model.sample_tactic_from_str(inp_.strip())
+        if not result.is_success():
+            raise RuntimeError(f"Tactic generation failed: {result.error}")
+        tactics, value = result.value
+        _cached_value = value
+        return tactics
 
     def predict_value_(inp_) -> float:
-        value = tactic_model.predict_value_from_str(inp_.strip())
-        if not value.is_success():
-            raise RuntimeError(f"Value prediction failed: {value.error}")
-        return value.value
+        # Value was already computed during tactic generation
+        global _cached_value
+        if _cached_value is not None:
+            return _cached_value
+        # Fallback: call sample_tactic to get value
+        result = tactic_model.sample_tactic_from_str(inp_.strip())
+        if not result.is_success():
+            raise RuntimeError(f"Value prediction failed: {result.error}")
+        _, value = result.value
+        return value
 
     generate = generate_
     predict_value = predict_value_

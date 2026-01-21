@@ -61,7 +61,7 @@ collect_transitions = 100  # how many proof transitions to collect in one collec
 num_actors = 32  # number of parallel actor threads for experience collection and evaluation
 num_sampled_tactics = 6  # number of tactics to sample per state in MCTS
 batch_timeout = 0.2  # timeout in seconds for batching LLM calls
-max_batch_tokens = 8000  # max total tokens per inference batch (H100)
+max_batch_tokens = 6000  # max total tokens per inference batch (A100 40GB)
 # optimization
 target_examples_per_step = 512
 unembedding_lr = 0.004

@@ -353,16 +353,12 @@ def run_mcts(config: Config, game: Game, model: "TacticModel | BlockingTacticMod
             search_path.append(node)
 
         assert node.state is not None
-        tactics = model.sample_tactic(node.state)
-        if not tactics.is_success():
-            raise RuntimeError(f"Tactic generation failed: {tactics.error}")
-        tactics = tactics.value
+        result = model.sample_tactic(node.state)
+        if not result.is_success():
+            raise RuntimeError(f"Tactic/value prediction failed: {result.error}")
+        tactics, value = result.value
         tactic_logprobs = [1.0] * len(tactics)  # TODO (!): use the actual action logprobs
-
-        value = model.predict_value(node.state)
-        if not value.is_success():
-            raise RuntimeError(f"Value prediction failed: {value.error}")
-        value = -value.value  # convert to MCTS value scale (negative proof depth)
+        value = -value  # convert to MCTS value scale (negative proof depth)
 
         expand_node(node, tactics, tactic_logprobs, config.prior_temperature)
 
@@ -550,13 +546,13 @@ def run_bfs(game: Game, model: "TacticModel"):
         print("-" * 80 + f"Solving state:\n{branch.state}\n")
         for retry_idx in range(10):
             print("Generating ..." + f" (retry {retry_idx})" if retry_idx != 0 else "")
-            tactics_result = model.sample_tactic(node.state)
-            if isinstance(tactics_result, ValueOrError):
-                if not tactics_result.is_success():
-                    raise RuntimeError(f"Tactic generation failed: {tactics_result.error}")
-                tactics = tactics_result.value
+            result = model.sample_tactic(node.state)
+            if isinstance(result, ValueOrError):
+                if not result.is_success():
+                    raise RuntimeError(f"Tactic generation failed: {result.error}")
+                tactics, _value = result.value
             else:
-                tactics = tactics_result
+                tactics, _value = result
             # [tactic] = tactics
             # print(f"Trying tactic:\n'{tactic}'")
             options = []
