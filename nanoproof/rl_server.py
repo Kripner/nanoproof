@@ -139,11 +139,63 @@ def get_dispatcher() -> TheoremDispatcher:
 class InferenceRouter:
     """Routes inference requests to backend servers in round-robin fashion."""
     
-    def __init__(self, inference_ports: list[int], host: str = "127.0.0.1", timeout: float = 30.0):
-        self.endpoints = [f"http://{host}:{port}" for port in inference_ports]
+    def __init__(self, endpoints: list[str], timeout: float = 30.0):
+        """
+        Create an inference router.
+        
+        Args:
+            endpoints: List of full URLs like ["http://127.0.0.1:5001", "http://10.0.0.2:5002"]
+            timeout: Request timeout in seconds
+        """
+        self.endpoints = endpoints
         self.timeout = timeout
         self._next_idx = 0
         self._lock = threading.Lock()
+    
+    @classmethod
+    def from_ports(cls, inference_ports: list[int], host: str = "127.0.0.1", timeout: float = 30.0):
+        """Create router for inference servers on specified ports (single-node setup)."""
+        endpoints = [f"http://{host}:{port}" for port in inference_ports]
+        return cls(endpoints, timeout)
+    
+    def wait_for_servers(self, startup_timeout: float = 30.0, check_interval: float = 0.5) -> bool:
+        """Wait for all inference servers to be healthy.
+        
+        Returns True if all servers are healthy, False if timeout.
+        """
+        import time
+        start_time = time.time()
+        
+        while time.time() - start_time < startup_timeout:
+            all_healthy = True
+            for endpoint in self.endpoints:
+                try:
+                    response = requests.get(f"{endpoint}/health", timeout=2.0)
+                    if response.status_code != 200:
+                        all_healthy = False
+                        break
+                except Exception:
+                    all_healthy = False
+                    break
+            
+            if all_healthy:
+                log(f"All {len(self.endpoints)} inference servers are healthy", component="Coordinator")
+                return True
+            
+            time.sleep(check_interval)
+        
+        # Log which servers failed
+        for endpoint in self.endpoints:
+            try:
+                response = requests.get(f"{endpoint}/health", timeout=2.0)
+                if response.status_code == 200:
+                    log(f"Inference server {endpoint}: OK", component="Coordinator")
+                else:
+                    log(f"Inference server {endpoint}: unhealthy (status {response.status_code})", component="Coordinator")
+            except Exception as e:
+                log(f"Inference server {endpoint}: unreachable ({e})", component="Coordinator")
+        
+        return False
     
     def _get_next_endpoint(self) -> str:
         """Get next endpoint in round-robin fashion."""
@@ -306,16 +358,25 @@ def create_coordinator_app(registry: ProverRegistry, router: InferenceRouter, di
     return app
 
 
-def start_coordinator(coordinator_port: int, inference_ports: list[int]):
+def start_coordinator(
+    coordinator_port: int, 
+    inference_endpoints: list[str],
+    startup_timeout: float = 30.0
+):
     """Start coordinator server in background thread.
     
+    Args:
+        coordinator_port: Port for the coordinator to listen on
+        inference_endpoints: List of inference server URLs (e.g., ["http://127.0.0.1:5001"])
+        startup_timeout: Maximum time to wait for inference servers to be healthy
+    
     Returns:
-        The background thread running the coordinator.
+        Tuple of (coordinator_thread, inference_router).
         
     Note: Call shutdown_coordinator() before exit to stop accepting new requests.
     """
     registry = get_registry()
-    router = InferenceRouter(inference_ports)
+    router = InferenceRouter(inference_endpoints)
     dispatcher = get_dispatcher()
     app = create_coordinator_app(registry, router, dispatcher)
     
@@ -326,9 +387,15 @@ def start_coordinator(coordinator_port: int, inference_ports: list[int]):
     
     thread = threading.Thread(target=run_server, daemon=True)
     thread.start()
-    log(f"Coordinator started on port {coordinator_port}, proxying to {len(inference_ports)} inference server(s)", 
+    log(f"Coordinator started on port {coordinator_port}, proxying to {len(inference_endpoints)} inference server(s): {inference_endpoints}", 
         component="Coordinator")
-    return thread
+    
+    # Wait for all inference servers to be healthy
+    if not router.wait_for_servers(startup_timeout=startup_timeout):
+        log("WARNING: Not all inference servers are healthy! Distributed collection may fail.", 
+            component="Coordinator")
+    
+    return thread, router
 
 
 def shutdown_coordinator():

@@ -30,6 +30,7 @@ from nanoproof.infra import load_infra_config, InfraConfig, parse_lean_server
 from scripts.prover_eval import eval_success_rate
 
 # TODO: save all proofs found during evaluation
+# TODO: in each episode, save a sample of training data (right before it goes into the model)
 # TODO: (maybe) try removing each tactic and if the proof is still valid, do not add the transition to the replay buffer
 #   ... however, then we need to be sure to update the proof states
 # TODO: matchmaker
@@ -47,7 +48,7 @@ device_type = ""  # cuda|cpu|mps (empty => autodetect)
 dtype = "bfloat16"
 device_batch_size = 8  # (maybe) max to avoid OOM (on A100 40GB)
 # distributed mode - controlled by infra_file
-infra_file = ""  # path to infra.toml for distributed mode (empty => local mode)
+infra_file = "infra.toml"  # path to infra.toml for distributed mode (empty => local mode)
 inference_server_port = 5000  # port for inference server (distributed mode only)
 poll_interval = 3.0  # how often to poll provers for transitions (seconds)
 # local mode settings
@@ -252,10 +253,10 @@ if distributed:
     
     # Master also starts the coordinator (proxies inference + handles registration)
     if master_process:
-        inference_ports = [inference_server_port + 1 + r for r in range(ddp_world_size)]
-        coordinator_thread = start_coordinator(inference_server_port, inference_ports)
-        # Give coordinator time to start
-        time.sleep(0.5)
+        inference_endpoints = [f"http://127.0.0.1:{inference_server_port + 1 + r}" for r in range(ddp_world_size)]
+        coordinator_thread, inference_router = start_coordinator(
+            inference_server_port, inference_endpoints, startup_timeout=30.0
+        )
     
     # Sync again so all ranks wait for coordinator
     if ddp:
