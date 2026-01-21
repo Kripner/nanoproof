@@ -45,16 +45,16 @@ class ProverRegistry:
     
     def __init__(self):
         self._provers: set[str] = set()
-        self._collecting: bool = False
+        self._autostart: bool = False
         self._lock = threading.Lock()
     
     def register(self, address: str):
-        """Register a prover server. If collection is running, start it immediately."""
+        """Register a prover server. If autostart is enabled, start it immediately."""
         with self._lock:
             self._provers.add(address)
             log(f"Prover registered: {address} (total: {len(self._provers)})", component="Registry")
         
-            if self._collecting:
+            if self._autostart:
                 start_prover(address)
     
     def unregister(self, address: str):
@@ -73,15 +73,15 @@ class ProverRegistry:
         with self._lock:
             return len(self._provers)
     
-    def set_collecting(self, collecting: bool):
-        """Set whether collection is currently running."""
+    def set_autostart(self, autostart: bool):
+        """Set whether newly registered provers should be auto-started."""
         with self._lock:
-            self._collecting = collecting
+            self._autostart = autostart
     
-    def is_collecting(self) -> bool:
-        """Check if collection is currently running."""
+    def is_autostart(self) -> bool:
+        """Check if autostart is enabled."""
         with self._lock:
-            return self._collecting
+            return self._autostart
 
 
 # Global registry instance
@@ -266,7 +266,7 @@ def create_coordinator_app(registry: ProverRegistry, router: InferenceRouter, di
         return jsonify({
             "status": "ok",
             "provers": registry.count(),
-            "collecting": registry.is_collecting(),
+            "autostart": registry.is_autostart(),
         })
     
     @app.route("/generate", methods=["POST"])
@@ -338,7 +338,7 @@ def create_coordinator_app(registry: ProverRegistry, router: InferenceRouter, di
         if not address:
             return jsonify({"error": "address required"}), 400
         registry.register(address)
-        return jsonify({"status": "registered", "collecting": registry.is_collecting()})
+        return jsonify({"status": "registered", "autostart": registry.is_autostart()})
     
     @app.route("/unregister", methods=["POST"])
     def unregister():
@@ -562,7 +562,7 @@ def distributed_collect(
     # Set up dispatcher
     dispatcher.get_theorem = get_theorem
     dispatcher.submit_result = submit_result
-    registry.set_collecting(True)
+    registry.set_autostart(True)
     
     try:
         # Wait for at least one prover
@@ -625,7 +625,7 @@ def distributed_collect(
         log(f"Distributed collection complete: {collected} transitions", component="Coordinator")
         return collected
     finally:
-        registry.set_collecting(False)
+        registry.set_autostart(False)
 
 
 def distributed_eval(theorems: list[str], dataset_name: str = "eval", no_progress_timeout: float = 120.0) -> dict:
@@ -690,7 +690,7 @@ def distributed_eval(theorems: list[str], dataset_name: str = "eval", no_progres
             expected_theorem = sent_theorems[result.theorem_id]
             if result.theorem != expected_theorem:
                 log(f"Theorem mismatch for {result.theorem_id}: "
-                    f"expected {expected_theorem[:50]!r}..., got {result.theorem[:50]!r}...", 
+                    f"expected {expected_theorem[:100]!r}..., got {result.theorem[:100]!r}...", 
                     component="Dispatcher")
                 invalid = True
                 return
@@ -737,61 +737,65 @@ def distributed_eval(theorems: list[str], dataset_name: str = "eval", no_progres
     # Set up dispatcher
     dispatcher.get_theorem = get_theorem
     dispatcher.submit_result = submit_result
+    registry.set_autostart(True)
     
-    # Start provers
-    start_all_provers(registry.get_all())
-    
-    # Poll for results with progress updates
-    poll_interval = 2.0
-    last_progress_time = time.time()
-    last_result_count = 0
-    
-    while not done.wait(timeout=poll_interval):
-        # Update monitor with current progress
-        if monitor:
-            metrics = get_metrics()
-            monitor.update_eval_progress(
-                current=metrics['total'],
-                solved=metrics['solved'],
-                errors=metrics['errors']
-            )
+    try:
+        # Start provers
+        start_all_provers(registry.get_all())
         
-        # Track progress for stall detection
-        current_count = len(results)
-        if current_count > last_result_count:
-            last_progress_time = time.time()
-            last_result_count = current_count
+        # Poll for results with progress updates
+        poll_interval = 2.0
+        last_progress_time = time.time()
+        last_result_count = 0
         
-        # Poll prover servers for status updates
-        poll_all_provers(registry.get_all(), monitor)
+        while not done.wait(timeout=poll_interval):
+            # Update monitor with current progress
+            if monitor:
+                metrics = get_metrics()
+                monitor.update_eval_progress(
+                    current=metrics['total'],
+                    solved=metrics['solved'],
+                    errors=metrics['errors']
+                )
+            
+            # Track progress for stall detection
+            current_count = len(results)
+            if current_count > last_result_count:
+                last_progress_time = time.time()
+                last_result_count = current_count
+            
+            # Poll prover servers for status updates
+            poll_all_provers(registry.get_all(), monitor)
+            
+            # Check for no-progress timeout or provers disconnected
+            no_progress_elapsed = time.time() - last_progress_time
+            prover_count = registry.count()
+            if no_progress_elapsed > no_progress_timeout or prover_count == 0:
+                missing = expected - len(results)
+                log(f"Eval stalled: no progress for {no_progress_elapsed:.0f}s, "
+                    f"provers={prover_count}, missing {missing} results", component="Coordinator")
+                timed_out = True
+                break
         
-        # Check for no-progress timeout or provers disconnected
-        no_progress_elapsed = time.time() - last_progress_time
-        prover_count = registry.count()
-        if no_progress_elapsed > no_progress_timeout or prover_count == 0:
-            missing = expected - len(results)
-            log(f"Eval stalled: no progress for {no_progress_elapsed:.0f}s, "
-                f"provers={prover_count}, missing {missing} results", component="Coordinator")
-            timed_out = True
-            break
-    
-    pause_all_provers(registry.get_all())
-    
-    # Clear dispatcher
-    dispatcher.get_theorem = lambda: None
-    dispatcher.submit_result = lambda r: None
-    
-    # Check for missing results (only if we didn't time out - timeout is expected to have missing results)
-    with results_lock:
-        missing_ids = set(sent_theorems.keys()) - received_ids
-        if missing_ids and not timed_out:
-            log(f"Missing results for {len(missing_ids)} theorems: "
-                f"{sorted(missing_ids)[:10]}{'...' if len(missing_ids) > 10 else ''}", 
-                component="Dispatcher")
-            invalid = True
-    
-    metrics = get_metrics()
-    status = "timed out" if timed_out else "complete"
-    log(f"Eval {status}: {metrics['solved']}/{metrics['total']} solved (expected {expected})", 
-        component="Coordinator")
-    return metrics
+        pause_all_provers(registry.get_all())
+        
+        # Clear dispatcher
+        dispatcher.get_theorem = lambda: None
+        dispatcher.submit_result = lambda r: None
+        
+        # Check for missing results (only if we didn't time out - timeout is expected to have missing results)
+        with results_lock:
+            missing_ids = set(sent_theorems.keys()) - received_ids
+            if missing_ids and not timed_out:
+                log(f"Missing results for {len(missing_ids)} theorems: "
+                    f"{sorted(missing_ids)[:10]}{'...' if len(missing_ids) > 10 else ''}", 
+                    component="Dispatcher")
+                invalid = True
+        
+        metrics = get_metrics()
+        status = "timed out" if timed_out else "complete"
+        log(f"Eval {status}: {metrics['solved']}/{metrics['total']} solved (expected {expected})", 
+            component="Coordinator")
+        return metrics
+    finally:
+        registry.set_autostart(False)
