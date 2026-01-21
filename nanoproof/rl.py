@@ -13,6 +13,7 @@ import wandb
 import torch
 import torch.distributed as dist
 import leantree.augmentations
+from leantree.core.lean import LeanGoal
 
 from nanoproof.common import compute_init, compute_cleanup, get_base_dir, DummyWandb, autodetect_device_type, SimpleTimer, flush, active_barrier_master, active_barrier_wait
 from nanoproof.checkpoints import load_model, save_checkpoint
@@ -72,6 +73,7 @@ embedding_lr = 0.2
 matrix_lr = 0.02
 weight_decay = 0.0
 init_lr_frac = 0.02
+augment_data = True  # TODO: TURN ON AND TEST
 # evaluation and logging there of
 eval_every = 50
 eval_start = 0  # step to start evaluation at (skip evaluation before this step)
@@ -105,8 +107,6 @@ else:
     lean_servers = [str(local_lean_server)]
 
 # -----------------------------------------------------------------------------
-
-# TODO (!): add augmentations, similar to SFT
 
 # Compute init
 device_type = autodetect_device_type() if device_type == "" else device_type
@@ -195,10 +195,31 @@ rl_monitor.set_lean_server(config.server_address, config.server_port)
 if distributed and lean_servers:
     rl_monitor.set_lean_servers(lean_servers)
 
-# augmentation = leantree.augmentations.ShuffleGoalsAndHypotheses(seed=seed)
+shuffle_goals_and_hypotheses = leantree.augmentations.ShuffleGoalsAndHypotheses(seed=seed)
+random_rename = leantree.augmentations.RandomRename(seed=seed)
 
 mathlib_train = list(iter_data(split="train"))
 random.Random(rank_seed).shuffle(mathlib_train)
+
+def augment(state_str, tactic_str):
+    before_state_str = state_str
+
+    goals = [LeanGoal.from_string(goal_str) for goal_str in state_str.split("\n\n")]
+    goals = shuffle_goals_and_hypotheses.run_on_goals(goals)
+    goals, tactic = random_rename.run_on_goals(goals, tactic_str)
+
+    state_str = "\n\n".join([str(goal) for goal in goals])
+    tactic_str = tactic
+
+    # TODO: REMOVE
+    print(f"""
+    Before:
+    {before_state_str}
+    After:
+    {state_str}
+    """)
+
+    return state_str, tactic_str
 
 def train_generator():
     rng = random.Random(rank_seed)
@@ -207,14 +228,18 @@ def train_generator():
         assert len(replay_buffer.buffer) >= collect_transitions
         if rng.random() < fraction_sft:
             try:
-                yield next(mathlib_iter)
+                state, tactic, value_target = next(mathlib_iter)
             except StopIteration:
                 mathlib_iter = iter(mathlib_train)
-                yield next(mathlib_iter)
+                state, tactic, value_target = next(mathlib_iter)
         else:
             state, tactic, value_target = replay_buffer.sample_transition()
             proof_depth = -value_target
-            yield state, tactic, proof_depth
+
+        if augment_data:
+            state, tactic = augment(state, tactic)
+
+        yield state, tactic, proof_depth
 
 
 train_loader = rl_data_generator(train_generator(), batch_size=device_batch_size)
