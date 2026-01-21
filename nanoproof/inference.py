@@ -209,14 +209,20 @@ class BlockingTacticModel:
     def network(self):
         return self.inner_model.network
 
-    def _pending_tokens(self) -> int:
-        """Estimate total tokens in pending queue (assumes padding to max length)."""
-        if not self._pending:
+    def _estimate_batch_tokens(self, items: list[tuple[str, any, any]]) -> int:
+        """Estimate total tokens for a batch of items (assumes padding to max length).
+        
+        Memory scales with max_len * batch_size * num_samples due to padding and sample expansion.
+        """
+        if not items:
             return 0
         # Estimate tokens as chars/4 (rough average for code/math text)
-        max_len = max(len(item[0]) // 4 + 1 for item in self._pending)
-        # Memory scales with max_len * batch_size * num_samples (due to padding + sample expansion)
-        return max_len * len(self._pending) * self.inner_model.num_samples
+        max_len = max(len(item[0]) // 4 + 1 for item in items)
+        return max_len * len(items) * self.inner_model.num_samples
+
+    def _pending_tokens(self) -> int:
+        """Estimate total tokens in pending queue."""
+        return self._estimate_batch_tokens(self._pending)
 
     def _should_process(self) -> bool:
         """Check if batch should be processed based on timeout or token count."""
@@ -330,10 +336,20 @@ class BlockingTacticModel:
         self._total_batches += 1
         batch_num = self._total_batches
 
-        # Take all pending items
-        batch = self._pending[:]
-        self._pending = []
-        self._first_request_time = None
+        # Take items up to max_batch_tokens limit to avoid OOM
+        batch = []
+        remaining = []
+        
+        for item in self._pending:
+            candidate_batch = batch + [item]
+            if batch and self._estimate_batch_tokens(candidate_batch) > self.max_batch_tokens:
+                # Adding this item would exceed limit, save for next batch
+                remaining.append(item)
+            else:
+                batch = candidate_batch
+        
+        self._pending = remaining
+        self._first_request_time = time.time() if remaining else None
 
         # Release lock during inference
         self._lock.release()
