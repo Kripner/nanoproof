@@ -14,7 +14,7 @@ import wandb
 import torch
 import torch.distributed as dist
 
-from nanoproof.common import compute_init, compute_cleanup, get_base_dir, DummyWandb, autodetect_device_type, SimpleTimer, flush
+from nanoproof.common import compute_init, compute_cleanup, get_base_dir, DummyWandb, autodetect_device_type, SimpleTimer, flush, active_barrier_master, active_barrier_wait
 from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
 from nanoproof.data.leantree import iter_data
@@ -104,7 +104,6 @@ else:
 # -----------------------------------------------------------------------------
 
 # TODO (!): add augmentations, similar to SFT
-# TODO: simplify the barrier logic
 
 # Compute init
 device_type = autodetect_device_type() if device_type == "" else device_type
@@ -161,11 +160,6 @@ else:
         max_batch_tokens=max_batch_tokens
     )
     model = tactic_model.network
-
-# print0(f"Target examples per step: {target_examples_per_step}")
-# print0(f"Collect every: {collect_every}")
-# collect_transitions = target_examples_per_step * collect_every
-# print0(f"=> Setting collect_transitions: {collect_transitions}")
 
 # -----------------------------------------------------------------------------
 # DataLoader
@@ -288,73 +282,6 @@ atexit.register(cleanup)
 while True:
     timer = SimpleTimer()
     
-    if step % collect_every == 0:
-        # Check if we can resume from a previous run's replay buffer
-        resume_file = os.path.join(resume_from, f"replay_buffer_{step:05d}.json") if resume_from else None
-        if resume_file and os.path.exists(resume_file):
-            if master_process:
-                log(f"Loading replay buffer at step {step} from {resume_file}", component="Main")
-            with open(resume_file, "r") as f:
-                replay_buffer.buffer = json.load(f)
-            rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
-            if master_process:
-                log(f"Loaded {len(replay_buffer.buffer)} transitions at step {step} from previous run", component="Main")
-            flush()  # Free any GPU memory from inference before training
-            
-            # Synchronize all ranks after loading
-            if ddp:
-                dist.barrier()
-        else:
-            # collect proofs
-            timer.start("collect")
-            model.eval()
-            rl_monitor.start_collection(target_samples=collect_transitions, num_actors=num_actors)
-            rl_monitor.set_step(step)
-            
-            if distributed:
-                if master_process:
-                    # Distributed mode: coordinate remote provers (only master does this)
-                    # Retry until we have enough transitions
-                    while len(replay_buffer.local_buffer) < collect_transitions:
-                        collected = distributed_collect(
-                            sampler=theorems_sampler,
-                            target_transitions=collect_transitions,
-                            poll_interval=poll_interval,
-                            replay_buffer=replay_buffer,
-                        )
-                        if collected < collect_transitions:
-                            log(f"Collection incomplete ({collected}/{collect_transitions}), retrying...", 
-                                component="Coordinator")
-                    # Signal completion to other ranks via store (avoid NCCL timeout)
-                    store = dist.distributed_c10d._get_default_store()
-                    store.set(f"collection_done_{step}", "1")
-                else:
-                    # Non-master ranks wait for master to finish (without NCCL barrier)
-                    store = dist.distributed_c10d._get_default_store()
-                    while True:
-                        try:
-                            done = store.get(f"collection_done_{step}")
-                            if done == b"1":
-                                break
-                        except Exception:
-                            pass
-                        time.sleep(1.0)
-                
-                # Wait for provers to abort their MCTS searches and release Lean processes
-                time.sleep(3.0)
-            else:
-                # Local mode: run actors locally
-                run_actor(collect_transitions, config, tactic_model, replay_buffer, theorems_sampler)
-            
-            model.train()
-            timer.end("collect")
-            flush()  # Free memory from collection before training
-            replay_buffer.synchronize()
-            if master_process:
-                rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
-                with open(os.path.join(output_dir, f"replay_buffer_{step:05d}.json"), "w") as f:
-                    json.dump(replay_buffer.buffer, f)
-
     if step % eval_every == 0 and step >= eval_start:
         timer.start("eval")
         model.eval()
@@ -409,20 +336,9 @@ while True:
                         wandb_data["leanworkbook_invalid"] = True
                 wandb_run.log(wandb_data)
                 
-                # Signal completion to other ranks via store (avoid NCCL blocking GPU)
-                store = dist.distributed_c10d._get_default_store()
-                store.set(f"eval_done_{step}", "1")
+                active_barrier_master(f"eval_done_{step}")
             else:
-                # Non-master ranks wait for master to finish (without NCCL barrier)
-                store = dist.distributed_c10d._get_default_store()
-                while True:
-                    try:
-                        done = store.get(f"eval_done_{step}")
-                        if done == b"1":
-                            break
-                    except Exception:
-                        pass
-                    time.sleep(1.0)
+                active_barrier_wait(f"eval_done_{step}")
         else:
             # Local mode: use local model
             class MonitorProgress:
@@ -463,10 +379,67 @@ while True:
         timer.end("eval")
         flush()  # Free memory from evaluation
 
-    if step > 0 and step % save_every == 0 and master_process:
+    if step % collect_every == 0:
+        # Check if we can resume from a previous run's replay buffer
+        resume_file = os.path.join(resume_from, f"replay_buffer_{step:05d}.json") if resume_from else None
+        if resume_file and os.path.exists(resume_file):
+            if master_process:
+                log(f"Loading replay buffer at step {step} from {resume_file}", component="Main")
+            with open(resume_file, "r") as f:
+                replay_buffer.buffer = json.load(f)
+            rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
+            if master_process:
+                log(f"Loaded {len(replay_buffer.buffer)} transitions at step {step} from previous run", component="Main")
+            flush()  # Free any GPU memory from inference before training
+            
+            # Synchronize all ranks after loading
+            if ddp:
+                dist.barrier()
+        else:
+            # collect proofs
+            timer.start("collect")
+            model.eval()
+            rl_monitor.start_collection(target_samples=collect_transitions, num_actors=num_actors)
+            rl_monitor.set_step(step)
+            
+            if distributed:
+                if master_process:
+                    # Distributed mode: coordinate remote provers (only master does this)
+                    # Retry until we have enough transitions
+                    while len(replay_buffer.local_buffer) < collect_transitions:
+                        collected = distributed_collect(
+                            sampler=theorems_sampler,
+                            target_transitions=collect_transitions,
+                            poll_interval=poll_interval,
+                            replay_buffer=replay_buffer,
+                        )
+                        if collected < collect_transitions:
+                            log(f"Collection incomplete ({collected}/{collect_transitions}), retrying...", 
+                                component="Coordinator")
+                    # Signal completion to other ranks via store.
+                    active_barrier_master(f"collection_done_{step}")
+                else:
+                    # Active waiting to not block the Python thread (which is needed for inference).
+                    active_barrier_wait(f"collection_done_{step}")
+                
+                # Wait for provers to abort their MCTS searches and release Lean processes
+                time.sleep(3.0)
+            else:
+                # Local mode: run actors locally
+                run_actor(collect_transitions, config, tactic_model, replay_buffer, theorems_sampler)
+            
+            model.train()
+            timer.end("collect")
+            flush()  # Free memory from collection before training
+            replay_buffer.synchronize()
+            if master_process:
+                rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
+                with open(os.path.join(output_dir, f"replay_buffer_{step:05d}.json"), "w") as f:
+                    json.dump(replay_buffer.buffer, f)
+
+    if step % save_every == 0 and step > 0 and master_process:
         checkpoint_dir = os.path.join(output_dir, "checkpoints")
         model_config_kwargs = model.config.__dict__  # slightly naughty, abusing the simplicity of GPTConfig, TODO nicer
-        # Note: eval results might not exist if save_every % eval_every != 0
         checkpoint_meta = {
             "step": step,
             "model_config": model_config_kwargs,
@@ -503,15 +476,6 @@ while True:
         num_tokens += (train_targets >= 0).sum()
     if ddp:
         dist.all_reduce(num_tokens, op=dist.ReduceOp.SUM)  # sum over ranks
-
-    # Verify all parameters have gradients before optimizer step
-    missing_grad_params = [(name, p.shape, p.requires_grad) for name, p in model.named_parameters() if p.grad is None]
-    if missing_grad_params:
-        log(f"ERROR [rank {ddp_rank}]: {len(missing_grad_params)} params missing grads: {missing_grad_params[:5]}", component="Train")
-        # Additional debugging: check which params DO have grads
-        has_grad_params = [name for name, p in model.named_parameters() if p.grad is not None]
-        log(f"DEBUG [rank {ddp_rank}]: Params WITH grads: {has_grad_params}", component="Train")
-        raise RuntimeError(f"[rank {ddp_rank}] {len(missing_grad_params)} parameters missing gradients")
 
     # step the optimizers
     for opt in optimizers:

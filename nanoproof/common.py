@@ -401,3 +401,40 @@ class DummyTimer(SimpleTimer):
     def get_times(self) -> dict[str, float]: return {}
     def log_times(self): pass
     def gather(self) -> Self: return DummyTimer()
+
+
+def active_barrier_master(key: str) -> None:
+    """
+    Signal completion to non-master ranks via the distributed store.
+    
+    This is used instead of dist.barrier() when non-master ranks need to
+    actively poll (e.g., because they're running inference servers that
+    need the Python thread to remain unblocked).
+    
+    The master process calls this after completing its work.
+    Non-master processes should call active_barrier_wait() with the same key.
+    """
+    store = dist.distributed_c10d._get_default_store()
+    store.set(key, "1")
+
+
+def active_barrier_wait(key: str, poll_interval: float = 1.0) -> None:
+    """
+    Wait for master to signal completion via the distributed store.
+    
+    This actively polls instead of blocking, allowing the Python thread
+    to remain responsive (e.g., for inference server requests).
+    
+    Args:
+        key: The key that master will set when done
+        poll_interval: How often to poll in seconds (default: 1.0)
+    """
+    store = dist.distributed_c10d._get_default_store()
+    while True:
+        try:
+            done = store.get(key)
+            if done == b"1":
+                break
+        except Exception:
+            pass
+        time.sleep(poll_interval)
