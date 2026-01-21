@@ -99,10 +99,10 @@ For single-node training, simply run:
 
 ```bash
 # Single GPU
-python -m nanoproof.rl
+python -m nanoproof.rl lean_server=10.10.25.35:8000
 
 # Multi-GPU
-torchrun --standalone --nproc_per_node=2 -m nanoproof.rl
+torchrun --standalone --nproc_per_node=2 -m nanoproof.rl lean_server=10.10.25.35:8000
 ```
 
 ## Distributed Mode (Multiple Nodes)
@@ -113,23 +113,58 @@ For scaling across multiple nodes, the system is split into:
 
 Prover servers automatically register with the RL server on startup and unregister on shutdown.
 
+### Infrastructure Configuration
+
+Create an `infra.toml` file to define the distributed setup:
+
+```toml
+# RL server (coordinator) - runs on GPU nodes
+[rl_server]
+address = "10.10.25.30"
+port = 5000
+
+# List of lean servers (for monitoring in the web UI)
+[[lean_servers]]
+address = "10.10.25.31"
+port = 8000
+
+[[lean_servers]]
+address = "10.10.25.32"
+port = 8000
+
+# Mapping from prover server IP addresses to lean server addresses.
+# Each prover auto-detects its IP and looks up which lean server to use.
+[prover_to_lean]
+"10.10.25.40" = "10.10.25.31:8000"
+"10.10.25.41" = "10.10.25.31:8000"
+"10.10.25.42" = "10.10.25.32:8000"
+"10.10.25.43" = "10.10.25.32:8000"
+```
+
 ### Step 1: Start RL Training (on GPU node)
 
 ```bash
-torchrun --standalone --nproc_per_node=2 -m nanoproof.rl --distributed=True
+torchrun --standalone --nproc_per_node=2 -m nanoproof.rl infra_file=infra.toml
 ```
 
 The RL server will wait for prover agents to register before starting collection.
 
 ### Step 2: Start Prover Servers (on CPU nodes)
 
-On each CPU node, start a prover server pointing to the RL server:
+On each CPU node, start a prover server pointing to the infra config:
+
+```bash
+python -m nanoproof.prover_server --infra-file infra.toml --num-actors 32
+```
+
+Each prover automatically detects its IP address and looks up the corresponding lean server from the `[prover_to_lean]` mapping.
+
+Alternatively, you can specify servers explicitly:
 
 ```bash
 python -m nanoproof.prover_server \
-    --rl-server <GPU_NODE_IP>:5000 \
-    --lean-server <LEAN_SERVER_IP>:8000 \
-    --port 5001 \
+    --rl-server 10.10.25.30:5000 \
+    --lean-server 10.10.25.31:8000 \
     --num-actors 32
 ```
 

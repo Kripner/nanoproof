@@ -11,6 +11,10 @@ Uses ProverWorker from experience_collection.py with callbacks that:
   - Submit results to coordinator (/submit_result) with serialized proof tree
 
 Usage:
+    # With infra.toml (recommended):
+    python -m nanoproof.prover_server --infra-file infra.toml
+
+    # Or with explicit arguments:
     python -m nanoproof.prover_server --rl-server <host:port> --lean-server <host:port>
 """
 
@@ -32,6 +36,7 @@ from nanoproof.search import Config, Game
 from nanoproof.experience_collection import ProverWorker
 from nanoproof.inference import RemoteTacticModel
 from nanoproof.cli import get_and_clear_tactics_buffer
+from nanoproof.infra import load_infra_config
 
 
 # -----------------------------------------------------------------------------
@@ -243,17 +248,43 @@ def main():
     parser = argparse.ArgumentParser(description="Prover Server")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=5001, help="Port to bind to")
-    parser.add_argument("--rl-server", required=True, help="RL server address (host:port) - handles both registration and inference")
-    parser.add_argument("--lean-server", required=True, help="Lean server address (host:port)")
+    parser.add_argument("--infra-file", default=None, help="Path to infra.toml file (recommended). If provided, --rl-server and --lean-server are read from it.")
+    parser.add_argument("--rl-server", default=None, help="RL server address (host:port) - handles both registration and inference (ignored if --infra-file is set)")
+    parser.add_argument("--lean-server", default=None, help="Lean server address (host:port) (ignored if --infra-file is set)")
     parser.add_argument("--num-actors", type=int, default=4, help="Number of parallel actors")
     parser.add_argument("--num-simulations", type=int, default=50, help="MCTS simulations per game")
     parser.add_argument("--num-sampled-tactics", type=int, default=6, help="Tactics to sample per state")
     parser.add_argument("--my-address", default=None, help="Address to register (auto-detected if not set)")
     args = parser.parse_args()
     
-    # Parse Lean server address
-    lean_host, lean_port = args.lean_server.split(":")
-    lean_port = int(lean_port)
+    # Determine RL server and Lean server addresses
+    if args.infra_file:
+        # Load configuration from infra.toml
+        infra_config = load_infra_config(args.infra_file)
+        rl_server = infra_config.rl_server
+        
+        # Get this prover's IP to look up which lean server to use
+        my_ip = get_local_ip()
+        lean_server_config = infra_config.get_lean_server_for_prover(my_ip)
+        if lean_server_config is None:
+            print(f"ERROR: No lean server mapping found for prover IP {my_ip} in {args.infra_file}")
+            print(f"Available mappings: {infra_config.prover_to_lean}")
+            sys.exit(1)
+        lean_host = lean_server_config.address
+        lean_port = lean_server_config.port
+        print(f"Loaded config from {args.infra_file}:")
+        print(f"  RL server: {rl_server}")
+        print(f"  Lean server for {my_ip}: {lean_host}:{lean_port}")
+    else:
+        # Use explicit arguments
+        if not args.rl_server:
+            parser.error("--rl-server is required when --infra-file is not provided")
+        if not args.lean_server:
+            parser.error("--lean-server is required when --infra-file is not provided")
+        
+        rl_server = args.rl_server
+        lean_host, lean_port = args.lean_server.split(":")
+        lean_port = int(lean_port)
     
     # Determine our address for registration
     if args.my_address:
@@ -271,8 +302,8 @@ def main():
         server_port=lean_port,
     )
     
-    coordinator_url = f"http://{args.rl_server}"
-    tactic_model = RemoteTacticModel(args.rl_server)
+    coordinator_url = f"http://{rl_server}"
+    tactic_model = RemoteTacticModel(rl_server)
     buffer = LocalBuffer()
     prover_worker = create_remote_prover_worker(
         config=config,
@@ -296,7 +327,7 @@ def main():
         cleanup_done.set()
         print("Shutting down...")
         prover_worker.stop()
-        unregister_from_rl_server(args.rl_server, my_address)
+        unregister_from_rl_server(rl_server, my_address)
     
     atexit.register(cleanup)
     
@@ -313,8 +344,8 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     
     print(f"Prover server starting on {args.host}:{args.port}")
-    print(f"  RL server: {args.rl_server}")
-    print(f"  Lean server: {args.lean_server}")
+    print(f"  RL server: {rl_server}")
+    print(f"  Lean server: {lean_host}:{lean_port}")
     print(f"  My address: {my_address}")
     print(f"  Actors: {args.num_actors}")
     
@@ -343,8 +374,8 @@ def main():
         print("WARNING: Flask server may not be ready")
     
     # Register with RL server (after Flask is ready)
-    print(f"Registering as {my_address} with RL server at {args.rl_server}")
-    register_with_rl_server(args.rl_server, my_address)
+    print(f"Registering as {my_address} with RL server at {rl_server}")
+    register_with_rl_server(rl_server, my_address)
     
     print("\nCtrl+C to exit\n")
     

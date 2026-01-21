@@ -1,0 +1,17 @@
+# Infrastructure configuration for distributed RL training
+
+[rl_server]
+address = "10.10.25.59"
+port = 5000
+
+[[lean_servers]]
+address = "10.10.25.35"
+port = 8000
+
+[[lean_servers]]
+address = "10.10.25.36"
+port = 8000
+
+[prover_to_lean]
+"10.10.25.38" = "10.10.25.35:8000"
+"10.10.25.34" = "10.10.25.36:8000"

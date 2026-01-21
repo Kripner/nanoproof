@@ -26,9 +26,8 @@ from nanoproof.data import leanworkbook
 from nanoproof.cli import create_monitor, configure_logging, log
 from nanoproof.rl_server import distributed_collect, distributed_eval, start_coordinator, shutdown_coordinator
 from nanoproof.inference import start_inference_server
+from nanoproof.infra import load_infra_config, InfraConfig, parse_lean_server
 from scripts.prover_eval import eval_success_rate
-
-# TODO: load all IP addresses from a config file
 
 # TODO: save all proofs found during evaluation
 # TODO: (maybe) try removing each tactic and if the proof is still valid, do not add the transition to the replay buffer
@@ -47,12 +46,12 @@ model_step = 903
 device_type = ""  # cuda|cpu|mps (empty => autodetect)
 dtype = "bfloat16"
 device_batch_size = 8  # (maybe) max to avoid OOM (on A100 40GB)
-# distributed mode
-distributed = True  # enable distributed mode (provers on separate nodes)
+# distributed mode - controlled by infra_file
+infra_file = ""  # path to infra.toml for distributed mode (empty => local mode)
 inference_server_port = 5000  # port for inference server (distributed mode only)
 poll_interval = 3.0  # how often to poll provers for transitions (seconds)
-# lean_servers = "10.10.25.35:8000,10.10.25.36:8000"  # comma-separated list of lean server URLs for monitoring (e.g., "host1:8080,host2:8080") - just for monitoring
-lean_servers = "10.10.25.31"  # comma-separated list of lean server URLs for monitoring (e.g., "host1:8080,host2:8080") - just for monitoring
+# local mode settings
+lean_server = "10.10.25.35:8000"  # lean server for local mode (host:port)
 # data
 fraction_sft = 0.5  # 50% of data will come from Mathlib (leantree), 50% from replay buffer
 collect_every = 1  # how many steps to train between RL data collections  # TODO: when collect_every>1, we need some warmup (collect collect_every*collect_transitions)
@@ -79,6 +78,28 @@ resume_from = ""  # path to a previous run's output directory to resume from (us
 config_keys = [k for k, v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open(os.path.join("nanoproof", "configurator.py")).read())  # overrides from command line or config file
 user_config = {k: globals()[k] for k in config_keys}  # possibly useful for logging
+
+# -----------------------------------------------------------------------------
+# Distributed mode configuration
+# If infra_file is provided, load the infrastructure config and enable distributed mode
+# Otherwise, use local mode with lean_server parameter
+
+distributed = bool(infra_file)  # distributed mode is enabled if infra_file is provided
+infra_config: InfraConfig | None = None
+
+if distributed:
+    infra_config = load_infra_config(infra_file)
+    # Override inference_server_port from infra config
+    inference_server_port = infra_config.rl_server_port
+    # Get lean servers for monitoring
+    lean_servers = infra_config.get_lean_server_list()
+    # Lean server for local actors not used in distributed mode
+    local_lean_server = parse_lean_server("localhost:8000")
+else:
+    # Local mode: parse lean_server and use it for both actors and monitoring
+    local_lean_server = parse_lean_server(lean_server)
+    lean_servers = [str(local_lean_server)]
+
 # -----------------------------------------------------------------------------
 
 # TODO (!): add augmentations, similar to SFT
@@ -159,7 +180,12 @@ rank_seed = seed + ddp_rank
 mathlib_train = list(iter_data(split="train"))
 random.Random(rank_seed).shuffle(mathlib_train)
 
-config = Config(num_actors=num_actors, num_sampled_tactics=num_sampled_tactics)
+config = Config(
+    num_actors=num_actors,
+    num_sampled_tactics=num_sampled_tactics,
+    server_address=local_lean_server.address,
+    server_port=local_lean_server.port,
+)
 replay_buffer = ReplayBuffer(config, seed=rank_seed)
 theorems_sampler = TheoremsSampler(seed=rank_seed)
 
@@ -170,8 +196,7 @@ rl_monitor.set_lean_server(config.server_address, config.server_port)
 
 # In distributed mode, set up monitoring for multiple lean servers
 if distributed and lean_servers:
-    lean_server_list = [s.strip() for s in lean_servers.split(",") if s.strip()]
-    rl_monitor.set_lean_servers(lean_server_list)
+    rl_monitor.set_lean_servers(lean_servers)
 
 
 def train_generator():
