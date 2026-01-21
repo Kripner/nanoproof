@@ -243,19 +243,19 @@ def verify_node(node: Node):
             assert len(branches) == 1, f"verify_node: Expected 1 branch at OR node, got {len(branches)}"
             branch = branches[0]
             solved_actions = [a for a in node.children if node.children[a].is_solved]
-            assert len(solved_actions) == 1, f"verify_node: Expected 1 solved action, got {len(solved_actions)}"
-            action = solved_actions[0]
-            child = node.children[action]
+            # More than one terminal node can be solved when expanding.
+            for action in solved_actions:
+                child = node.children[action]
 
-            result = branch.try_apply_tactic(action)
-            assert result.is_success(), f"verify_node: Tactic application error: '{result.error}'; state: '{branch.state}'; action: `{action}`"
-            
-            new_branches = result.value
-            # new_branches = [b for b in new_branches if not b.state.is_solved()]
-            if len(new_branches) != len(child.state):
-                return f"Unexpected number of branches after tactic application: {len(new_branches)=} != {len(child.state)=}; state: '{branch.state}'; action: `{action}`"
-            if len(new_branches) > 0:
-                to_verify.append((child, new_branches))
+                result = branch.try_apply_tactic(action, timeout=5000)
+                assert result.is_success(), f"verify_node: Tactic application error: '{result.error}'; state: '{branch.state}'; action: `{action}`"
+                
+                new_branches = result.value
+                # new_branches = [b for b in new_branches if not b.state.is_solved()]
+                if len(new_branches) != len(child.state):
+                    return f"Unexpected number of branches after tactic application: {len(new_branches)=} != {len(child.state)=}; state: '{branch.state}'; action: `{action}`"
+                if len(new_branches) > 0:
+                    to_verify.append((child, new_branches))
         else:
             raise AssertionError(f"verify_node: Unknown node type: {node.to_play}")
 
@@ -294,10 +294,8 @@ def _extract_transitions_recursive(node: Node, transitions: list):
         # if not solved_actions:
         #     break
         
-        assert len(solved_actions) == 1, f"Expected 1 solved action, got {len(solved_actions)}"
-        action = solved_actions[0]
-        # Pick shortest tactic
-        # action = min(solved_actions, key=lambda a: len(a))
+        # Pick shortest tactic (more than one terminal node can be solved when expanding)
+        action = min(solved_actions, key=lambda a: len(a))
         
         # Extract transition: (context, tactic, value_target)
         context = str(node.state[0].state).strip()
