@@ -230,10 +230,11 @@ class ProverWorker:
                 except Exception:
                     pass
             except Exception as e:
-                consecutive_errors += 1
-                if self._paused and "Model paused for training" in str(e):
+                # The inference model returns this when paused, even if the # local _paused flag isn't set yet.
+                if "Model paused for training" in str(e):
                     self._set_thread_state(actor_id, "idle")
                     continue
+                consecutive_errors += 1
                 self._set_thread_state(actor_id, "error")
                 self.on_result(theorem_id, theorem, None, str(e))
                 log(f"[Actor {actor_id}] Error (lean={self.lean_address}:{self.lean_port}): {e}", component="Collection")
