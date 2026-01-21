@@ -1,6 +1,7 @@
 import torch
 from itertools import islice
 
+from nanoproof.tokenizer import _MAX_VALUE
 from nanoproof.common import get_dist_info
 from nanoproof.tokenizer import get_tokenizer, value_to_token_ids
 from nanoproof.data.leantree import iter_data
@@ -53,6 +54,7 @@ def sft_data_generator(dataset, batch_size, device="cuda"):
             tactic_toks = tokenizer.encode(tactic, append=eos_token)
 
             value_delim_tok = tokenizer.encode_special("<|value|>")
+            proof_depth = min(proof_depth, _MAX_VALUE)
             value_toks = value_to_token_ids(tokenizer, proof_depth) + [eos_token]
 
             # these are <0.1% of mathlib
@@ -108,7 +110,6 @@ def rl_data_generator(generator, batch_size, device="cuda"):
 
     # iterates over the dataset in epochs, tokenizes
     batch = []
-    last_step = False
     for state, tactic, proof_depth in generator:
         state, tactic = state.strip(), tactic.strip()
         assert len(state) != 0 and len(tactic) != 0
@@ -120,6 +121,7 @@ def rl_data_generator(generator, batch_size, device="cuda"):
         tactic_toks = tokenizer.encode(tactic, append=eos_token)
 
         value_delim_tok = tokenizer.encode_special("<|value|>")
+        proof_depth = min(proof_depth, _MAX_VALUE)
         value_toks = value_to_token_ids(tokenizer, proof_depth) + [eos_token]
 
         # these are <0.1% of mathlib

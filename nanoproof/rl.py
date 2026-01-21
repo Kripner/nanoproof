@@ -207,7 +207,10 @@ def train_generator():
                 mathlib_iter = iter(mathlib_train)
                 yield next(mathlib_iter)
         else:
-            yield replay_buffer.sample_transition()
+            state, tactic, value_target = replay_buffer.sample_transition()
+            proof_depth = -value_target
+            yield state, tactic, proof_depth
+
 
 
 train_loader = rl_data_generator(train_generator(), batch_size=device_batch_size)

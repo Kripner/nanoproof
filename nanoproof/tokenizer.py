@@ -159,8 +159,7 @@ class HuggingFaceTokenizer:
 
 def value_to_token_ids(tokenizer, value: int) -> list[int]:
     """Convert a value (1-64) to a single bin token ID."""
-    assert value >= _MIN_VALUE
-    value = min(value, _MAX_VALUE)
+    assert _MIN_VALUE <= value <= _MAX_VALUE
     bin_token = f"<|bin_{value:02d}|>"
     return [tokenizer.encode_special(bin_token)]
 
