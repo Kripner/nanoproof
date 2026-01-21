@@ -5,7 +5,6 @@ from nanoproof.tokenizer import _MAX_VALUE
 from nanoproof.common import get_dist_info
 from nanoproof.tokenizer import get_tokenizer, value_to_token_ids
 from nanoproof.data.leantree import iter_data
-from nanoproof.model import NetworkConfig
 
 STATE_MAX_LEN = 640
 TACTIC_MAX_LEN = 128
@@ -157,7 +156,7 @@ if __name__ == "__main__":
 
             print(f"Target {i}:")
             print(targets[i])
-            # replace -1 with a different token so that it can be decoded
+            # replace -1 with a different token so that it can be decoded and displayed
             targets[i][targets[i] == -1] = tokenizer.encode("X")[0]
             print(tokenizer.decode(targets[i].tolist()))
             print("--")

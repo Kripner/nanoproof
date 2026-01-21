@@ -10,16 +10,15 @@ torchrun --standalone --nproc_per_node=8 -m scripts.sft
 """
 
 import os
-
-import leantree.augmentations
+import random
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-import random
 
 import wandb
 import torch
 import torch.distributed as dist
 from contextlib import nullcontext
+import leantree.augmentations
 
 from nanoproof.common import compute_init, compute_cleanup, get_base_dir, print0, DummyWandb, autodetect_device_type
 from nanoproof.checkpoints import load_model, save_checkpoint
@@ -107,7 +106,6 @@ augmentations = [
     leantree.augmentations.ShuffleGoalsAndHypotheses(seed=seed),
     leantree.augmentations.RandomRename(seed=seed),
 ]
-
 train_ds = list(iter_data(split="train", augmentations=augmentations))
 random.Random(seed).shuffle(train_ds)
 val_ds = list(iter_data(split="val"))

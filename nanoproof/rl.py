@@ -2,7 +2,6 @@ import atexit
 import os
 from datetime import datetime
 import json
-import signal
 import sys
 from contextlib import nullcontext
 import random
@@ -13,6 +12,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import wandb
 import torch
 import torch.distributed as dist
+import leantree.augmentations
 
 from nanoproof.common import compute_init, compute_cleanup, get_base_dir, DummyWandb, autodetect_device_type, SimpleTimer, flush, active_barrier_master, active_barrier_wait
 from nanoproof.checkpoints import load_model, save_checkpoint
@@ -30,9 +30,12 @@ from nanoproof.infra import load_infra_config, InfraConfig, parse_lean_server
 from scripts.prover_eval import eval_success_rate
 
 # TODO: save all proofs found during evaluation
+# TODO: during evaluation, report at which iteration number the proof was found
 # TODO: in each episode, save a sample of training data (right before it goes into the model)
+
 # TODO: (maybe) try removing each tactic and if the proof is still valid, do not add the transition to the replay buffer
-#   ... however, then we need to be sure to update the proof states
+#   ... however, then we need to be sure to update the proof states .. maybe?
+
 # TODO: matchmaker
 
 # -----------------------------------------------------------------------------
@@ -61,7 +64,7 @@ collect_transitions = 100  # how many proof transitions to collect in one collec
 num_actors = 32  # number of parallel actor threads for experience collection and evaluation
 num_sampled_tactics = 6  # number of tactics to sample per state in MCTS
 batch_timeout = 0.2  # timeout in seconds for batching LLM calls
-max_batch_tokens = 6000  # max total tokens per inference batch (A100 40GB)
+max_batch_tokens = 8000  # (maybe) max total tokens per inference batch (A100 40GB)
 # optimization
 target_examples_per_step = 512
 unembedding_lr = 0.004
@@ -173,8 +176,6 @@ grad_accum_steps = target_examples_per_step // examples_per_step
 log0(f"=> Setting grad accum steps: {grad_accum_steps}", component="Config")
 
 rank_seed = seed + ddp_rank
-mathlib_train = list(iter_data(split="train"))
-random.Random(rank_seed).shuffle(mathlib_train)
 
 config = Config(
     num_actors=num_actors,
@@ -194,6 +195,10 @@ rl_monitor.set_lean_server(config.server_address, config.server_port)
 if distributed and lean_servers:
     rl_monitor.set_lean_servers(lean_servers)
 
+# augmentation = leantree.augmentations.ShuffleGoalsAndHypotheses(seed=seed)
+
+mathlib_train = list(iter_data(split="train"))
+random.Random(rank_seed).shuffle(mathlib_train)
 
 def train_generator():
     rng = random.Random(rank_seed)
@@ -210,7 +215,6 @@ def train_generator():
             state, tactic, value_target = replay_buffer.sample_transition()
             proof_depth = -value_target
             yield state, tactic, proof_depth
-
 
 
 train_loader = rl_data_generator(train_generator(), batch_size=device_batch_size)
