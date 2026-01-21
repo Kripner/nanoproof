@@ -283,15 +283,11 @@ class ProverWorker:
             if game.root.is_solved:
                 compute_value_target(game.root)
 
-                print(f"[Prover] Verifying proof tree")
                 try:
                     verify_node(game.root)
-                    print("Sucess!")
                 except AssertionError as e:
-                    print(f"[Prover] !!! Verification failed: '{e}'")
-                    print(f"Theorem: '{theorem}'")
-                    print(game.root.pp_tree())
-                    print()
+                    message = f"Verification failed: '{e}'\nTheorem: '{theorem}'\nProof tree:\n{game.root.pp_tree()}"
+                    log(message, component="Collection")
                     game.root.is_solved = False
 
             return game

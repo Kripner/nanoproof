@@ -23,7 +23,7 @@ from nanoproof.experience_collection import ReplayBuffer, TheoremsSampler, Confi
 from nanoproof.inference import TacticModel, BlockingTacticModel
 from nanoproof.data import minif2f
 from nanoproof.data import leanworkbook
-from nanoproof.cli import create_monitor, configure_logging, log
+from nanoproof.cli import create_monitor, configure_logging, log, log0, set_ddp_info
 from nanoproof.rl_server import distributed_collect, distributed_eval, start_coordinator, shutdown_coordinator
 from nanoproof.inference import start_inference_server
 from nanoproof.infra import load_infra_config, InfraConfig, parse_lean_server
@@ -110,6 +110,7 @@ else:
 device_type = autodetect_device_type() if device_type == "" else device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 master_process = ddp_rank == 0
+set_ddp_info(is_master=master_process, rank=ddp_rank)
 ptdtype = torch.float32 if dtype == "float32" else torch.bfloat16
 autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
@@ -146,7 +147,7 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-r
 # Create the tactic model
 # In distributed mode, we use BlockingTacticModel for inference servers (started later)
 # In local mode, we use BlockingTacticModel for parallel actors
-log(f"Distributed mode: {distributed}", component="Config")
+log0(f"Distributed mode: {distributed}", component="Config")
 inner_tactic_model = TacticModel.create(num_samples=num_sampled_tactics, model_tag=model_tag, step=model_step)
 if distributed:
     # In distributed mode, we don't need BlockingTacticModel here - 
@@ -170,12 +171,12 @@ else:
 # DataLoader
 
 examples_per_step = device_batch_size * ddp_world_size
-log(f"Target examples per step: {target_examples_per_step}", component="Config")
-log(f"Device batch size: {device_batch_size}", component="Config")
-log(f"Examples per step is device_batch_size * ddp_world_size: {examples_per_step}", component="Config")
+log0(f"Target examples per step: {target_examples_per_step}", component="Config")
+log0(f"Device batch size: {device_batch_size}", component="Config")
+log0(f"Examples per step is device_batch_size * ddp_world_size: {examples_per_step}", component="Config")
 assert target_examples_per_step % examples_per_step == 0, "Target examples per step must be divisible by examples per step"
 grad_accum_steps = target_examples_per_step // examples_per_step
-log(f"=> Setting grad accum steps: {grad_accum_steps}", component="Config")
+log0(f"=> Setting grad accum steps: {grad_accum_steps}", component="Config")
 
 rank_seed = seed + ddp_rank
 mathlib_train = list(iter_data(split="train"))
@@ -271,7 +272,7 @@ leanworkbook_results = None
 # Register cleanup to run on exit (handles normal exit, sys.exit, and unhandled exceptions)
 def cleanup():
     """Cleanup function to ensure resources are released on shutdown."""
-    log("Shutting down...", component="Main")
+    log0("Shutting down...", component="Main")
     # In distributed mode, shutdown coordinator first to stop provers from retrying
     if distributed and master_process:
         shutdown_coordinator()
@@ -280,7 +281,7 @@ def cleanup():
         tactic_model.shutdown()
     if distributed:
         inference_model.shutdown()
-    log("Shutdown complete", component="Main")
+    log0("Shutdown complete", component="Main")
 
 atexit.register(cleanup)
 

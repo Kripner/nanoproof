@@ -36,6 +36,8 @@ from flask import Flask, jsonify, Response, send_from_directory
 _log_lock = threading.Lock()
 _log_file: TextIO | None = None
 _tactics_file: TextIO | None = None
+_is_master_process: bool = True  # Default to True for non-DDP usage
+_ddp_rank: int = 0  # DDP rank for logging
 
 # In-memory tactics buffer for distributed mode (provers collect and report)
 _tactics_buffer: deque = deque(maxlen=1000)
@@ -62,6 +64,19 @@ def _add_to_log_buffer(component: str, entry: dict):
     # Also add to merged buffer
     merged = _get_log_buffer("_merged")
     merged.append(entry)
+
+
+def set_ddp_info(is_master: bool, rank: int = 0):
+    """
+    Set DDP info for logging.
+    
+    Args:
+        is_master: Whether this process is the master (rank 0)
+        rank: The DDP rank of this process
+    """
+    global _is_master_process, _ddp_rank
+    _is_master_process = is_master
+    _ddp_rank = rank
 
 
 def configure_logging(output_dir: str | None):
@@ -129,6 +144,17 @@ def log(msg: str, component: str | None = None, actor_id: int | None = None):
             "level": "info",
         }
         _add_to_log_buffer(log_component, entry)
+
+
+def log0(msg: str, component: str | None = None, actor_id: int | None = None):
+    """
+    Log only if this is the master process (rank 0).
+    
+    Use this for informational messages that should only appear once in DDP.
+    For errors or per-rank diagnostics, use regular log().
+    """
+    if _is_master_process:
+        log(msg, component=component, actor_id=actor_id)
 
 
 def log_error(msg: str, exception: Exception | None = None, component: str | None = None, actor_id: int | None = None):

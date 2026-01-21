@@ -28,7 +28,7 @@ import torch
 from flask import Flask, request, jsonify
 
 from nanoproof.checkpoints import load_model
-from nanoproof.cli import log
+from nanoproof.cli import log, log0
 from nanoproof.common import ValueOrError
 from nanoproof.engine import Engine
 from nanoproof.tokenizer import _MIN_VALUE, _MAX_VALUE, HuggingFaceTokenizer
@@ -689,7 +689,7 @@ def start_inference_server(model: BlockingTacticModel, port: int, host: str = "0
     
     thread = threading.Thread(target=run_server, daemon=True)
     thread.start()
-    log(f"Inference server started on port {port}", component="InferenceServer")
+    log0(f"Inference server started on port {port}", component="InferenceServer")
     return thread
 
 
