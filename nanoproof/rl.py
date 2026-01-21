@@ -103,7 +103,6 @@ else:
 # -----------------------------------------------------------------------------
 
 # TODO (!): add augmentations, similar to SFT
-# TODO: simplify the barrier logic
 
 # Compute init
 device_type = autodetect_device_type() if device_type == "" else device_type
@@ -323,20 +322,10 @@ while True:
                         if collected < collect_transitions:
                             log(f"Collection incomplete ({collected}/{collect_transitions}), retrying...", 
                                 component="Coordinator")
-                    # Signal completion to other ranks via store (avoid NCCL timeout)
-                    store = dist.distributed_c10d._get_default_store()
-                    store.set(f"collection_done_{step}", "1")
-                else:
-                    # Non-master ranks wait for master to finish (without NCCL barrier)
-                    store = dist.distributed_c10d._get_default_store()
-                    while True:
-                        try:
-                            done = store.get(f"collection_done_{step}")
-                            if done == b"1":
-                                break
-                        except Exception:
-                            pass
-                        time.sleep(1.0)
+                
+                # Synchronize all ranks after collection
+                if ddp:
+                    dist.barrier()
                 
                 # Wait for provers to abort their MCTS searches and release Lean processes
                 time.sleep(3.0)
@@ -407,20 +396,9 @@ while True:
                         wandb_data["leanworkbook_invalid"] = True
                 wandb_run.log(wandb_data)
                 
-                # Signal completion to other ranks via store (avoid NCCL blocking GPU)
-                store = dist.distributed_c10d._get_default_store()
-                store.set(f"eval_done_{step}", "1")
-            else:
-                # Non-master ranks wait for master to finish (without NCCL barrier)
-                store = dist.distributed_c10d._get_default_store()
-                while True:
-                    try:
-                        done = store.get(f"eval_done_{step}")
-                        if done == b"1":
-                            break
-                    except Exception:
-                        pass
-                    time.sleep(1.0)
+                # Synchronize all ranks after evaluation
+                if ddp:
+                    dist.barrier()
         else:
             # Local mode: use local model
             class MonitorProgress:
