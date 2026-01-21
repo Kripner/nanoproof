@@ -431,10 +431,6 @@ def active_barrier_wait(key: str, poll_interval: float = 1.0) -> None:
     """
     store = dist.distributed_c10d._get_default_store()
     while True:
-        try:
-            done = store.get(key)
-            if done == b"1":
-                break
-        except Exception:
-            pass
+        if store.check([key]):
+            break
         time.sleep(poll_interval)
