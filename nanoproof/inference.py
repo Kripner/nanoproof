@@ -147,8 +147,8 @@ class TacticModel:
         value_logits = torch.stack([value_logits[i][0][-1] for i in range(len(value_prompts))])  # (B, V)
 
         # Extract bin logits and compute soft predictions
-        bin_probs = torch.softmax(value_logits.float(), dim=-1)  # (B, V)
-        bin_probs = bin_probs[:, bin_token_ids]  # (B, 64)
+        bin_logits = value_logits[:, bin_token_ids].float()  # (B, 64)
+        bin_probs = torch.softmax(bin_logits, dim=-1)  # (B, 64)
         bin_values = torch.arange(_MIN_VALUE, _MAX_VALUE + 1, dtype=bin_probs.dtype, device=device)
         values = (bin_probs * bin_values).sum(dim=-1)  # (B,)
         values_list = values.tolist()

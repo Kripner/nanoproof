@@ -47,13 +47,11 @@ if MODE == "raw_engine":
         tokens = tokenizer(inp_.strip() + "\n<|value|>", prepend=tokenizer.get_bos_token_id())
         with autocast_ctx:
             _, _, value_logits = engine.generate_batch(tokens, num_samples=1, min_tokens=1, max_tokens=1, return_logits=True)
-            value_logits = value_logits[0]
-            value_logits = value_logits[-1]
+            value_logits = value_logits[0][-1]
+            value_logits = torch.gather(value_logits, 0, torch.tensor(value_token_ids, device=device))
             value_probs = torch.softmax(value_logits, dim=-1)
-            value_probs = torch.gather(value_probs, 0, torch.tensor(value_token_ids, device=device))
             for i, prob in enumerate(value_probs):
                 print(f"BIN {value_bins[i]}: {prob.item()}")
-            print("LEFTOVER_PROB:", 1 - value_probs.sum())
             value_probs = value_probs * torch.tensor(value_bins, device=device, dtype=value_probs.dtype)
             value_probs = value_probs.sum()
             return value_probs.item()
