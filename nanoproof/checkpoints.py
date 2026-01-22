@@ -124,6 +124,20 @@ def load_model_from_dir(checkpoints_dir, device, phase, model_tag, step=None):
     model, tokenizer, meta_data = build_model(checkpoint_dir, step, device, phase)
     return model, tokenizer, meta_data
 
+def load_rl_model(run_name, device, phase, step=None):
+    base_dir = get_base_dir()
+    run_dir = os.path.join(base_dir, "rl", run_name)
+    checkpoint_dir = os.path.join(run_dir, "checkpoints")
+
+    if step is None:
+        # guess the step by defaulting to the last step
+        step = find_last_step(checkpoint_dir)
+    assert step is not None, f"No checkpoints found in {checkpoint_dir}"
+    # build the model
+    log0(f"Loading model from {checkpoint_dir} with step {step}")
+    model, tokenizer, meta_data = build_model(checkpoint_dir, step, device, phase)
+    return model, tokenizer, meta_data
+
 def load_model(source, *args, **kwargs):
     model_dir = {
         "base": "base_checkpoints",

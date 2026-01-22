@@ -167,8 +167,8 @@ class TacticModel:
         pass
 
     @classmethod
-    def create(cls, num_samples: int = 6, model_tag: str = "d26", step: int | None = None) -> Self:
-        source = "sft"  # which checkpoint to load the model from
+    def create(cls, num_samples: int = 6, source: str = "sft", model_tag: str | None = None, step: int | None = None) -> Self:
+        assert model_tag is not None, "model_tag is required in TacticModel.create"
         device = torch.device("cuda")
 
         model, tokenizer, _ = load_model(source, device, phase="eval", model_tag=model_tag, step=step)

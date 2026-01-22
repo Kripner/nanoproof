@@ -3,7 +3,7 @@ from contextlib import nullcontext
 import torch
 
 from nanoproof.common import compute_init, compute_cleanup, get_base_dir, print0, DummyWandb, autodetect_device_type
-from nanoproof.checkpoints import load_model, save_checkpoint
+from nanoproof.checkpoints import load_model, load_rl_model
 from nanoproof.engine import Engine
 from nanoproof.inference import TacticModel
 
@@ -11,19 +11,28 @@ MODE = "raw_engine"  # raw_engine | tactic_model
 generate = None
 predict_value = None
 
+model_tag = "d26" # model tag to load the model from
+
+# step = 903
+# source = "sft" # which checkpoint to load the model from
+
+run_name = "26-01-21_18-37-value_i03guzht"
+step = 2000
+source = "rl" # which checkpoint to load the model from
+
 if MODE == "raw_engine":
-    source = "sft" # which checkpoint to load the model from
-    model_tag = "d26" # model tag to load the model from
     device_type = "" # cuda|cpu|mps (empty => autodetect)
     dtype = "bfloat16"
-    step = 903  # TODO
 
     device_type = autodetect_device_type() if device_type == "" else device_type
     device = torch.device(device_type)
     ptdtype = torch.float32 if dtype == "float32" else torch.bfloat16
     autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
-    model, tokenizer, meta = load_model(source, device, phase="eval", model_tag=model_tag, step=step)
+    if source == "sft":
+        model, tokenizer, meta = load_model(source, device, phase="eval", model_tag=model_tag, step=step)
+    elif source == "rl":
+        model, tokenizer, meta = load_rl_model(run_name, device, phase="eval", step=step)
     engine = Engine(model, tokenizer)
     value_token_ids = tokenizer.get_value_token_ids()
     value_bins = tokenizer.get_value_bins()
@@ -53,7 +62,8 @@ if MODE == "raw_engine":
     predict_value = predict_value_
 
 elif MODE == "tactic_model":
-    tactic_model = TacticModel.create(model_tag="d26", step=903)
+    assert source == "sft", "tactic_model mode only supports sft source for now"
+    tactic_model = TacticModel.create(source=source, model_tag=model_tag, step=step)
     _cached_value = None  # Cache value from tactic generation
 
     def generate_(inp_) -> list[str]:
