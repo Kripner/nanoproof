@@ -30,12 +30,12 @@ from nanoproof.inference import start_inference_server
 from nanoproof.infra import load_infra_config, InfraConfig, parse_lean_server
 from scripts.prover_eval import eval_success_rate
 
+# TODO: try removing each tactic and if the proof is still valid, do not add the transition to the replay buffer
+#   ... however, then we need to be sure to update the proof states .. maybe?
+
 # TODO: save all proofs found during evaluation
 # TODO: during evaluation, report at which iteration number the proof was found
 # TODO: in each episode, save a sample of training data (right before it goes into the model)
-
-# TODO: (maybe) try removing each tactic and if the proof is still valid, do not add the transition to the replay buffer
-#   ... however, then we need to be sure to update the proof states .. maybe?
 
 # TODO: matchmaker
 
@@ -75,7 +75,7 @@ weight_decay = 0.0
 init_lr_frac = 0.02
 augment_data = True  # TODO: TURN ON AND TEST
 # evaluation and logging there of
-eval_every = 50
+eval_every = 100
 eval_start = 0  # step to start evaluation at (skip evaluation before this step)
 save_every = 500
 # resuming from a previous run - Note: don't forget to also set eval_start and seed!
@@ -413,12 +413,16 @@ while True:
 
     if step % collect_every == 0:
         # Check if we can resume from a previous run's replay buffer
-        resume_file = os.path.join(resume_from, f"replay_buffer_{step:05d}.json") if resume_from else None
+        resume_file = os.path.join(resume_from, f"replay_buffer_{step:05d}.jsonl") if resume_from else None
         if resume_file and os.path.exists(resume_file):
             if master_process:
                 log(f"Loading replay buffer at step {step} from {resume_file}", component="Main")
             with open(resume_file, "r") as f:
-                replay_buffer.buffer = json.load(f)
+                replay_buffer.buffer = [
+                    (obj["context"], obj["tactic"], obj["value_target"])
+                    for line in f if line.strip()
+                    for obj in [json.loads(line)]
+                ]
             rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
             if master_process:
                 log(f"Loaded {len(replay_buffer.buffer)} transitions at step {step} from previous run", component="Main")
@@ -466,8 +470,9 @@ while True:
             replay_buffer.synchronize()
             if master_process:
                 rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
-                with open(os.path.join(output_dir, f"replay_buffer_{step:05d}.json"), "w") as f:
-                    json.dump(replay_buffer.buffer, f)
+                with open(os.path.join(output_dir, f"replay_buffer_{step:05d}.jsonl"), "w") as f:
+                    for context, tactic, value_target in replay_buffer.buffer:
+                        f.write(json.dumps({"context": context, "tactic": tactic, "value_target": value_target}) + "\n")
 
     if step % save_every == 0 and step > 0 and master_process:
         checkpoint_dir = os.path.join(output_dir, "checkpoints")

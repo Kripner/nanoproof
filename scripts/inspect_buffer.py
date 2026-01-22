@@ -8,9 +8,13 @@ from collections import Counter
 
 
 def load_buffer(path: str) -> list[tuple[str, str, float]]:
-    """Load replay buffer from JSON file."""
+    """Load replay buffer from JSONL file."""
     with open(path, "r") as f:
-        return json.load(f)
+        return [
+            (obj["context"], obj["tactic"], obj["value_target"])
+            for line in f if line.strip()
+            for obj in [json.loads(line)]
+        ]
 
 
 def transition_to_theorem(context: str, tactic: str, value: float) -> str:
@@ -133,7 +137,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Inspect a saved replay buffer file."
     )
-    parser.add_argument("path", help="Path to the replay buffer JSON file")
+    parser.add_argument("path", help="Path to the replay buffer JSONL file")
     
     subparsers = parser.add_subparsers(dest="command", required=True)
     

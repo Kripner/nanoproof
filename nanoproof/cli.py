@@ -727,12 +727,12 @@ class WebMonitor:
             
             files = []
             for f in sorted(os.listdir(output_dir)):
-                if f.startswith("replay_buffer_") and f.endswith(".json"):
+                if f.startswith("replay_buffer_") and f.endswith(".jsonl"):
                     filepath = os.path.join(output_dir, f)
                     files.append({
                         "name": f,
                         "size": os.path.getsize(filepath),
-                        "step": int(f.replace("replay_buffer_", "").replace(".json", "")),
+                        "step": int(f.replace("replay_buffer_", "").replace(".jsonl", "")),
                     })
             return jsonify({"files": files})
 
@@ -750,7 +750,7 @@ class WebMonitor:
             
             try:
                 with open(filepath, "r") as f:
-                    data = json.load(f)
+                    data = [json.loads(line) for line in f if line.strip()]
                 return jsonify({"transitions": data})
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
