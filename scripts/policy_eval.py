@@ -1,10 +1,11 @@
 import torch
+import torch.distributed as dist
 from itertools import islice
 import sys
 import os
 from contextlib import nullcontext
 
-from nanoproof.common import compute_init, autodetect_device_type, print0
+from nanoproof.common import compute_init, autodetect_device_type, print0, is_ddp, get_dist_info
 from nanoproof.checkpoints import load_model
 from nanoproof.data.leantree import iter_data
 from nanoproof.data.leantree_dataloader import sft_data_generator
@@ -12,12 +13,22 @@ from nanoproof.data.leantree_dataloader import sft_data_generator
 _MIN_VALUE = 1
 _MAX_VALUE = 64
 
+
+def _reduce_if_ddp(tensor):
+    """Reduce tensor across DDP ranks if in DDP mode."""
+    if is_ddp():
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+    return tensor
+
+
 @torch.inference_mode()
 def eval_critic_errors(model, tokenizer, leantree_batches, max_steps=None):
     """Evaluate critic accuracy on value prediction.
     
     Returns confusion matrix and MSE for value bin predictions.
     Only processes samples where x contains the value_delim_tok.
+    
+    In DDP mode, results are automatically reduced across all ranks.
     
     Returns:
         y_true: list of actual bin values (1-64)
@@ -27,6 +38,7 @@ def eval_critic_errors(model, tokenizer, leantree_batches, max_steps=None):
         total_samples: number of samples evaluated
     """
     value_delim_tok = tokenizer.encode_special("<|value|>")
+    device = next(model.parameters()).device
     
     # Bin token IDs in order: index i corresponds to bin value (i+1)
     bin_token_ids = torch.tensor([
@@ -39,6 +51,7 @@ def eval_critic_errors(model, tokenizer, leantree_batches, max_steps=None):
     y_true = []  # actual bin values (1-64)
     y_pred = []  # predicted bin values (1-64)
     soft_squared_error_sum = 0.0
+    argmax_squared_error_sum = 0.0
     
     for x, y, _, _ in leantree_batches if max_steps is None else islice(leantree_batches, max_steps):
         has_value = (x == value_delim_tok).any(dim=1)
@@ -68,16 +81,33 @@ def eval_critic_errors(model, tokenizer, leantree_batches, max_steps=None):
                 pred_idx = argmax_bin_idx[i].item()
                 y_true.append(actual_idx + 1)  # 1-indexed bin value
                 y_pred.append(pred_idx + 1)    # 1-indexed bin value
+                argmax_squared_error_sum += (actual_idx + 1 - (pred_idx + 1)) ** 2
                 soft_squared_error_sum += (actual_idx + 1 - soft_predictions[i].item()) ** 2
     
     total_samples = len(y_true)
+    
+    # Reduce across DDP ranks
+    stats = torch.tensor([argmax_squared_error_sum, soft_squared_error_sum, total_samples], 
+                         dtype=torch.float64, device=device)
+    _reduce_if_ddp(stats)
+    argmax_squared_error_sum, soft_squared_error_sum, total_samples = stats.tolist()
+    total_samples = int(total_samples)
+    
+    # Gather y_true/y_pred from all ranks for confusion matrix
+    if is_ddp():
+        _, _, _, ddp_world_size = get_dist_info()
+        all_y_true = [None] * ddp_world_size
+        all_y_pred = [None] * ddp_world_size
+        dist.all_gather_object(all_y_true, y_true)
+        dist.all_gather_object(all_y_pred, y_pred)
+        y_true = [v for sublist in all_y_true for v in sublist]
+        y_pred = [v for sublist in all_y_pred for v in sublist]
+    
     if total_samples == 0:
         return {"y_true": [], "y_pred": [], "argmax_mse": float('nan'), "soft_mse": float('nan'), "total_samples": 0}
     
-    # Argmax MSE
-    argmax_mse = sum((a - p) ** 2 for a, p in zip(y_true, y_pred)) / total_samples
-    
-    # Soft MSE
+    # Compute final MSE from reduced sums
+    argmax_mse = argmax_squared_error_sum / total_samples
     soft_mse = soft_squared_error_sum / total_samples
     
     return {
@@ -91,10 +121,20 @@ def eval_critic_errors(model, tokenizer, leantree_batches, max_steps=None):
 
 @torch.inference_mode()
 def eval_tactic_accuracy(model, tokenizer, leantree_batches, max_steps=None):
+    """Evaluate tactic prediction accuracy.
+    
+    In DDP mode, results are automatically reduced across all ranks.
+    
+    Returns:
+        full_acc: fraction of samples where all tokens are predicted correctly
+        first_token_acc: fraction of samples where first token is predicted correctly
+        total_samples: number of samples evaluated
+    """
     total_samples = 0
     total_full_correct = 0
     total_first_token_correct = 0
     value_delim_tok = tokenizer.encode_special("<|value|>")
+    device = next(model.parameters()).device
     
     for x, y, _, _ in leantree_batches if max_steps is None else islice(leantree_batches, max_steps):
         # Skip samples where input contains value_delim_tok
@@ -120,17 +160,15 @@ def eval_tactic_accuracy(model, tokenizer, leantree_batches, max_steps=None):
         batch_indices = torch.arange(logits.shape[0], device=logits.device)
         total_first_token_correct += correct[batch_indices, first_token_indices].sum().item()
 
-        # Print predicted vs correct for each sample
-        # for i in range(x.shape[0]):
-        #     sample_mask = mask[i]
-        #     pred_tokens = predictions[i][sample_mask].tolist()
-        #     correct_tokens = y[i][sample_mask].tolist()
-        #     pred_str = tokenizer.decode(pred_tokens)
-        #     correct_str = tokenizer.decode(correct_tokens)
-        #     is_correct = pred_tokens == correct_tokens
-        #     print(f"[{'OK' if is_correct else 'X'}] Pred: {pred_str!r}")
-        #     print(f"     Correct: {correct_str!r}")
-        #     print()
+    # Reduce across DDP ranks
+    stats = torch.tensor([total_full_correct, total_first_token_correct, total_samples], 
+                         dtype=torch.float64, device=device)
+    _reduce_if_ddp(stats)
+    total_full_correct, total_first_token_correct, total_samples = stats.tolist()
+    total_samples = int(total_samples)
+    
+    if total_samples == 0:
+        return {"full_acc": float('nan'), "first_token_acc": float('nan'), "total_samples": 0}
 
     return {
         "full_acc": total_full_correct / total_samples,
