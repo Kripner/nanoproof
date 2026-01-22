@@ -13,12 +13,12 @@ predict_value = None
 
 model_tag = "d26" # model tag to load the model from
 
-# step = 903
-# source = "sft" # which checkpoint to load the model from
+step = 903
+source = "sft" # which checkpoint to load the model from
 
-run_name = "26-01-21_18-37-value_i03guzht"
-step = 2000
-source = "rl" # which checkpoint to load the model from
+# run_name = "26-01-21_18-37-value_i03guzht"
+# step = 2000
+# source = "rl" # which checkpoint to load the model from
 
 if MODE == "raw_engine":
     device_type = "" # cuda|cpu|mps (empty => autodetect)

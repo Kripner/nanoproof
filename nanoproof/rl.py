@@ -60,9 +60,9 @@ infra_file = "infra.toml"  # path to infra.toml for distributed mode (empty => l
 inference_server_port = 5000  # port for inference server (distributed mode only)
 poll_interval = 3.0  # how often to poll provers for transitions (seconds)
 # local mode settings
-lean_server = "10.10.25.35:8000"  # lean server for local mode (host:port)
+lean_server = "10.10.25.31:8000"  # lean server for local mode (host:port)
 # data
-fraction_sft = 0.5  # 50% of data will come from Mathlib (leantree), 50% from replay buffer
+fraction_sft = 0.2  # 20% of data will come from Mathlib (leantree), 80% from replay buffer
 collect_every = 1  # how many steps to train between RL data collections  # TODO: when collect_every>1, we need some warmup (collect collect_every*collect_transitions)
 collect_transitions = 100  # how many proof transitions to collect in one collection
 # parallel experience collection (local mode only)
@@ -202,27 +202,25 @@ if distributed and lean_servers:
 shuffle_goals_and_hypotheses = leantree.augmentations.ShuffleGoalsAndHypotheses(seed=seed)
 random_rename = leantree.augmentations.RandomRename(seed=seed)
 
-mathlib_train = list(iter_data(split="train"))
+mathlib_train = list(iter_data(
+    split="train",
+    augmentations=[shuffle_goals_and_hypotheses, random_rename] if augment_data else None,
+))
 random.Random(rank_seed).shuffle(mathlib_train)
 mathlib_val = list(iter_data(split="val"))
 
 def augment(state_str, tactic_str):
-    before_state_str = state_str
-
-    goals = [LeanGoal.from_string(goal_str) for goal_str in state_str.split("\n\n")]
+    try:
+        goals = [LeanGoal.from_string(goal_str) for goal_str in state_str.split("\n\n")]
+    except Exception as e:
+        print(f"Error parsing goals: {e}")
+        print(f"State: {state_str}")
+        raise e
     goals = shuffle_goals_and_hypotheses.run_on_goals(goals)
     goals, tactic = random_rename.run_on_goals(goals, tactic_str)
 
     state_str = "\n\n".join([str(goal) for goal in goals])
     tactic_str = tactic
-
-    # TODO: REMOVE
-    print(f"""
-    Before:
-    {before_state_str}
-    After:
-    {state_str}
-    """)
 
     return state_str, tactic_str
 
@@ -233,16 +231,16 @@ def train_generator():
         assert len(replay_buffer.buffer) >= collect_transitions
         if rng.random() < fraction_sft:
             try:
-                state, tactic, value_target = next(mathlib_iter)
+                state, tactic, proof_depth = next(mathlib_iter)
             except StopIteration:
                 mathlib_iter = iter(mathlib_train)
-                state, tactic, value_target = next(mathlib_iter)
+                state, tactic, proof_depth = next(mathlib_iter)
         else:
             state, tactic, value_target = replay_buffer.sample_transition()
             proof_depth = -value_target
-
-        if augment_data:
-            state, tactic = augment(state, tactic)
+            # Only run augmentations on replay buffer data - Mathlib data is already augmented.
+            if augment_data:
+                state, tactic = augment(state, tactic)
 
         yield state, tactic, proof_depth
 
