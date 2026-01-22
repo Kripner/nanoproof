@@ -29,6 +29,8 @@ from nanoproof.rl_server import distributed_collect, distributed_eval, start_coo
 from nanoproof.inference import start_inference_server
 from nanoproof.infra import load_infra_config, InfraConfig, parse_lean_server
 from scripts.prover_eval import eval_success_rate
+from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
+from nanoproof.data.leantree_dataloader import sft_data_generator
 
 # TODO: try removing each tactic and if the proof is still valid, do not add the transition to the replay buffer
 #   ... however, then we need to be sure to update the proof states .. maybe?
@@ -202,6 +204,7 @@ random_rename = leantree.augmentations.RandomRename(seed=seed)
 
 mathlib_train = list(iter_data(split="train"))
 random.Random(rank_seed).shuffle(mathlib_train)
+mathlib_val = list(iter_data(split="val"))
 
 def augment(state_str, tactic_str):
     before_state_str = state_str
@@ -321,6 +324,17 @@ while True:
         model.eval()
         rl_monitor.set_phase("evaluating")
 
+        # Policy evaluation (tactic accuracy and critic errors on mathlib val)
+        eval_steps = 100
+        build_val_loader = lambda: sft_data_generator(mathlib_val, batch_size=device_batch_size)
+        with autocast_ctx:
+            tactic_results = eval_tactic_accuracy(model, inner_tactic_model.tokenizer, build_val_loader(), max_steps=eval_steps)
+            critic_results = eval_critic_errors(model, inner_tactic_model.tokenizer, build_val_loader(), max_steps=eval_steps)
+        
+        if master_process:
+            log(f"Step {step:05d} | Tactic full acc: {tactic_results['full_acc']:.4%} | Tactic first acc: {tactic_results['first_token_acc']:.4%} | Critic argmax MSE: {critic_results['argmax_mse']:.4f} | Critic soft MSE: {critic_results['soft_mse']:.4f}", component="Eval")
+            log(f"  Entropy - Tactic first: {tactic_results['first_token_entropy']:.4f} | Tactic all: {tactic_results['all_tokens_entropy']:.4f} | Critic: {critic_results['entropy']:.4f}", component="Eval")
+
         # Load eval theorems
         minif2f_theorems = minif2f.list_theorems(split="Valid")
         leanworkbook_theorems = leanworkbook.list_theorems(split="val")[:128]
@@ -353,7 +367,17 @@ while True:
                 log(f"Step {step:05d} | {minif2f_status} | {leanworkbook_status}", component="Eval")
                 
                 # Only log scores to wandb if eval completed (not timed out or invalid)
-                wandb_data = {"step": step}
+                wandb_data = {
+                    "step": step,
+                    # Policy evaluation metrics
+                    "val_full_acc": tactic_results["full_acc"],
+                    "val_first_token_acc": tactic_results["first_token_acc"],
+                    "val_first_token_entropy": tactic_results["first_token_entropy"],
+                    "val_all_tokens_entropy": tactic_results["all_tokens_entropy"],
+                    "val_critic_argmax_mse": critic_results["argmax_mse"],
+                    "val_critic_soft_mse": critic_results["soft_mse"],
+                    "val_critic_entropy": critic_results["entropy"],
+                }
                 if not minif2f_results.get('timed_out') and not minif2f_results.get('invalid'):
                     wandb_data["minif2f_val"] = minif2f_results['success_rate']
                 else:
@@ -407,6 +431,14 @@ while True:
                 "step": step,
                 "minif2f_val": minif2f_results['success_rate'],
                 "leanworkbook_val": leanworkbook_results['success_rate'],
+                # Policy evaluation metrics
+                "val_full_acc": tactic_results["full_acc"],
+                "val_first_token_acc": tactic_results["first_token_acc"],
+                "val_first_token_entropy": tactic_results["first_token_entropy"],
+                "val_all_tokens_entropy": tactic_results["all_tokens_entropy"],
+                "val_critic_argmax_mse": critic_results["argmax_mse"],
+                "val_critic_soft_mse": critic_results["soft_mse"],
+                "val_critic_entropy": critic_results["entropy"],
             })
 
         model.train()
