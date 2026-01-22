@@ -21,6 +21,21 @@ def _reduce_if_ddp(tensor):
     return tensor
 
 
+def _compute_entropy(logits):
+    """Compute entropy of a distribution from logits. Returns entropy per sample.
+    
+    Args:
+        logits: (..., V) logits over vocabulary
+    Returns:
+        entropy: (...) entropy values in nats
+    """
+    log_probs = torch.log_softmax(logits, dim=-1)
+    probs = torch.exp(log_probs)
+    # H = -sum(p * log(p)), handle p=0 case (0 * -inf = 0)
+    entropy = -torch.sum(probs * log_probs, dim=-1)
+    return entropy
+
+
 @torch.inference_mode()
 def eval_critic_errors(model, tokenizer, leantree_batches, max_steps=None):
     """Evaluate critic accuracy on value prediction.
@@ -35,6 +50,7 @@ def eval_critic_errors(model, tokenizer, leantree_batches, max_steps=None):
         y_pred: list of predicted bin values (1-64)
         argmax_mse: MSE using argmax prediction over bin tokens
         soft_mse: MSE using softmax-weighted expected value
+        entropy: mean entropy of value prediction (over bin tokens)
         total_samples: number of samples evaluated
     """
     value_delim_tok = tokenizer.encode_special("<|value|>")
@@ -52,6 +68,7 @@ def eval_critic_errors(model, tokenizer, leantree_batches, max_steps=None):
     y_pred = []  # predicted bin values (1-64)
     soft_squared_error_sum = 0.0
     argmax_squared_error_sum = 0.0
+    entropy_sum = 0.0
     
     for x, y, _, _ in leantree_batches if max_steps is None else islice(leantree_batches, max_steps):
         has_value = (x == value_delim_tok).any(dim=1)
@@ -74,6 +91,9 @@ def eval_critic_errors(model, tokenizer, leantree_batches, max_steps=None):
         bin_values = torch.arange(1, _MAX_VALUE + 1, dtype=bin_probs.dtype, device=x.device)
         soft_predictions = (bin_probs * bin_values).sum(dim=-1)  # (B,)
         
+        # Compute entropy over bin tokens
+        bin_entropy = _compute_entropy(bin_logits)  # (B,)
+        
         # Collect predictions for samples with valid actual bin token
         for i, actual_tok in enumerate(actual_tokens.tolist()):
             if actual_tok in token_to_bin_idx:
@@ -83,14 +103,15 @@ def eval_critic_errors(model, tokenizer, leantree_batches, max_steps=None):
                 y_pred.append(pred_idx + 1)    # 1-indexed bin value
                 argmax_squared_error_sum += (actual_idx + 1 - (pred_idx + 1)) ** 2
                 soft_squared_error_sum += (actual_idx + 1 - soft_predictions[i].item()) ** 2
+                entropy_sum += bin_entropy[i].item()
     
     total_samples = len(y_true)
     
     # Reduce across DDP ranks
-    stats = torch.tensor([argmax_squared_error_sum, soft_squared_error_sum, total_samples], 
+    stats = torch.tensor([argmax_squared_error_sum, soft_squared_error_sum, entropy_sum, total_samples], 
                          dtype=torch.float64, device=device)
     _reduce_if_ddp(stats)
-    argmax_squared_error_sum, soft_squared_error_sum, total_samples = stats.tolist()
+    argmax_squared_error_sum, soft_squared_error_sum, entropy_sum, total_samples = stats.tolist()
     total_samples = int(total_samples)
     
     # Gather y_true/y_pred from all ranks for confusion matrix
@@ -104,17 +125,20 @@ def eval_critic_errors(model, tokenizer, leantree_batches, max_steps=None):
         y_pred = [v for sublist in all_y_pred for v in sublist]
     
     if total_samples == 0:
-        return {"y_true": [], "y_pred": [], "argmax_mse": float('nan'), "soft_mse": float('nan'), "total_samples": 0}
+        return {"y_true": [], "y_pred": [], "argmax_mse": float('nan'), "soft_mse": float('nan'), 
+                "entropy": float('nan'), "total_samples": 0}
     
-    # Compute final MSE from reduced sums
+    # Compute final metrics from reduced sums
     argmax_mse = argmax_squared_error_sum / total_samples
     soft_mse = soft_squared_error_sum / total_samples
+    entropy = entropy_sum / total_samples
     
     return {
         "y_true": y_true,
         "y_pred": y_pred,
         "argmax_mse": argmax_mse,
         "soft_mse": soft_mse,
+        "entropy": entropy,
         "total_samples": total_samples,
     }
 
@@ -128,11 +152,16 @@ def eval_tactic_accuracy(model, tokenizer, leantree_batches, max_steps=None):
     Returns:
         full_acc: fraction of samples where all tokens are predicted correctly
         first_token_acc: fraction of samples where first token is predicted correctly
+        first_token_entropy: mean entropy of first token prediction
+        all_tokens_entropy: mean entropy across all predicted tokens
         total_samples: number of samples evaluated
     """
     total_samples = 0
     total_full_correct = 0
     total_first_token_correct = 0
+    first_token_entropy_sum = 0.0
+    all_tokens_entropy_sum = 0.0
+    total_tokens = 0  # count of all masked tokens for entropy averaging
     value_delim_tok = tokenizer.encode_special("<|value|>")
     device = next(model.parameters()).device
     
@@ -159,20 +188,40 @@ def eval_tactic_accuracy(model, tokenizer, leantree_batches, max_steps=None):
         first_token_indices = mask.int().argmax(dim=1)  # argmax returns the first True index
         batch_indices = torch.arange(logits.shape[0], device=logits.device)
         total_first_token_correct += correct[batch_indices, first_token_indices].sum().item()
+        
+        # Entropy calculations
+        token_entropy = _compute_entropy(logits)  # (B, T)
+        
+        # First token entropy
+        first_token_entropy_sum += token_entropy[batch_indices, first_token_indices].sum().item()
+        
+        # All tokens entropy (only for masked positions)
+        all_tokens_entropy_sum += (token_entropy * mask).sum().item()
+        total_tokens += mask.sum().item()
 
     # Reduce across DDP ranks
-    stats = torch.tensor([total_full_correct, total_first_token_correct, total_samples], 
-                         dtype=torch.float64, device=device)
+    stats = torch.tensor([
+        total_full_correct, total_first_token_correct, 
+        first_token_entropy_sum, all_tokens_entropy_sum, 
+        total_samples, total_tokens
+    ], dtype=torch.float64, device=device)
     _reduce_if_ddp(stats)
-    total_full_correct, total_first_token_correct, total_samples = stats.tolist()
+    (total_full_correct, total_first_token_correct, 
+     first_token_entropy_sum, all_tokens_entropy_sum, 
+     total_samples, total_tokens) = stats.tolist()
     total_samples = int(total_samples)
+    total_tokens = int(total_tokens)
     
     if total_samples == 0:
-        return {"full_acc": float('nan'), "first_token_acc": float('nan'), "total_samples": 0}
+        return {"full_acc": float('nan'), "first_token_acc": float('nan'), 
+                "first_token_entropy": float('nan'), "all_tokens_entropy": float('nan'),
+                "total_samples": 0}
 
     return {
         "full_acc": total_full_correct / total_samples,
         "first_token_acc": total_first_token_correct / total_samples,
+        "first_token_entropy": first_token_entropy_sum / total_samples,
+        "all_tokens_entropy": all_tokens_entropy_sum / total_tokens if total_tokens > 0 else float('nan'),
         "total_samples": total_samples,
     }
 

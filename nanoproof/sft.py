@@ -182,6 +182,7 @@ while True:
             critic_results = eval_critic_errors(model, tokenizer, build_val_loader(), max_steps=eval_steps)
 
         print0(f"Step {step:05d} | Validation loss: {val_loss:.6f} | Tactic full accuracy: {tactic_results['full_acc']:.4%} | Tactic first token accuracy: {tactic_results['first_token_acc']:.4%} | Critic argmax MSE: {critic_results['argmax_mse']:.4f} | Critic soft MSE: {critic_results['soft_mse']:.4f}")
+        print0(f"  Entropy - Tactic first: {tactic_results['first_token_entropy']:.4f} | Tactic all: {tactic_results['all_tokens_entropy']:.4f} | Critic: {critic_results['entropy']:.4f}")
 
         # Create confusion matrix for wandb
         bin_labels = [str(i) for i in range(1, 65)]
@@ -191,9 +192,12 @@ while True:
             "val_loss": val_loss,
             "val_full_acc": tactic_results["full_acc"],
             "val_first_token_acc": tactic_results["first_token_acc"],
+            "val_first_token_entropy": tactic_results["first_token_entropy"],
+            "val_all_tokens_entropy": tactic_results["all_tokens_entropy"],
             "val_tactic_samples": tactic_results["total_samples"],
             "val_critic_argmax_mse": critic_results["argmax_mse"],
             "val_critic_soft_mse": critic_results["soft_mse"],
+            "val_critic_entropy": critic_results["entropy"],
             "val_critic_samples": critic_results["total_samples"],
             "val_critic_confusion": wandb.plot.confusion_matrix(
                 y_true=critic_results["y_true"],

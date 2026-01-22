@@ -33,11 +33,13 @@ from scripts.prover_eval import eval_success_rate
 # TODO: try removing each tactic and if the proof is still valid, do not add the transition to the replay buffer
 #   ... however, then we need to be sure to update the proof states .. maybe?
 
-# TODO: save all proofs found during evaluation
+# TODO: save all proofs found during evaluation (and also all the unsuccessful theorems!)
 # TODO: during evaluation, report at which iteration number the proof was found
 # TODO: in each episode, save a sample of training data (right before it goes into the model)
 
 # TODO: matchmaker
+
+# TODO: maybe log numbers of OR and AND nodes in the proof searches
 
 # -----------------------------------------------------------------------------
 # RL Hyperparameters
