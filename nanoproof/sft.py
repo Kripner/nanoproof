@@ -37,7 +37,7 @@ run = "dummy" # wandb run name default ("dummy" is special - we won't log to wan
 seed = 0
 # input model options
 source = "mid" # base|mid , which checkpoint to load the model from (base model or midtrained model)
-model_tag = "d32" # model tag to load the model from (base model or midtrained model)
+model_tag = "d26" # model tag to load the model from (base model or midtrained model)
 step = None # step to load the model from (base model or midtrained model)
 resume_from = None # step to resume from (None = don't resume, int = specific step, "latest" = auto-detect latest)
 # compute/precision
@@ -58,6 +58,8 @@ eval_every = 100
 eval_steps = 100
 sample_every = 100
 eval_metrics_max_problems = 1024
+# loss weighting
+value_weight = 1.0  # weight for value (critic) samples relative to policy samples
 # now allow CLI to override the settings via the configurator lol
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open(os.path.join('nanoproof', 'configurator.py')).read()) # overrides from command line or config file
@@ -90,6 +92,7 @@ orig_model = model # original, uncompiled model
 # model = torch.compile(model, dynamic=True) # doesn't work super well because of variable lengths of inputs
 engine = Engine(model, tokenizer) # will be used for inline model evaluation only
 bos_token = tokenizer.get_bos_token_id()
+value_delim_tok = tokenizer.encode_special("<|value|>")  # for distinguishing policy vs value samples
 
 # -----------------------------------------------------------------------------
 # DataLoader
@@ -312,7 +315,22 @@ hx0 : P x0
 
         
         with autocast_ctx:
-            loss = model(train_inputs, train_targets)
+            # Compute per-token losses to apply different weights to value vs policy samples
+            per_token_loss = model(train_inputs, train_targets, loss_reduction='none')  # (B*T,)
+            per_token_loss = per_token_loss.view(train_inputs.shape)  # (B, T)
+            
+            # Identify value samples: those where input contains the value delimiter token
+            is_value_sample = (train_inputs == value_delim_tok).any(dim=1)  # (B,)
+            
+            # Create per-sample weights: value_weight for value samples, 1.0 for policy samples
+            sample_weights = torch.where(is_value_sample, value_weight, 1.0)  # (B,)
+            
+            # Compute weighted loss: weight each token by its sample's weight
+            token_mask = (train_targets >= 0)  # (B, T)
+            weighted_token_loss = per_token_loss * sample_weights.unsqueeze(1)  # (B, T)
+            
+            # Mean over all valid tokens (weighted)
+            loss = (weighted_token_loss * token_mask).sum() / token_mask.sum()
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         loss.backward() # accumulate the gradient

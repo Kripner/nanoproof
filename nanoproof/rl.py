@@ -78,6 +78,7 @@ matrix_lr = 0.02
 weight_decay = 0.0
 init_lr_frac = 0.02
 augment_data = True
+value_weight = 1.0  # weight for value (critic) samples relative to policy samples
 # evaluation and logging there of
 eval_every = 100
 eval_start = 0  # step to start evaluation at (skip evaluation before this step)
@@ -249,6 +250,7 @@ def train_generator():
 
 
 train_loader = rl_data_generator(train_generator(), batch_size=device_batch_size)
+value_delim_tok = inner_tactic_model.tokenizer.encode_special("<|value|>")  # for distinguishing policy vs value samples
 
 # -----------------------------------------------------------------------------
 # Initialize the Optimizer
@@ -541,7 +543,22 @@ while True:
     for micro_step in range(grad_accum_steps):
         train_inputs, train_targets = next(train_loader)  # prefetch the next batch while the GPU is busy with forward/backward
         with autocast_ctx:
-            loss = model(train_inputs, train_targets)
+            # Compute per-token losses to apply different weights to value vs policy samples
+            per_token_loss = model(train_inputs, train_targets, loss_reduction='none')  # (B*T,)
+            per_token_loss = per_token_loss.view(train_inputs.shape)  # (B, T)
+            
+            # Identify value samples: those where input contains the value delimiter token
+            is_value_sample = (train_inputs == value_delim_tok).any(dim=1)  # (B,)
+            
+            # Create per-sample weights: value_weight for value samples, 1.0 for policy samples
+            sample_weights = torch.where(is_value_sample, value_weight, 1.0)  # (B,)
+            
+            # Compute weighted loss: weight each token by its sample's weight
+            token_mask = (train_targets >= 0)  # (B, T)
+            weighted_token_loss = per_token_loss * sample_weights.unsqueeze(1)  # (B, T)
+            
+            # Mean over all valid tokens (weighted)
+            loss = (weighted_token_loss * token_mask).sum() / token_mask.sum()
         train_loss = loss.detach()  # for logging
         loss = loss / grad_accum_steps  # each .backward() is a grad sum => normalize loss here
         loss.backward()  # accumulate the gradient
