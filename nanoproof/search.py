@@ -1,7 +1,8 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import enum
 from typing import Self
 import math
+import uuid
 
 from leantree.repl_adapter.server import LeanProofBranch, LeanClient
 
@@ -59,6 +60,7 @@ State = list[LeanProofBranch]
 @dataclass
 class Node:
     """Node in the search tree."""
+
     parent: Self | None  # Not serialized.
     # Action that was taken to reach this node.
     action: Action | None
@@ -79,6 +81,14 @@ class Node:
 
     # Not used in search, but used as a regression target in RL.
     value_target: float | None = None
+
+    # Unique ID for this node, assigned in __post_init__ if not provided.
+    id: str = ""
+
+    def __post_init__(self):
+        if not self.id:
+            self.id = str(uuid.uuid4())
+        assert (self.parent is None) == (self.action is None), f"Node __post_init__: parent={self.parent} action={self.action}"
 
     def expanded(self) -> bool:
         return self.children is not None
@@ -142,6 +152,8 @@ class Node:
             }
         
         return {
+            "id": self.id,
+            "parent_id": self.parent.id if self.parent else None,
             "action": self.action,
             "prior": self.prior,
             "state": state_strs,
@@ -156,31 +168,32 @@ class Node:
         }
 
     @classmethod
-    def deserialize(cls, data: dict) -> Self:
+    def deserialize(cls, data: dict, id_to_node: dict[str, Self] | None = None) -> Self:
         """
         Deserialize a node tree from a dict.
         
         Creates MockProofBranch objects for the state so that transition
         extraction code (which expects branch.state) works correctly.
+        
+        Args:
+            data: The serialized node data.
+            id_to_node: Dict mapping node ids to node instances, used to look up parents.
+                        If None, a new dict is created (for the root node).
         """
-        # Deserialize children recursively
-        children = None
-        if data.get("children") is not None:
-            children = {}
-            for action_str, child_data in data["children"].items():
-                # Try to convert action back to int if it was an int (for AND node children)
-                try:
-                    action = int(action_str)
-                except ValueError:
-                    action = action_str
-                children[action] = cls.deserialize(child_data)
+        if id_to_node is None:
+            id_to_node = {}
         
         # Create mock proof branches with .state attribute
         state_strs = data.get("state", [])
         state = [MockProofBranch(s) for s in state_strs]
         
-        return cls(
-            parent=None,  # TODO: this is not good
+        # Look up parent from dict using parent_id
+        parent_id = data.get("parent_id")
+        parent = id_to_node.get(parent_id) if parent_id else None
+        
+        # Create the node first (without children)
+        node = cls(
+            parent=parent,
             action=data["action"],
             prior=data["prior"],
             state=state,
@@ -191,8 +204,45 @@ class Node:
             evaluations=data["evaluations"],
             value_sum=data["value_sum"],
             value_target=data.get("value_target", 0),
-            children=children,
+            children=None,
+            id=data["id"],
         )
+        
+        # Add node to dict so children can look it up
+        id_to_node[node.id] = node
+        
+        # Deserialize children recursively, passing the dict
+        if data.get("children") is not None:
+            children = {}
+            for action_str, child_data in data["children"].items():
+                # Try to convert action back to int if it was an int (for AND node children)
+                try:
+                    action = int(action_str)
+                except ValueError:
+                    action = action_str
+                children[action] = cls.deserialize(child_data, id_to_node)
+            node.children = children
+        
+        return node
+
+    def clone(self) -> Self:
+        return self.deserialize(self.serialize())
+
+    def get_tree_nodes(self) -> list[Self]:
+        result = []
+        q = [self]
+        while q:
+            node = q.pop(0)
+            result.append(node)
+            if node.children is not None:
+                q.extend(node.children.values())
+        return result
+
+    def find_node_by_id(self, id: str) -> Self | None:
+        for node in self.get_tree_nodes():
+            if node.id == id:
+                return node
+        return None
 
 class MockProofBranch:
     """Mock proof branch for deserialized nodes. Mimics LeanProofBranch.state."""
@@ -222,9 +272,6 @@ def compute_value_target(node: Node) -> float:
     else:
         raise ValueError(f"Unknown to_play: {node.to_play}")
 
-def extract_minimal_transitions(node: Node) -> list[tuple[str, str, float]]:
-    pass
-
 def verify_node(node: Node):
     assert node.to_play == Player.OR, f"verify_node: Expected OR root, got {node.to_play}"
     assert len(node.state) == 1, f"verify_node: Expected 1 branch at root, got {len(node.state)}"
@@ -251,7 +298,6 @@ def verify_node(node: Node):
                 assert result.is_success(), f"verify_node: Tactic application error: '{result.error}'; state: '{branch.state}'; action: `{action}`"
                 
                 new_branches = result.value
-                # new_branches = [b for b in new_branches if not b.state.is_solved()]
                 if len(new_branches) != len(child.state):
                     return f"Unexpected number of branches after tactic application: {len(new_branches)=} != {len(child.state)=}; state: '{branch.state}'; action: `{action}`"
                 if len(new_branches) > 0:
@@ -262,6 +308,41 @@ def verify_node(node: Node):
         i += 1
         if i > 1000:
             raise AssertionError(f"verify_node: Exceeded maximum number of iterations ({i=})")
+
+def execute_tree(root: Node, initial_branch: LeanProofBranch) -> dict[str, State]:
+    """
+    Execute the tree starting from the initial branch. Return the actual obtained state for each node.
+    """
+    
+
+def prune_redundant_nodes(root: Node) -> Node | None:
+    while True:
+        pruned = prune_redundant_node(root)
+        if not pruned:
+            break
+    return root
+
+def prune_redundant_node(root: Node) -> bool:
+    # all interior OR nodes that don't directly lead to a terminal node - candidates for pruning
+    nodes = [
+        n for n in root.get_tree_nodes() if (
+            n.to_play == Player.OR and
+            not n.is_terminal and
+            not any(child.is_terminal for child in n.children.values())
+        )
+    ]
+    for to_remove in nodes:
+        solved_actions = [a for a in to_remove.children if to_remove.children[a].is_solved]
+        assert len(solved_actions) == 1, f"prune_redundant_node: Expected 1 solved action, got {len(solved_actions)}"
+        action = solved_actions[0]
+        child = to_remove.children[action]
+        if child.to_play == Player.OR:
+            pass  # TODO
+        elif child.to_play == Player.AND:
+            pass  # TODO
+        else:
+            raise AssertionError(f"prune_redundant_node: Unknown node type: {child.to_play}")
+    return None
 
 def extract_transitions(node: Node) -> list[tuple[str, str, float]]:
     """
@@ -295,6 +376,7 @@ def _extract_transitions_recursive(node: Node, transitions: list):
         #     break
         
         # Pick shortest tactic (more than one terminal node can be solved when expanding)
+        # Note: if we ever let the search run even after proof is found, we should here select also based on the sub-tree depth.
         action = min(solved_actions, key=lambda a: len(a))
         
         # Extract transition: (context, tactic, value_target)
