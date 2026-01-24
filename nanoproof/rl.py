@@ -56,7 +56,7 @@ device_type = ""  # cuda|cpu|mps (empty => autodetect)
 dtype = "bfloat16"
 device_batch_size = 8  # (maybe) max to avoid OOM (on A100 40GB)
 # distributed mode - controlled by infra_file
-infra_file = "infra.toml"  # path to infra.toml for distributed mode (empty => local mode)
+infra_file = "infra-ms.toml"  # path to infra.toml for distributed mode (empty => local mode)
 inference_server_port = 5000  # port for inference server (distributed mode only)
 poll_interval = 3.0  # how often to poll provers for transitions (seconds)
 # local mode settings
@@ -77,7 +77,7 @@ embedding_lr = 0.2
 matrix_lr = 0.02
 weight_decay = 0.0
 init_lr_frac = 0.02
-augment_data = True  # TODO: TURN ON AND TEST
+augment_data = True
 # evaluation and logging there of
 eval_every = 100
 eval_start = 0  # step to start evaluation at (skip evaluation before this step)
@@ -98,6 +98,9 @@ distributed = bool(infra_file)  # distributed mode is enabled if infra_file is p
 infra_config: InfraConfig | None = None
 
 if distributed:
+    if not os.path.exists(infra_file):
+        log(f"Error: Infrastructure file {infra_file} does not exist", component="Main")
+        sys.exit(1)
     infra_config = load_infra_config(infra_file)
     # Override inference_server_port from infra config
     inference_server_port = infra_config.rl_server_port

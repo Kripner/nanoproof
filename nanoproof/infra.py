@@ -22,12 +22,12 @@ address = "10.10.25.32"
 port = 8000
 
 [prover_to_lean]
-# Maps prover server addresses to lean server addresses
-# Each prover should know its own IP and look up which lean server to use
-"10.10.25.40" = "10.10.25.31:8000"
-"10.10.25.41" = "10.10.25.31:8000"
-"10.10.25.42" = "10.10.25.32:8000"
-"10.10.25.43" = "10.10.25.32:8000"
+# Maps prover server addresses (IP:port) to lean server addresses
+# Each prover should know its own IP:port and look up which lean server to use
+"10.10.25.40:6001" = "10.10.25.31:8000"
+"10.10.25.40:6002" = "10.10.25.31:8000"
+"10.10.25.41:6001" = "10.10.25.32:8000"
+"10.10.25.41:6002" = "10.10.25.32:8000"
 ```
 """
 
@@ -70,7 +70,7 @@ class InfraConfig:
     # List of lean servers available
     lean_servers: list[LeanServer] = field(default_factory=list)
     
-    # Mapping from prover IP addresses to lean server addresses (host:port)
+    # Mapping from prover addresses (IP:port) to lean server addresses (host:port)
     prover_to_lean: dict[str, str] = field(default_factory=dict)
     
     @property
@@ -83,7 +83,7 @@ class InfraConfig:
         Get the lean server that a prover should use.
         
         Args:
-            prover_address: The prover's IP address (without port)
+            prover_address: The prover's address as IP:port (e.g. "10.10.25.40:6001")
         
         Returns:
             LeanServer if found in mapping, None otherwise

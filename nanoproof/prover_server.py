@@ -247,7 +247,7 @@ def create_app(prover_worker: ProverWorker, buffer: LocalBuffer):
 def main():
     parser = argparse.ArgumentParser(description="Prover Server")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
-    parser.add_argument("--port", type=int, default=5001, help="Port to bind to")
+    parser.add_argument("--port", type=int, default=6001, help="Port to bind to")
     parser.add_argument("--infra-file", default=None, help="Path to infra.toml file (recommended). If provided, --rl-server and --lean-server are read from it.")
     parser.add_argument("--rl-server", default=None, help="RL server address (host:port) - handles both registration and inference (ignored if --infra-file is set)")
     parser.add_argument("--lean-server", default=None, help="Lean server address (host:port) (ignored if --infra-file is set)")
@@ -263,18 +263,19 @@ def main():
         infra_config = load_infra_config(args.infra_file)
         rl_server = infra_config.rl_server
         
-        # Get this prover's IP to look up which lean server to use
+        # Get this prover's address (IP:port) to look up which lean server to use
         my_ip = get_local_ip()
-        lean_server_config = infra_config.get_lean_server_for_prover(my_ip)
+        my_prover_address = f"{my_ip}:{args.port}"
+        lean_server_config = infra_config.get_lean_server_for_prover(my_prover_address)
         if lean_server_config is None:
-            print(f"ERROR: No lean server mapping found for prover IP {my_ip} in {args.infra_file}")
+            print(f"ERROR: No lean server mapping found for prover {my_prover_address} in {args.infra_file}")
             print(f"Available mappings: {infra_config.prover_to_lean}")
             sys.exit(1)
         lean_host = lean_server_config.address
         lean_port = lean_server_config.port
         print(f"Loaded config from {args.infra_file}:")
         print(f"  RL server: {rl_server}")
-        print(f"  Lean server for {my_ip}: {lean_host}:{lean_port}")
+        print(f"  Lean server for {my_prover_address}: {lean_host}:{lean_port}")
     else:
         # Use explicit arguments
         if not args.rl_server:
