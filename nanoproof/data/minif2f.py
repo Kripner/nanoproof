@@ -15,17 +15,26 @@ BASE_URL = "https://raw.githubusercontent.com/google-deepmind/miniF2F/refs/heads
 def list_theorems(split):
     assert split in ["Valid", "Test"]
     file_path = Path(DATA_DIR) / f"{split}.lean"
-    blocks = file_path.read_text().split("\n\n")
+
     theorems = []
-    for block in blocks:
-        lines = block.split("\n")
-        theorem_line_idx = next((i for i, line in enumerate(lines) if line.startswith("theorem")), None)
-        if theorem_line_idx is None:
-            continue
-        theorem = "\n".join([line.rstrip() for line in lines[theorem_line_idx:]])
-        theorems.append(theorem.strip())
-    assert all("sorry" in t for t in theorems), "Found a theorem with no `sorry`."
+    theorem_lines = []
+    in_theorem = False
+    for line in file_path.read_text().split("\n"):
+        if line.lstrip().startswith("theorem"):
+            assert not in_theorem, "minif2f: overlapping theorems"
+            in_theorem = True
+            theorem_lines.append(line)
+        elif line.lstrip().startswith("sorry"):
+            assert in_theorem, "minif2f: sorry without theorem"
+            in_theorem = False
+            theorem_lines.append(line)
+            theorems.append("\n".join(theorem_lines))
+            theorem_lines = []
+    assert all(t.count("sorry") == 1 for t in theorems), "Found a theorem with no or multiple `sorry`."
+    expected_count = 256 if split == "Valid" else 244
+    assert len(theorems) == expected_count, f"minif2f: expected {expected_count} theorems, got {len(theorems)}"
     return theorems
+
 
 def get_imports():
     file_path = Path(DATA_DIR) / "ProblemImports.lean"

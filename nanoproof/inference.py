@@ -122,6 +122,9 @@ class TacticModel:
                 tactic = self.tokenizer.decode(tactic_toks)
                 if "sorry" in tactic or "admit" in tactic:
                     continue
+                if tactic.strip() == "bound":
+                    # `bound` tactic messes with the kernel check
+                    continue
                 tactics.append(tactic)
             tactics_results.append(tactics)
 

@@ -74,6 +74,44 @@ def format_proof_tree(proof: dict | None) -> str:
     return node.pp_tree()
 
 
+def linearize_proof(node: Node) -> list[str]:
+    """Linearize a solved proof tree into a sequence of tactics using DFS.
+    
+    Traverses the AND/OR tree and collects all tactics from the solved path.
+    Returns a list of tactic strings in order of application.
+    """
+    tactics = []
+    
+    def dfs(n: Node):
+        if n.children is None:
+            return
+        
+        # Find solved children
+        solved_children = [(action, child) for action, child in n.children.items() if child.is_solved]
+        
+        for action, child in solved_children:
+            # Record the tactic (action is the tactic string)
+            if isinstance(action, str):
+                tactics.append(action)
+            
+            # Continue DFS into the child
+            dfs(child)
+    
+    dfs(node)
+    return tactics
+
+
+def format_linearized_proof(tactics: list[str]) -> str:
+    """Format a linearized proof as a numbered list of tactics."""
+    if not tactics:
+        return "(no tactics)"
+    
+    lines = []
+    for tactic in tactics:
+        lines.append(f"{tactic}")
+    return "\n".join(lines)
+
+
 def cmd_view(args):
     """View proofs from the evaluation results."""
     proofs = load_proofs(args.path)
@@ -295,13 +333,11 @@ def cmd_simplify(args):
                 print(f"  {line}")
             print()
             
+            # Capture linearized proof before pruning
+            tactics_before = linearize_proof(node)
+            
             # Revive tree states
-            try:
-                revive_tree_states(node, theorem, env)
-            except AssertionError as e:
-                print(f"[ERROR]  Error reviving tree states: {e}")
-                print()
-                continue
+            revive_tree_states(node, theorem, env)
             
             # Prune redundant nodes
             pruned_count = prune_redundant_nodes(node)
@@ -316,6 +352,21 @@ def cmd_simplify(args):
             print()
             
             print(f"Pruned nodes: {pruned_count}")
+            
+            # Print linearized proofs if pruning occurred
+            if pruned_count > 0:
+                tactics_after = linearize_proof(node)
+                
+                print()
+                print(f"Linearized proof (before pruning, {len(tactics_before)} tactics):")
+                for line in format_linearized_proof(tactics_before).split("\n"):
+                    print(f"  {line}")
+                
+                print()
+                print(f"Linearized proof (after pruning, {len(tactics_after)} tactics):")
+                for line in format_linearized_proof(tactics_after).split("\n"):
+                    print(f"  {line}")
+            
             print()
 
 

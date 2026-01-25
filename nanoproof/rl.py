@@ -32,8 +32,7 @@ from scripts.prover_eval import eval_success_rate
 from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
 from nanoproof.data.leantree_dataloader import sft_data_generator
 
-# TODO: try removing each tactic and if the proof is still valid, do not add the transition to the replay buffer
-#   ... however, then we need to be sure to update the proof states .. maybe?
+# TODO (!): wire up proof simplification
 
 # TODO: in each episode, save a sample of training data (right before it goes into the model)
 
