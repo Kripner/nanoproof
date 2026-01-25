@@ -19,6 +19,16 @@ from nanoproof.inference import TacticModel, BlockingTacticModel
 from nanoproof.cli import log
 
 
+@dataclass
+class TheoremResult:
+    """Result of evaluating a single theorem."""
+    theorem: str
+    is_solved: bool
+    error: Optional[str]
+    proof_tree: Optional[dict]  # Serialized Node tree, None if not solved
+    num_iterations: int  # Number of MCTS iterations run
+
+
 # Lean environment setup commands
 LEAN_OPEN_SCOPED_COMMANDS = """
     open scoped Real
@@ -66,16 +76,23 @@ def evaluate_theorem(
     env,
     config: Config,
     model: Union[TacticModel, BlockingTacticModel],
-) -> tuple[bool, str | None]:
+) -> TheoremResult:
     """
     Evaluate a single theorem using MCTS.
     
     Returns:
-        (success, is_error): success=True if proof found, is_error=True if theorem parsing failed
+        TheoremResult with is_solved, error, proof_tree (serialized), and num_iterations.
     """
     init_branch = env.proof_from_sorry(theorem)
     if not init_branch.is_success():
-        return False, init_branch.error  # Error case
+        # Error case - return max iterations since we couldn't even start
+        return TheoremResult(
+            theorem=theorem,
+            is_solved=False,
+            error=init_branch.error,
+            proof_tree=None,
+            num_iterations=config.num_simulations,
+        )
     
     init_branch = init_branch.value
     game = Game(theorem, num_simulations=config.num_simulations)
@@ -88,7 +105,17 @@ def evaluate_theorem(
     )
     
     run_mcts(config, game, model)
-    return game.root.is_solved, None
+    
+    is_solved = game.root.is_solved
+    proof_tree = game.root.serialize() if is_solved else None
+    
+    return TheoremResult(
+        theorem=theorem,
+        is_solved=is_solved,
+        error=None,
+        proof_tree=proof_tree,
+        num_iterations=game.num_iterations,
+    )
 
 
 def aggregate_results(
@@ -198,6 +225,7 @@ def _eval_sequential(
     device = tactic_model.network.get_device()
     
     counters = EvalCounters()
+    detailed_results: list[TheoremResult] = []
     client = LeanClient(config.server_address, config.server_port)
     
     process = client.get_process()
@@ -212,19 +240,22 @@ def _eval_sequential(
             iterator = tqdm(iterator, total=len(theorems_subset), desc=f"Rank {ddp_rank}", position=ddp_rank)
         
         for idx, theorem in iterator:
-            solved, error = evaluate_theorem(theorem, env, config, tactic_model)
+            result = evaluate_theorem(theorem, env, config, tactic_model)
+            detailed_results.append(result)
             
-            if error is not None:
+            if result.error is not None:
                 counters.errors += 1
-                print0(f"Error on theorem: {theorem[:500]}{"..." if len(theorem) > 500 else ""}: {error}")
-            elif solved:
+                print0(f"Error on theorem: {theorem[:500]}{"..." if len(theorem) > 500 else ""}: {result.error}")
+            elif result.is_solved:
                 counters.solved += 1
             counters.processed += 1
             
             # In sequential mode, all ranks process their subset in lockstep, so we can safely use all_reduce
             broadcast_progress(progress, counters.processed, counters.solved, counters.errors, device, ddp, ddp_rank, use_allreduce=True)
     
-    return aggregate_results(counters.solved, counters.errors, len(theorems_subset), device, ddp)
+    results = aggregate_results(counters.solved, counters.errors, len(theorems_subset), device, ddp)
+    results["detailed_results"] = detailed_results
+    return results
 
 
 def _eval_parallel(
@@ -251,6 +282,7 @@ def _eval_parallel(
     lock = threading.Lock()
     next_idx = [0]
     counters = {"processed": 0, "solved": 0, "errors": 0}
+    detailed_results: list[TheoremResult] = []
     
     def actor_loop(actor_id: int):
         """Single actor thread that evaluates theorems until done."""
@@ -285,19 +317,20 @@ def _eval_parallel(
                         next_idx[0] += 1
                     
                     theorem = theorems_subset[my_idx]
-                    solved, error = evaluate_theorem(theorem, env, config, model)
+                    result = evaluate_theorem(theorem, env, config, model)
                     local_processed += 1
                     
-                    # Update counters for progress tracking
+                    # Update counters and store result
                     with lock:
                         counters["processed"] += 1
-                        if solved and error is None:
+                        detailed_results.append(result)
+                        if result.is_solved and result.error is None:
                             counters["solved"] += 1
-                        if error is not None:
+                        if result.error is not None:
                             counters["errors"] += 1
                     
-                    if error is not None:
-                        log(f"[Eval Actor {actor_id}] Error: {theorem[:500]}{"..." if len(theorem) > 500 else ""}: {error}")
+                    if result.error is not None:
+                        log(f"[Eval Actor {actor_id}] Error: {theorem[:500]}{"..." if len(theorem) > 500 else ""}: {result.error}")
                 
                 log(f"[Eval Actor {actor_id}] Done, processed {local_processed} theorems")
         except Exception as e:
@@ -362,7 +395,9 @@ def _eval_parallel(
         broadcast_progress(progress, processed_count, solved_count, error_count, device, ddp, ddp_rank, use_allreduce=True)
     
     # Use len(theorems_subset) as total to be consistent with _eval_sequential
-    return aggregate_results(solved_count, error_count, len(theorems_subset), device, ddp)
+    results = aggregate_results(solved_count, error_count, len(theorems_subset), device, ddp)
+    results["detailed_results"] = detailed_results
+    return results
 
 
 def main():

@@ -104,6 +104,7 @@ class ProofResult:
     theorem: str
     proof_tree: Optional[dict]  # Serialized Node tree, None if not proven
     error: Optional[str] = None  # Error message, None if no error
+    num_iterations: int = 0  # Number of MCTS iterations run (always max when proof is None)
     
     @property
     def is_solved(self) -> bool:
@@ -326,6 +327,7 @@ def create_coordinator_app(registry: ProverRegistry, router: InferenceRouter, di
             theorem=data["theorem"],
             proof_tree=data.get("proof_tree"),
             error=data.get("error"),
+            num_iterations=data.get("num_iterations", 0),
         )
         dispatcher.submit_result(result)
         return jsonify({"status": "ok"})
@@ -710,13 +712,13 @@ def distributed_eval(theorems: list[str], dataset_name: str = "eval", no_progres
             if n >= expected:
                 done.set()
     
-    def get_metrics() -> dict:
+    def get_metrics(include_detailed: bool = False) -> dict:
         """Get summary metrics based on results received so far."""
         with results_lock:
             total = len(results)
             solved = sum(1 for r in results if r.is_solved)
             errors = sum(1 for r in results if r.error)
-            return {
+            metrics = {
                 "success_rate": solved / total if total > 0 else 0.0,
                 "solved": solved,
                 "total": total,
@@ -724,6 +726,18 @@ def distributed_eval(theorems: list[str], dataset_name: str = "eval", no_progres
                 "timed_out": timed_out,
                 "invalid": invalid,
             }
+            if include_detailed:
+                # Convert ProofResult to detailed_results format
+                metrics["detailed_results"] = [
+                    {
+                        "theorem": r.theorem,
+                        "proof_tree": r.proof_tree,
+                        "num_iterations": r.num_iterations,
+                        "error": r.error,
+                    }
+                    for r in results
+                ]
+            return metrics
     
     # Update monitor to show eval is starting
     if monitor:
@@ -792,7 +806,7 @@ def distributed_eval(theorems: list[str], dataset_name: str = "eval", no_progres
                     component="Dispatcher")
                 invalid = True
         
-        metrics = get_metrics()
+        metrics = get_metrics(include_detailed=True)
         status = "timed out" if timed_out else "complete"
         log(f"Eval {status}: {metrics['solved']}/{metrics['total']} solved (expected {expected})", 
             component="Coordinator")

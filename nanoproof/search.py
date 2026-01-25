@@ -398,6 +398,8 @@ class Game:
         # Number of simulations to run.
         self.num_simulations = num_simulations
         self.root: Node = None
+        # Number of iterations actually run (set by run_mcts)
+        self.num_iterations: int = 0
 
 
 class MCTSAbortedError(Exception):
@@ -405,7 +407,7 @@ class MCTSAbortedError(Exception):
     pass
 
 
-def run_mcts(config: Config, game: Game, model: "TacticModel | BlockingTacticModel", expansion_callback=None, tactic_callback=None, abort_check=None):
+def run_mcts(config: Config, game: Game, model: "TacticModel | BlockingTacticModel", expansion_callback=None, tactic_callback=None, abort_check=None) -> int:
     """
     Run MCTS to find a proof.
     
@@ -419,11 +421,16 @@ def run_mcts(config: Config, game: Game, model: "TacticModel | BlockingTacticMod
                      This is checked each iteration and allows callers to cancel search
                      (e.g., when prover is paused and needs to free Lean processes).
     
+    Returns:
+        The number of iterations (simulations) that were run.
+    
     Raises:
         MCTSAbortedError: If abort_check returns True during search.
     """
     root = game.root
+    num_iterations = 0
     for i in range(game.num_simulations):
+        num_iterations = i + 1
         # Check if we should abort early (e.g., prover paused during evaluation)
         if abort_check is not None and abort_check():
             raise MCTSAbortedError("MCTS aborted: prover paused")
@@ -468,6 +475,9 @@ def run_mcts(config: Config, game: Game, model: "TacticModel | BlockingTacticMod
         # print("-" * 80)
         if root.is_solved:
             break
+    
+    game.num_iterations = num_iterations
+    return num_iterations
 
 
 def progressive_sample(node: Node, config: Config) -> bool:
