@@ -26,7 +26,6 @@ from typing import Literal, TextIO, Any
 from queue import Queue
 import os
 
-import torch
 from flask import Flask, jsonify, Response, send_from_directory
 
 # -----------------------------------------------------------------------------

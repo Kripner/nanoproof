@@ -38,9 +38,10 @@ def sft_data_generator(dataset, batch_size, device="cuda"):
         targets = targets.to(device)
         return inputs, targets
 
-    # iterates over the dataset in epochs, tokenizes
     batch = []
+    # last step is sticky - we will loop around (with warning), but last_step will remain True after that
     last_step = False
+    # iterates over the dataset in epochs, tokenizes
     while True:
         for i in range(ddp_rank, len(dataset), ddp_world_size):
             state, tactic, proof_depth = dataset[i]

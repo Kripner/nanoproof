@@ -41,6 +41,8 @@ from nanoproof.data.leantree_dataloader import sft_data_generator
 
 # TODO: maybe log numbers of OR and AND nodes in the proof searches
 
+# TODO: maybe migrate to newer Lean?
+
 
 def save_eval_results(output_dir: str, step: int, dataset_name: str, results: dict):
     """
@@ -117,7 +119,7 @@ matrix_lr = 0.02
 weight_decay = 0.0
 init_lr_frac = 0.02
 augment_data = True
-value_weight = 1.0  # weight for value (critic) samples relative to policy samples
+value_weight = 0.1  # weight for value (critic) samples relative to policy samples
 # evaluation and logging there of
 eval_every = 100
 eval_start = 0  # step to start evaluation at (skip evaluation before this step)
@@ -367,7 +369,7 @@ while True:
         rl_monitor.set_phase("evaluating")
 
         # Policy evaluation (tactic accuracy and critic errors on mathlib val)
-        eval_steps = 100
+        eval_steps = 200
         build_val_loader = lambda: sft_data_generator(mathlib_val, batch_size=device_batch_size)
         with autocast_ctx:
             tactic_results = eval_tactic_accuracy(model, inner_tactic_model.tokenizer, build_val_loader(), max_steps=eval_steps)

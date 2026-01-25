@@ -1,10 +1,11 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import enum
 from typing import Self
 import math
 import uuid
 
 from leantree.repl_adapter.server import LeanProofBranch, LeanClient
+from leantree.repl_adapter.interaction import LeanProcess
 
 from nanoproof.common import pretty_print_tree, ValueOrError
 from nanoproof.cli import get_monitor, log_tactic
@@ -189,7 +190,10 @@ class Node:
         
         # Look up parent from dict using parent_id
         parent_id = data.get("parent_id")
-        parent = id_to_node.get(parent_id) if parent_id else None
+        parent = None
+        if parent_id:
+            assert parent_id in id_to_node, f"deserialize: Parent node not found: {parent_id}"
+            parent = id_to_node[parent_id]
         
         # Create the node first (without children)
         node = cls(
@@ -203,7 +207,7 @@ class Node:
             visit_count=data["visit_count"],
             evaluations=data["evaluations"],
             value_sum=data["value_sum"],
-            value_target=data.get("value_target", 0),
+            value_target=data.get("value_target"),
             children=None,
             id=data["id"],
         )
@@ -309,21 +313,70 @@ def verify_node(node: Node):
         if i > 1000:
             raise AssertionError(f"verify_node: Exceeded maximum number of iterations ({i=})")
 
-def execute_tree(root: Node, initial_branch: LeanProofBranch) -> dict[str, State]:
+
+def execute_tree(root: Node, init_branch: LeanProofBranch) -> list[tuple[Node, State]]:
     """
     Execute the tree starting from the initial branch. Return the actual obtained state for each node.
     """
-    
+    assert root.to_play == Player.OR, f"execute_tree: Expected OR root, got {root.to_play}"
+    assert len(root.state) == 1, f"execute_tree: Expected 1 branch at root, got {len(root.state)}"
 
-def prune_redundant_nodes(root: Node) -> Node | None:
+    node_to_state = []
+    to_execute = [(root, [init_branch])]
+    i = 0
+    while to_execute:
+        node, branches = to_execute.pop(0)
+        node_to_state.append((node, branches))
+        if node.to_play == Player.AND:
+            assert len(branches) == len(node.state), f"execute_tree (AND): {len(branches)=} != {len(node.state)=}"
+            for (action, child) in node.children.items():
+                assert isinstance(action, int), f"execute_tree (AND): Expected int action below AND node, got {type(action)}"
+                assert child.to_play == Player.OR, f"execute_tree (AND): Expected OR node below AND node, got {child.to_play}"
+                to_execute.append((child, child.state))
+        elif node.to_play == Player.OR:
+            assert len(branches) == 1, f"execute_tree (OR): Expected 1 branch at OR node, got {len(branches)}"
+            branch = branches[0]
+            solved_actions = [a for a in node.children if node.children[a].is_solved]
+            # More than one terminal node can be solved when expanding.
+            for action in solved_actions:
+                child = node.children[action]
+
+                result = branch.try_apply_tactic(action, timeout=5000)
+                assert result.is_success(), f"execute_tree (OR): Tactic application error: '{result.error}'; state: '{branch.state}'; action: `{action}`"
+                
+                new_branches = result.value
+                if len(new_branches) != len(child.state):
+                    return f"execute_tree (OR): Unexpected number of branches after tactic application: {len(new_branches)=} != {len(child.state)=}; state: '{branch.state}'; action: `{action}`"
+                if len(new_branches) > 0:
+                    to_execute.append((child, new_branches))
+        else:
+            raise AssertionError(f"execute_tree: Unknown node type: {node.to_play}")
+
+        i += 1
+        if i > 1000:
+            raise AssertionError(f"execute_tree: Exceeded maximum number of iterations ({i=})")
+    return node_to_state
+
+def revive_tree_states(root: Node, theorem_str: str, lean_process: LeanProcess):
+    init_branch = lean_process.proof_from_sorry(theorem_str)
+    assert init_branch.is_success(), f"revive_tree_states: Failed to create initial branch: '{init_branch.error}'"
+    init_branch = init_branch.value
+    node_to_state = execute_tree(root, init_branch)
+    for node, state in node_to_state:
+        node.state = state
+
+
+def prune_redundant_nodes(root: Node) -> int:
+    pruned_count = 0
     while True:
         pruned = prune_redundant_node(root)
         if not pruned:
             break
-    return root
+        pruned_count += 1
+    return pruned_count
 
 def prune_redundant_node(root: Node) -> bool:
-    # all interior OR nodes that don't directly lead to a terminal node - candidates for pruning
+    # all interior OR nodes that don't directly finish the proof - candidates for pruning
     nodes = [
         n for n in root.get_tree_nodes() if (
             n.to_play == Player.OR and
@@ -336,8 +389,22 @@ def prune_redundant_node(root: Node) -> bool:
         assert len(solved_actions) == 1, f"prune_redundant_node: Expected 1 solved action, got {len(solved_actions)}"
         action = solved_actions[0]
         child = to_remove.children[action]
+        child_solved_actions = [a for a in child.children if child.children[a].is_solved]
+        assert len(child_solved_actions) == 1, f"prune_redundant_node: Expected 1 solved action in child, got {len(child_solved_actions)}"
+        child_solved_action = child_solved_actions[0]
         if child.to_play == Player.OR:
-            pass  # TODO
+            assert len(to_remove.state) == 1, f"prune_redundant_node: Expected 1 branch at OR node, got {len(to_remove.state)}"
+            try:
+                # Skip the action, execute the subtree without it.
+                node_to_state = execute_tree(child, to_remove.state[0])
+            except AssertionError as e:
+                # The tree is not valid anymore.
+                continue
+            # Found a redundant edge - remove it, update the subtree, and return.
+            for n, new_state in node_to_state:
+                n.state = new_state
+            to_remove.children.pop(action)
+            to_remove[child_solved_action] = child.children[child_solved_action]
         elif child.to_play == Player.AND:
             pass  # TODO
         else:
@@ -554,10 +621,12 @@ def expand_node(
         # Immediately apply the actions in the environment.
         assert len(node.state) == 1
         branch = node.state[0]
+        # TODO (!): investigate how often this times out; log timeout errors differently
         new_branches = branch.try_apply_tactic(action)
         if not new_branches.is_success():
             # Invalid action encountered.
             log_tactic(state_str, action, status="error")
+            print(f"TACTIC ERROR (action='{action}'): '{new_branches.error}'")
             continue
         if is_cycling(node, new_branches.value):
             # Cycle detected.
