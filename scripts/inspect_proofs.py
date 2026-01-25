@@ -7,7 +7,8 @@ import random
 from collections import Counter
 
 from leantree.repl_adapter.server import LeanClient
-from nanoproof.search import Node, revive_tree_states, prune_redundant_nodes
+
+from nanoproof.search import Node, revive_tree_states, prune_redundant_nodes, compute_value_target
 
 
 # Lean environment setup commands
@@ -298,15 +299,17 @@ def cmd_simplify(args):
             try:
                 revive_tree_states(node, theorem, env)
             except AssertionError as e:
-                print(f"  Error reviving tree states: {e}")
+                print(f"[ERROR]  Error reviving tree states: {e}")
                 print()
                 continue
             
             # Prune redundant nodes
             pruned_count = prune_redundant_nodes(node)
+            if pruned_count > 0:
+                compute_value_target(node)
             
             # Print tree after pruning
-            print(f"Proof tree (after pruning):")
+            print(f"Proof tree (after pruning and recomputing value target):")
             formatted = node.pp_tree()
             for line in formatted.split("\n"):
                 print(f"  {line}")

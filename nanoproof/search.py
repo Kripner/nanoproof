@@ -314,7 +314,7 @@ def verify_node(node: Node):
             raise AssertionError(f"verify_node: Exceeded maximum number of iterations ({i=})")
 
 
-def execute_tree(root: Node, init_branch: LeanProofBranch) -> list[tuple[Node, State]]:
+def execute_tree(root: Node, init_branch: LeanProofBranch, allow_premature_end: bool = False) -> list[tuple[Node, State]]:
     """
     Execute the tree starting from the initial branch. Return the actual obtained state for each node.
     """
@@ -328,11 +328,11 @@ def execute_tree(root: Node, init_branch: LeanProofBranch) -> list[tuple[Node, S
         node, branches = to_execute.pop(0)
         node_to_state.append((node, branches))
         if node.to_play == Player.AND:
-            assert len(branches) == len(node.state), f"execute_tree (AND): {len(branches)=} != {len(node.state)=}"
-            for (action, child) in node.children.items():
+            assert len(branches) == len(node.state) == len(node.children), f"execute_tree (AND): {len(branches)=} != {len(node.state)=} != {len(node.children)=}"
+            for branch, (action, child) in zip(branches, node.children.items()):
                 assert isinstance(action, int), f"execute_tree (AND): Expected int action below AND node, got {type(action)}"
                 assert child.to_play == Player.OR, f"execute_tree (AND): Expected OR node below AND node, got {child.to_play}"
-                to_execute.append((child, child.state))
+                to_execute.append((child, [branch]))
         elif node.to_play == Player.OR:
             assert len(branches) == 1, f"execute_tree (OR): Expected 1 branch at OR node, got {len(branches)}"
             branch = branches[0]
@@ -345,8 +345,8 @@ def execute_tree(root: Node, init_branch: LeanProofBranch) -> list[tuple[Node, S
                 assert result.is_success(), f"execute_tree (OR): Tactic application error: '{result.error}'; state: '{branch.state}'; action: `{action}`"
                 
                 new_branches = result.value
-                if len(new_branches) != len(child.state):
-                    return f"execute_tree (OR): Unexpected number of branches after tactic application: {len(new_branches)=} != {len(child.state)=}; state: '{branch.state}'; action: `{action}`"
+                if len(new_branches) != len(child.state) and not (allow_premature_end and len(new_branches) == 0):
+                    raise AssertionError(f"execute_tree (OR): Unexpected number of branches after tactic application: {len(new_branches)=} != {len(child.state)=}; state: '{branch.state}'; action: `{action}`")
                 if len(new_branches) > 0:
                     to_execute.append((child, new_branches))
         else:
@@ -376,40 +376,47 @@ def prune_redundant_nodes(root: Node) -> int:
     return pruned_count
 
 def prune_redundant_node(root: Node) -> bool:
-    # all interior OR nodes that don't directly finish the proof - candidates for pruning
+    # all solved interior OR nodes that don't directly finish the proof - candidates for pruning
     nodes = [
         n for n in root.get_tree_nodes() if (
+            n.is_solved and
             n.to_play == Player.OR and
             not n.is_terminal and
             not any(child.is_terminal for child in n.children.values())
         )
     ]
-    for to_remove in nodes:
-        solved_actions = [a for a in to_remove.children if to_remove.children[a].is_solved]
+    for to_consider in nodes:
+        solved_actions = [a for a in to_consider.children if to_consider.children[a].is_solved]
         assert len(solved_actions) == 1, f"prune_redundant_node: Expected 1 solved action, got {len(solved_actions)}"
         action = solved_actions[0]
-        child = to_remove.children[action]
+        child = to_consider.children[action]
         child_solved_actions = [a for a in child.children if child.children[a].is_solved]
-        assert len(child_solved_actions) == 1, f"prune_redundant_node: Expected 1 solved action in child, got {len(child_solved_actions)}"
-        child_solved_action = child_solved_actions[0]
+        assert child_solved_actions, f"prune_redundant_node: No solved actions in child"
+        # TODO: instead of selecting the shortest, execute all of them and filter out the failed ones
+        min_len = min(len(str(a)) for a in child_solved_actions)
+        shortest_actions = [a for a in child_solved_actions if len(str(a)) == min_len]
+        child_solved_action = shortest_actions[0]
         if child.to_play == Player.OR:
-            assert len(to_remove.state) == 1, f"prune_redundant_node: Expected 1 branch at OR node, got {len(to_remove.state)}"
+            assert len(to_consider.state) == 1, f"prune_redundant_node: Expected 1 branch at OR node, got {len(to_consider.state)}"
             try:
                 # Skip the action, execute the subtree without it.
-                node_to_state = execute_tree(child, to_remove.state[0])
+                # TODO: set allow_premature_end=True and then potentially remove unnecessary nodes
+                node_to_state = execute_tree(child, to_consider.state[0], allow_premature_end=False)
             except AssertionError as e:
                 # The tree is not valid anymore.
+                print(f"!!! {e}")
                 continue
             # Found a redundant edge - remove it, update the subtree, and return.
             for n, new_state in node_to_state:
                 n.state = new_state
-            to_remove.children.pop(action)
-            to_remove[child_solved_action] = child.children[child_solved_action]
+            del to_consider.children[action]
+            to_consider.children[child_solved_action] = child.children[child_solved_action]
+            return True
         elif child.to_play == Player.AND:
             pass  # TODO
         else:
             raise AssertionError(f"prune_redundant_node: Unknown node type: {child.to_play}")
-    return None
+    return False
 
 def extract_transitions(node: Node) -> list[tuple[str, str, float]]:
     """
