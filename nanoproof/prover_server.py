@@ -352,6 +352,7 @@ def main():
     print(f"  Lean server: {lean_host}:{lean_port}")
     print(f"  My address: {my_address}")
     print(f"  Actors: {args.num_actors}")
+    print(f"  MCTS simulations: {args.num_simulations}")
     
     # Disable Flask's default request logging
     werkzeug_log = logging.getLogger('werkzeug')

@@ -108,6 +108,8 @@ collect_transitions = 100  # how many proof transitions to collect in one collec
 # parallel experience collection (local mode only)
 num_actors = 32  # number of parallel actor threads for experience collection and evaluation
 num_sampled_tactics = 6  # number of tactics to sample per state in MCTS
+num_simulations_collect = 50  # number of MCTS simulations for experience collection
+num_simulations_eval = 50  # number of MCTS simulations for evaluation
 batch_timeout = 0.2  # timeout in seconds for batching LLM calls
 max_batch_tokens = 8000  # (maybe) max total tokens per inference batch (A100 40GB)
 # optimization
@@ -149,6 +151,13 @@ if distributed:
     lean_servers = infra_config.get_lean_server_list()
     # Lean server for local actors not used in distributed mode
     local_lean_server = parse_lean_server("localhost:8000")
+    # Warn if num_simulations is changed from default - must be set in prover_server.py
+    if num_simulations_collect != 50:
+        print(f"WARNING: num_simulations_collect={num_simulations_collect} is ignored in distributed mode. "
+              f"Set --num-simulations in prover_server.py instead.")
+    if num_simulations_eval != 50:
+        print(f"WARNING: num_simulations_eval={num_simulations_eval} is ignored in distributed mode. "
+              f"Set --num-simulations in prover_server.py instead.")
 else:
     # Local mode: parse lean_server and use it for both actors and monitoring
     local_lean_server = parse_lean_server(lean_server)
@@ -228,6 +237,7 @@ rank_seed = seed + ddp_rank
 config = Config(
     num_actors=num_actors,
     num_sampled_tactics=num_sampled_tactics,
+    num_simulations=num_simulations_collect,
     server_address=local_lean_server.address,
     server_port=local_lean_server.port,
 )
@@ -455,7 +465,7 @@ while True:
             log(f"Evaluating on {len(minif2f_theorems)} theorems from MiniF2F", component="Eval")
             minif2f_results = eval_success_rate(
                 inner_tactic_model, minif2f_theorems, progress=MonitorProgress("MiniF2F"),
-                num_actors=num_actors
+                num_actors=num_actors, num_simulations=num_simulations_eval
             )
             rl_monitor.record_eval(step, "MiniF2F", minif2f_results['success_rate'],
                                    minif2f_results['solved'], minif2f_results['total'], minif2f_results['errors'])
@@ -463,7 +473,7 @@ while True:
             log(f"Evaluating on {len(leanworkbook_theorems)} theorems from LeanWorkBook", component="Eval")
             leanworkbook_results = eval_success_rate(
                 inner_tactic_model, leanworkbook_theorems, progress=MonitorProgress("LeanWorkBook"),
-                num_actors=num_actors
+                num_actors=num_actors, num_simulations=num_simulations_eval
             )
             rl_monitor.record_eval(step, "LeanWorkBook", leanworkbook_results['success_rate'],
                                    leanworkbook_results['solved'], leanworkbook_results['total'],

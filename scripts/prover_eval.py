@@ -203,6 +203,7 @@ def eval_success_rate(
     use_tqdm=False,
     progress: Optional[EvalProgressCallback] = None,
     num_actors: int = 1,
+    num_simulations: int = 50,
 ):
     """
     Evaluates the success rate of the model on the given theorems.
@@ -216,6 +217,7 @@ def eval_success_rate(
         num_actors: Number of parallel actors for evaluation. If >1, uses parallel evaluation.
                     When num_actors > 1 and tactic_model is a TacticModel, it will be wrapped
                     in a BlockingTacticModel automatically.
+        num_simulations: Number of MCTS simulations per theorem
     """
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     theorems_subset = theorems[ddp_rank::ddp_world_size]
@@ -224,9 +226,9 @@ def eval_success_rate(
         progress.on_start("", len(theorems))
     
     if num_actors > 1:
-        return _eval_parallel(tactic_model, theorems_subset, progress, num_actors)
+        return _eval_parallel(tactic_model, theorems_subset, progress, num_actors, num_simulations)
     else:
-        return _eval_sequential(tactic_model, theorems_subset, use_tqdm, progress)
+        return _eval_sequential(tactic_model, theorems_subset, use_tqdm, progress, num_simulations)
 
 
 def _eval_sequential(
@@ -234,10 +236,11 @@ def _eval_sequential(
     theorems_subset: list[str],
     use_tqdm: bool,
     progress: Optional[EvalProgressCallback],
+    num_simulations: int = 50,
 ) -> dict:
     """Sequential (single-threaded) evaluation."""
     ddp, ddp_rank, _, _ = get_dist_info()
-    config = Config()
+    config = Config(num_simulations=num_simulations)
     device = tactic_model.network.get_device()
     
     counters = EvalCounters()
@@ -279,10 +282,11 @@ def _eval_parallel(
     theorems_subset: list[str],
     progress: Optional[EvalProgressCallback],
     num_actors: int,
+    num_simulations: int = 50,
 ) -> dict:
     """Parallel evaluation using multiple threads with work-stealing."""
     ddp, ddp_rank, _, _ = get_dist_info()
-    config = Config()
+    config = Config(num_simulations=num_simulations)
     
     # Wrap in BlockingTacticModel if necessary
     if isinstance(tactic_model, TacticModel):
@@ -420,6 +424,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--max-theorems", type=int, default=None, help="Max theorems to evaluate")
     parser.add_argument("--num-actors", type=int, default=4, help="Number of parallel actors (1 for sequential)")
+    parser.add_argument("--num-simulations", type=int, default=50, help="Number of MCTS simulations per theorem")
     args = parser.parse_args()
 
     device_type = autodetect_device_type()
@@ -441,15 +446,17 @@ def main():
         print0(f"Error rate: {results['error_rate']:.4%}")
         print0("-" * 80)
 
-    print0(f"Using {args.num_actors} parallel actor(s)")
+    print0(f"Using {args.num_actors} parallel actor(s), {args.num_simulations} MCTS simulations per theorem")
     
     # leanworkbook_results = eval_success_rate(
-    #     tactic_model, leanworkbook_theorems, use_tqdm=True, num_actors=args.num_actors
+    #     tactic_model, leanworkbook_theorems, use_tqdm=True, num_actors=args.num_actors,
+    #     num_simulations=args.num_simulations
     # )
     # print_results(leanworkbook_results, "LeanWorkBook")
 
     minif2f_results = eval_success_rate(
-        tactic_model, minif2f_theorems, use_tqdm=True, num_actors=args.num_actors
+        tactic_model, minif2f_theorems, use_tqdm=True, num_actors=args.num_actors,
+        num_simulations=args.num_simulations
     )
     print_results(minif2f_results, "MiniF2F")
 

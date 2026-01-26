@@ -294,7 +294,6 @@ class ProverWorker:
 
                 verify_node(game.root)
 
-
             return game
 
 # TODO: this should utilize more closely the code used when distributed=True
