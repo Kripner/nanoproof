@@ -30,6 +30,8 @@ def list_theorems(split):
             theorem_lines.append(line)
             theorems.append("\n".join(theorem_lines))
             theorem_lines = []
+        elif in_theorem:
+            theorem_lines.append(line)
     assert all(t.count("sorry") == 1 for t in theorems), "Found a theorem with no or multiple `sorry`."
     expected_count = 256 if split == "Valid" else 244
     assert len(theorems) == expected_count, f"minif2f: expected {expected_count} theorems, got {len(theorems)}"

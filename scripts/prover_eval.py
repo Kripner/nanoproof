@@ -73,6 +73,7 @@ class EvalCounters:
 
 
 # TODO: use ProverWorker._play_game
+# TODO: debug: it seems that sometimes, errors on proof_from_sorry are not reported or printed
 def evaluate_theorem(
     theorem: str,
     env,
@@ -87,11 +88,12 @@ def evaluate_theorem(
     """
     init_branch = env.proof_from_sorry(theorem)
     if not init_branch.is_success():
+        print(f"Error starting theorem: {theorem[:500]}{'...' if len(theorem) > 500 else ''}: {init_branch.error}")
         # Error case - return max iterations since we couldn't even start
         return TheoremResult(
             theorem=theorem,
             is_solved=False,
-            error=init_branch.error,
+            error=init_branch.error or "Could not start proof due to unknown error",
             proof_tree=None,
             num_iterations=config.num_simulations,
         )
@@ -259,7 +261,7 @@ def _eval_sequential(
             
             if result.error is not None:
                 counters.errors += 1
-                print0(f"Error on theorem: {theorem[:500]}{"..." if len(theorem) > 500 else ""}: {result.error}")
+                log(f"Error on theorem: {theorem[:500]}{"..." if len(theorem) > 500 else ""}: {result.error}")
             elif result.is_solved:
                 counters.solved += 1
             counters.processed += 1
