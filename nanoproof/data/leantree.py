@@ -43,7 +43,14 @@ def iter_data(split, eval_fraction=0.1, augmentations=None):
                     if augmentations:
                         for aug in augmentations:
                             node = aug.run(node)
-                    yield str(node.state), str(node.tactic.tactic), node.proof_depth
+                    tactic = str(node.tactic.tactic)
+                    if "sorry" in tactic or "admit" in tactic:
+                        # shouldn't happen, but just in case
+                        continue
+                    if tactic.strip() == "bound":
+                        # `bound` tactic messes with the kernel check
+                        continue
+                    yield str(node.state), tactic, node.proof_depth
 
 
 def download_dataset():

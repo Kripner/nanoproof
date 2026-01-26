@@ -32,8 +32,6 @@ from scripts.prover_eval import eval_success_rate
 from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
 from nanoproof.data.leantree_dataloader import sft_data_generator
 
-# TODO (!): wire up proof simplification
-
 # TODO: in each episode, save a sample of training data (right before it goes into the model)
 
 # TODO: matchmaker
@@ -70,6 +68,7 @@ def save_eval_results(output_dir: str, step: int, dataset_name: str, results: di
                 entry = {
                     "theorem": item.theorem,
                     "proof": item.proof_tree,
+                    "unsimplified_proof": item.unsimplified_proof_tree,
                     "num_iterations": item.num_iterations,
                 }
             else:
@@ -77,6 +76,7 @@ def save_eval_results(output_dir: str, step: int, dataset_name: str, results: di
                 entry = {
                     "theorem": item["theorem"],
                     "proof": item["proof_tree"],
+                    "unsimplified_proof": item.get("unsimplified_proof_tree"),
                     "num_iterations": item["num_iterations"],
                 }
             f.write(json.dumps(entry) + "\n")
@@ -237,11 +237,7 @@ theorems_sampler = TheoremsSampler(seed=rank_seed)
 # Create the RL monitor (only show on master process)
 rl_monitor = create_monitor(num_actors=num_actors, enabled=master_process)
 rl_monitor.set_output_dir(output_dir)
-rl_monitor.set_lean_server(config.server_address, config.server_port)
-
-# In distributed mode, set up monitoring for multiple lean servers
-if distributed and lean_servers:
-    rl_monitor.set_lean_servers(lean_servers)
+rl_monitor.set_lean_servers(lean_servers)
 
 shuffle_goals_and_hypotheses = leantree.augmentations.ShuffleGoalsAndHypotheses(seed=seed)
 random_rename = leantree.augmentations.RandomRename(seed=seed)

@@ -125,6 +125,7 @@ def create_remote_prover_worker(
             "id": theorem_id,
             "theorem": theorem,
             "proof_tree": game.root.serialize() if is_solved else None,
+            "unsimplified_proof_tree": game.unsimplified_root.serialize() if is_solved and game.unsimplified_root else None,
             "error": error,
             "num_iterations": num_iterations,
         }

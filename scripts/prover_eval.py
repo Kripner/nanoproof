@@ -14,7 +14,7 @@ from leantree.repl_adapter.server import LeanClient
 from nanoproof.common import compute_init, compute_cleanup, print0, autodetect_device_type, get_dist_info
 from nanoproof.data import minif2f
 from nanoproof.data import leanworkbook
-from nanoproof.search import run_mcts, Config, Game, Node, Player
+from nanoproof.search import run_mcts, Config, Game, Node, Player, prune_redundant_nodes, verify_node, compute_value_target
 from nanoproof.inference import TacticModel, BlockingTacticModel
 from nanoproof.cli import log
 
@@ -25,7 +25,8 @@ class TheoremResult:
     theorem: str
     is_solved: bool
     error: Optional[str]
-    proof_tree: Optional[dict]  # Serialized Node tree, None if not solved
+    proof_tree: Optional[dict]  # Serialized (simplified) Node tree, None if not solved
+    unsimplified_proof_tree: Optional[dict]  # Serialized (unsimplified) Node tree, None if not solved
     num_iterations: int  # Number of MCTS iterations run
 
 
@@ -71,6 +72,7 @@ class EvalCounters:
         }
 
 
+# TODO: use ProverWorker._play_game
 def evaluate_theorem(
     theorem: str,
     env,
@@ -107,13 +109,37 @@ def evaluate_theorem(
     run_mcts(config, game, model)
     
     is_solved = game.root.is_solved
-    proof_tree = game.root.serialize() if is_solved else None
+    proof_tree = None
+    unsimplified_proof_tree = None
+    
+    if is_solved:
+        try:
+            verify_node(game.root)
+        except AssertionError as e:
+            # Verification failed - mark as unsolved
+            return TheoremResult(
+                theorem=theorem,
+                is_solved=False,
+                error=f"Verification failed: {e}",
+                proof_tree=None,
+                unsimplified_proof_tree=None,
+                num_iterations=game.num_iterations,
+            )
+        
+        unsimplified_proof_tree = game.unsimplified_root.serialize()
+        
+        prune_redundant_nodes(game.root)
+        compute_value_target(game.root)
+
+        verify_node(game.root)
+        proof_tree = game.root.serialize()
     
     return TheoremResult(
         theorem=theorem,
         is_solved=is_solved,
         error=None,
         proof_tree=proof_tree,
+        unsimplified_proof_tree=unsimplified_proof_tree,
         num_iterations=game.num_iterations,
     )
 

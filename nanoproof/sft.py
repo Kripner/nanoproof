@@ -27,9 +27,6 @@ from nanoproof.data.leantree import iter_data
 from nanoproof.data.leantree_dataloader import sft_data_generator
 from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
 
-# TODO: if training policy+critic at once does not work, try training just policy first, then critic+policy
-#  .. or maybe there's some other problem since First Token Accuracy is quite high? - but that's kind of easy since most tactics are rw
-#  .. or maybe the eval script is wrong? - try it with and without value samples in the dataloader
 
 # -----------------------------------------------------------------------------
 # SFT Hyperparameters
@@ -59,7 +56,7 @@ eval_steps = 200
 sample_every = 100
 eval_metrics_max_problems = 1024
 # loss weighting
-value_weight = 1.0  # weight for value (critic) samples relative to policy samples
+value_weight = 0.01  # weight for value (critic) samples relative to policy samples
 # now allow CLI to override the settings via the configurator lol
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open(os.path.join('nanoproof', 'configurator.py')).read()) # overrides from command line or config file

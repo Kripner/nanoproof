@@ -17,7 +17,7 @@ import torch.distributed as dist
 from leantree.repl_adapter.server import LeanClient
 
 from nanoproof.common import get_dist_info
-from nanoproof.search import Node, Player, Config, Game, run_mcts, extract_transitions, compute_value_target, verify_node
+from nanoproof.search import Node, Player, Config, Game, run_mcts, extract_transitions, compute_value_target, verify_node, prune_redundant_nodes
 from nanoproof.inference import BlockingTacticModel, TacticModel
 from nanoproof.cli import get_monitor, log
 from nanoproof.data.leanworkbook import list_theorems
@@ -281,14 +281,19 @@ class ProverWorker:
                 expansion_callback=on_expansion,
             )
             if game.root.is_solved:
-                compute_value_target(game.root)
-
                 try:
                     verify_node(game.root)
                 except AssertionError as e:
                     message = f"Verification failed: '{e}'\nTheorem: '{theorem}'\nProof tree:\n{game.root.pp_tree()}"
                     log(message, component="Collection")
                     game.root.is_solved = False
+                    return game
+                game.unsimplified_root = game.root.clone()
+                prune_redundant_nodes(game.root)
+                compute_value_target(game.root)
+
+                verify_node(game.root)
+
 
             return game
 

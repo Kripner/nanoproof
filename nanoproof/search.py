@@ -276,6 +276,7 @@ def compute_value_target(node: Node) -> float:
     else:
         raise ValueError(f"Unknown to_play: {node.to_play}")
 
+# TODO: deduplicate with execute_tree (just execute & check that all states equal to the expected values)
 def verify_node(node: Node):
     assert node.to_play == Player.OR, f"verify_node: Expected OR root, got {node.to_play}"
     assert len(node.state) == 1, f"verify_node: Expected 1 branch at root, got {len(node.state)}"
@@ -404,13 +405,14 @@ def prune_redundant_node(root: Node) -> bool:
                 node_to_state = execute_tree(child, to_consider.state[0], allow_premature_end=False)
             except AssertionError as e:
                 # The tree is not valid anymore.
-                print(f"!!! {e}")
                 continue
             # Found a redundant edge - remove it, update the subtree, and return.
             for n, new_state in node_to_state:
                 n.state = new_state
             del to_consider.children[action]
-            to_consider.children[child_solved_action] = child.children[child_solved_action]
+            grandchild = child.children[child_solved_action]
+            grandchild.parent = to_consider
+            to_consider.children[child_solved_action] = grandchild
             return True
         elif child.to_play == Player.AND:
             pass  # TODO
@@ -471,9 +473,10 @@ class Game:
         self.theorem = theorem
         # Number of simulations to run.
         self.num_simulations = num_simulations
-        self.root: Node = None
         # Number of iterations actually run (set by run_mcts)
         self.num_iterations: int = 0
+        self.root: Node = None
+        self.unsimplified_root: Node = None
 
 
 class MCTSAbortedError(Exception):
@@ -633,7 +636,7 @@ def expand_node(
         if not new_branches.is_success():
             # Invalid action encountered.
             log_tactic(state_str, action, status="error")
-            print(f"TACTIC ERROR (action='{action}'): '{new_branches.error}'")
+            #print(f"TACTIC ERROR (action='{action}'): '{new_branches.error}'")
             continue
         if is_cycling(node, new_branches.value):
             # Cycle detected.
