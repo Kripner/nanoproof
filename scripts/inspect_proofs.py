@@ -148,8 +148,20 @@ def cmd_view(args):
         print(f"  {item.get('theorem', '(no theorem)')}")
         print()
         
-        # Print transitions and proof tree
+        # Print linearized proof
         proof = item.get("proof")
+        print(f"Linearized proof:")
+        if proof is None:
+            print("  (not proven)")
+        else:
+            node = Node.deserialize(proof)
+            tactics = linearize_proof(node)
+            formatted_linearized = format_linearized_proof(tactics)
+            for line in formatted_linearized.split("\n"):
+                print(f"  {line}")
+        print()
+        
+        # Print transitions and proof tree
         
         print(f"Transitions:")
         if proof is None:

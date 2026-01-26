@@ -113,21 +113,9 @@ def evaluate_theorem(
     unsimplified_proof_tree = None
     
     if is_solved:
-        try:
-            verify_node(game.root)
-        except AssertionError as e:
-            # Verification failed - mark as unsolved
-            return TheoremResult(
-                theorem=theorem,
-                is_solved=False,
-                error=f"Verification failed: {e}",
-                proof_tree=None,
-                unsimplified_proof_tree=None,
-                num_iterations=game.num_iterations,
-            )
+        verify_node(game.root)
         
         unsimplified_proof_tree = game.unsimplified_root.serialize()
-        
         prune_redundant_nodes(game.root)
         compute_value_target(game.root)
 

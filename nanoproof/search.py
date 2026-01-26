@@ -518,9 +518,11 @@ def run_mcts(config: Config, game: Game, model: "TacticModel | BlockingTacticMod
             _, node = select_child(config, node)
             search_path.append(node)
 
-        assert node.state is not None
+        assert node.state is not None, f"run_mcts: node.state is None, node.id={node.id}"
         result = model.sample_tactic(node.state)
         if not result.is_success():
+            if "State too long for model's rotary cache" in str(result.error):
+                continue
             raise RuntimeError(f"Tactic/value prediction failed: {result.error}")
         tactics, value = result.value
         tactic_logprobs = [1.0] * len(tactics)  # TODO (!): use the actual action logprobs

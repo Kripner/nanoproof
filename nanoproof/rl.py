@@ -120,7 +120,7 @@ init_lr_frac = 0.02
 augment_data = True
 value_weight = 0.1  # weight for value (critic) samples relative to policy samples
 # evaluation and logging there of
-eval_every = 100
+eval_every = 100 
 eval_start = 0  # step to start evaluation at (skip evaluation before this step)
 save_every = 500
 # resuming from a previous run - Note: don't forget to also set eval_start and seed!
