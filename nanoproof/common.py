@@ -509,24 +509,40 @@ def construct_proof_source(theorem: str, tactics: list[str]) -> str:
 def theorem_to_example(source: str) -> str:
     """Convert a Lean theorem statement to an example statement.
     
-    Replaces 'theorem <name>' with 'example', preserving everything else.
+    Finds the first line starting with 'theorem' and replaces 'theorem <name>' 
+    with 'example', preserving everything else (including lines before and after).
     
     Args:
-        source: A Lean theorem statement, e.g.:
-            "theorem foo (a b : ℂ) : a + b = b + a := by"
+        source: A Lean source containing a theorem statement, e.g.:
+            "import Mathlib\ntheorem foo (a b : ℂ) : a + b = b + a := by"
             
     Returns:
-        The same statement with 'theorem <name>' replaced by 'example', e.g.:
-            "example (a b : ℂ) : a + b = b + a := by"
+        The same source with 'theorem <name>' replaced by 'example', e.g.:
+            "import Mathlib\nexample (a b : ℂ) : a + b = b + a := by"
+            
+    Raises:
+        ValueError: If no line starts with 'theorem'
     """
-    source = source.strip()
-    
-    # Assert the source starts with "theorem "
+    lines = source.split('\n')
     theorem_prefix = "theorem "
-    assert source.startswith(theorem_prefix), f"Source must start with 'theorem ': {source[:50]!r}"
+    
+    # Find the first line that starts with "theorem "
+    theorem_line_idx = None
+    for i, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith(theorem_prefix):
+            theorem_line_idx = i
+            break
+    
+    if theorem_line_idx is None:
+        raise ValueError(f"No line starts with 'theorem ': {source[:100]!r}")
+    
+    theorem_line = lines[theorem_line_idx]
+    leading_whitespace = theorem_line[:len(theorem_line) - len(theorem_line.lstrip())]
+    stripped_line = theorem_line.lstrip()
     
     # Find the end of the theorem name (first whitespace after "theorem ")
-    rest_after_theorem = source[len(theorem_prefix):]
+    rest_after_theorem = stripped_line[len(theorem_prefix):]
     
     # The theorem name is the first token - find where it ends
     name_end = None
@@ -535,10 +551,17 @@ def theorem_to_example(source: str) -> str:
             name_end = i
             break
     
-    assert name_end is not None, f"Could not find end of theorem name in: {source[:80]!r}"
-    assert name_end > 0, f"Theorem name is empty in: {source[:80]!r}"
+    # If no delimiter found, the theorem name extends to end of line
+    if name_end is None:
+        name_end = len(rest_after_theorem)
+    if name_end == 0:
+        raise ValueError(f"Theorem name is empty in: {stripped_line[:80]!r}")
     
     # Extract the part after the theorem name
     after_name = rest_after_theorem[name_end:]
     
-    return "example" + after_name
+    # Reconstruct the line with "example" instead of "theorem <name>"
+    new_line = leading_whitespace + "example" + after_name
+    lines[theorem_line_idx] = new_line
+    
+    return '\n'.join(lines)

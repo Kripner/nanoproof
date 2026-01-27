@@ -55,7 +55,7 @@ def _process_statement(statement: str) -> str | None:
     
     # Remove initial lines that start with "import " or "set_option "
     lines = statement.split('\n')
-    while lines and (lines[0].startswith("import ") or lines[0].startswith("set_option ")):
+    while lines and (lines[0].startswith("import ") or lines[0].startswith("set_option ") or lines[0].startswith("#check ")):
         lines.pop(0)
     statement = '\n'.join(lines)
     

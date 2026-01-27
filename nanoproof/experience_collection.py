@@ -20,25 +20,43 @@ from nanoproof.common import get_dist_info, linearize_proof, construct_proof_sou
 from nanoproof.search import Node, Config, Game, run_mcts, extract_transitions, compute_value_target, verify_node, prune_redundant_nodes
 from nanoproof.inference import BlockingTacticModel, TacticModel
 from nanoproof.cli import get_monitor, log
-from nanoproof.data.leanworkbook import list_theorems
+from nanoproof.data import leanworkbook
+from nanoproof.data import deepseek_prover
+from nanoproof.data import numinamath
 from nanoproof.data.leantree_dataloader import STATE_MAX_LEN, TACTIC_MAX_LEN
 
 
 class TheoremsSampler:
-    """Samples theorems for local experience collection.
+    """Samples theorems for local experience collection from multiple datasets.
+    
+    Samples uniformly at random from one of the available datasets, then
+    uniformly at random from that dataset.
     
     Thread-safe: the sampler may be called from multiple Flask request threads
     in distributed mode when provers concurrently request theorems.
     """
     
     def __init__(self, seed: int | None = 0):
-        self.theorems = list_theorems(split="train")
+        # Load theorems from all datasets
+        self.datasets = {
+            "leanworkbook": leanworkbook.list_theorems(split="train"),
+            "deepseek_prover": deepseek_prover.list_theorems(split="train"),
+            "numinamath": numinamath.list_theorems(split="train"),
+        }
+        self.dataset_names = list(self.datasets.keys())
         self.rng = random.Random(seed)
         self._lock = threading.Lock()
+        
+        # Log dataset sizes
+        for name, theorems in self.datasets.items():
+            log(f"Loaded {len(theorems)} theorems from {name}", component="Sampler")
     
     def sample_theorem(self) -> str:
         with self._lock:
-            return self.rng.choice(self.theorems)
+            # First, pick a dataset uniformly at random
+            dataset_name = self.rng.choice(self.dataset_names)
+            # Then, sample a theorem uniformly from that dataset
+            return self.rng.choice(self.datasets[dataset_name])
 
 
 class ReplayBuffer:
@@ -196,8 +214,6 @@ class ProverWorker:
         
         consecutive_errors = 0
         max_consecutive_errors = 5
-        max_retries_per_theorem = 3
-        retry_delay = 2.0
         
         while not self._stop_flag.is_set():
             # Check if paused
@@ -216,52 +232,37 @@ class ProverWorker:
             theorem_id, theorem = theorem_data
             self._set_thread_state(actor_id, "running")
             
-            # Try to prove it with retries for transient errors
+            # Try to prove it (with one retry for transient connection errors)
             game = None
             error = None
-            for attempt in range(max_retries_per_theorem):
+            skip_report = False
+            for attempt in range(2):  # At most 2 attempts
                 try:
                     game = self._play_game(client, theorem)
                     consecutive_errors = 0
-                    error = None
-                    break  # Success
+                    break  # Success (game may be None if Lean couldn't init proof)
                 except ConnectionResetError:
-                    error = "Connection reset"
-                    if attempt < max_retries_per_theorem - 1:
+                    if attempt == 0:
+                        # First attempt failed, wait briefly and retry once
                         self._set_thread_state(actor_id, "retry")
-                        log(f"[Actor {actor_id}] Connection reset, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries_per_theorem})", component="Collection")
-                        time.sleep(retry_delay)
-                        # Reconnect to Lean server
-                        try:
-                            client = LeanClient(self.lean_address, self.lean_port)
-                        except Exception as e:
-                            log(f"[Actor {actor_id}] Failed to reconnect: {e}", component="Collection")
+                        time.sleep(1.0)
                     else:
+                        error = "Connection reset"
                         consecutive_errors += 1
                 except Exception as e:
-                    # The inference model returns this when paused
                     if "Model paused for training" in str(e):
                         self._set_thread_state(actor_id, "idle")
-                        error = None
-                        game = None
-                        break
+                        skip_report = True
+                        break  # Don't report, theorem not consumed
                     error = str(e)
-                    if attempt < max_retries_per_theorem - 1:
-                        self._set_thread_state(actor_id, "retry")
-                        log(f"[Actor {actor_id}] Error: {e}, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries_per_theorem})", component="Collection")
-                        time.sleep(retry_delay)
-                        try:
-                            client = LeanClient(self.lean_address, self.lean_port)
-                        except Exception as reconnect_e:
-                            log(f"[Actor {actor_id}] Failed to reconnect: {reconnect_e}", component="Collection")
-                    else:
-                        consecutive_errors += 1
-                        log(f"[Actor {actor_id}] Error after {max_retries_per_theorem} attempts (lean={self.lean_address}:{self.lean_port}): {e}", component="Collection")
-                        traceback.print_exc()
+                    consecutive_errors += 1
+                    log(f"[Actor {actor_id}] Error (lean={self.lean_address}:{self.lean_port}): {e}", component="Collection")
+                    traceback.print_exc()
+                    break  # Don't retry other exceptions
             
-            # Report result (skip if we were paused mid-attempt)
-            if error is not None or game is not None:
-                if error is None and game is not None and game.root is not None:
+            # Always report result (unless model was paused mid-attempt)
+            if not skip_report:
+                if game is not None and game.root is not None:
                     with self._stats_lock:
                         self.games_played += 1
                         if game.root.is_solved:
