@@ -11,10 +11,10 @@ import torch.distributed as dist
 from tqdm import tqdm
 from leantree.repl_adapter.server import LeanClient
 
-from nanoproof.common import compute_init, compute_cleanup, print0, autodetect_device_type, get_dist_info
+from nanoproof.common import compute_init, compute_cleanup, print0, autodetect_device_type, get_dist_info, theorem_to_example, linearize_proof, construct_proof_source, Player
 from nanoproof.data import minif2f
 from nanoproof.data import leanworkbook
-from nanoproof.search import run_mcts, Config, Game, Node, Player, prune_redundant_nodes, verify_node, compute_value_target
+from nanoproof.search import run_mcts, Config, Game, Node, prune_redundant_nodes, verify_node, compute_value_target
 from nanoproof.inference import TacticModel, BlockingTacticModel
 from nanoproof.cli import log
 
@@ -86,7 +86,7 @@ def evaluate_theorem(
     Returns:
         TheoremResult with is_solved, error, proof_tree (serialized), and num_iterations.
     """
-    init_branch = env.proof_from_sorry(theorem)
+    init_branch = env.proof_from_sorry(theorem_to_example(theorem))
     if not init_branch.is_success():
         print(f"Error starting theorem: {theorem[:500]}{'...' if len(theorem) > 500 else ''}: {init_branch.error}")
         # Error case - return max iterations since we couldn't even start
@@ -122,7 +122,15 @@ def evaluate_theorem(
         compute_value_target(game.root)
 
         verify_node(game.root)
-        proof_tree = game.root.serialize()
+
+        # Verify the linearized proof compiles correctly
+        tactics = linearize_proof(game.root)
+        proof_source = construct_proof_source(theorem, tactics)
+        if not env.is_valid_source(proof_source):
+            log(f"!! Linearized proof source verification failed:\n\"\"\"\n{proof_source}\n\"\"\"\n", component=f"ProverEval")
+            is_solved = False
+        else:
+            proof_tree = game.root.serialize()
     
     return TheoremResult(
         theorem=theorem,

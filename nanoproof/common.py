@@ -3,6 +3,7 @@ Common utilities for nanochat.
 """
 
 import os
+import enum
 import time
 import re
 import logging
@@ -434,3 +435,110 @@ def active_barrier_wait(key: str, poll_interval: float = 1.0) -> None:
         if store.check([key]):
             break
         time.sleep(poll_interval)
+
+class Player(enum.Enum):
+    OR = 1
+    AND = 2
+
+def linearize_proof(node: "Node") -> list[str]:
+    """Linearize a solved proof tree into a sequence of tactics using DFS.
+    
+    Traverses the AND/OR tree and collects all tactics from the solved path.
+    Returns a list of tactic strings in order of application.
+    """
+    assert node.is_solved
+    tactics = []
+
+    def dfs(n: "Node"):
+        assert n.is_solved
+
+        if n.to_play == Player.OR:
+            if n.is_terminal:
+                return
+            assert len(n.state) == 1, f"linearize_proof: Expected 1 branch at OR node, got {len(n.state)}"
+            assert n.children, f"linearize_proof: No children at OR node"
+            solved_actions = [a for a in n.children if n.children[a].is_solved]
+            assert solved_actions, f"linearize_proof: No solved actions at OR node"
+            action = min(solved_actions, key=lambda a: len(a))
+
+            tactics.append(action)
+            dfs(n.children[action])
+        elif n.to_play == Player.AND:
+            assert not n.is_terminal, f"linearize_proof: AND node is terminal: {n}"
+            for action, child in n.children.items():
+                dfs(child)
+        else:
+            raise ValueError(f"Unknown to_play: {n.to_play}")
+    
+    dfs(node)
+    return tactics
+
+
+def format_linearized_proof(tactics: list[str]) -> str:
+    """Format a linearized proof as a list of tactics, one per line."""
+    if not tactics:
+        return "(no tactics)"
+    
+    lines = []
+    for tactic in tactics:
+        lines.append(f"{tactic}")
+    return "\n".join(lines)
+
+
+def construct_proof_source(theorem: str, tactics: list[str]) -> str:
+    """Construct the full Lean source by replacing 'sorry' in the theorem with the proof tactics.
+    
+    Args:
+        theorem: The theorem statement ending with 'sorry'
+        tactics: List of tactics from linearize_proof
+        
+    Returns:
+        The complete Lean source with the proof filled in
+    """
+    assert len(tactics) > 0, f"construct_proof_source: No tactics provided"
+    assert theorem.strip().endswith("sorry"), f"construct_proof_source: Theorem should end with 'sorry': {theorem}"
+    
+    # Remove "sorry" from the end
+    theorem_body = theorem.rstrip()[:-len("sorry")].rstrip()
+    
+    # Multi-line proof with indentation
+    proof_lines = "\n".join(f"  {tactic.strip()}" for tactic in tactics)
+    return theorem_body + "\n" + proof_lines
+
+
+def theorem_to_example(source: str) -> str:
+    """Convert a Lean theorem statement to an example statement.
+    
+    Replaces 'theorem <name>' with 'example', preserving everything else.
+    
+    Args:
+        source: A Lean theorem statement, e.g.:
+            "theorem foo (a b : ℂ) : a + b = b + a := by"
+            
+    Returns:
+        The same statement with 'theorem <name>' replaced by 'example', e.g.:
+            "example (a b : ℂ) : a + b = b + a := by"
+    """
+    source = source.strip()
+    
+    # Assert the source starts with "theorem "
+    theorem_prefix = "theorem "
+    assert source.startswith(theorem_prefix), f"Source must start with 'theorem ': {source[:50]!r}"
+    
+    # Find the end of the theorem name (first whitespace after "theorem ")
+    rest_after_theorem = source[len(theorem_prefix):]
+    
+    # The theorem name is the first token - find where it ends
+    name_end = None
+    for i, char in enumerate(rest_after_theorem):
+        if char in (' ', '\t', '\n', '(', ':'):
+            name_end = i
+            break
+    
+    assert name_end is not None, f"Could not find end of theorem name in: {source[:80]!r}"
+    assert name_end > 0, f"Theorem name is empty in: {source[:80]!r}"
+    
+    # Extract the part after the theorem name
+    after_name = rest_after_theorem[name_end:]
+    
+    return "example" + after_name

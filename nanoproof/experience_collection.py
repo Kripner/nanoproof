@@ -16,8 +16,8 @@ import torch
 import torch.distributed as dist
 from leantree.repl_adapter.server import LeanClient
 
-from nanoproof.common import get_dist_info
-from nanoproof.search import Node, Player, Config, Game, run_mcts, extract_transitions, compute_value_target, verify_node, prune_redundant_nodes
+from nanoproof.common import get_dist_info, linearize_proof, construct_proof_source, theorem_to_example, Player
+from nanoproof.search import Node, Config, Game, run_mcts, extract_transitions, compute_value_target, verify_node, prune_redundant_nodes
 from nanoproof.inference import BlockingTacticModel, TacticModel
 from nanoproof.cli import get_monitor, log
 from nanoproof.data.leanworkbook import list_theorems
@@ -257,7 +257,7 @@ class ProverWorker:
                 open scoped Topology
                 open scoped Polynomial
             """)
-            init_branch = env.proof_from_sorry(theorem)
+            init_branch = env.proof_from_sorry(theorem_to_example(theorem))
             if not init_branch.is_success():
                 return None
             init_branch = init_branch.value
@@ -293,6 +293,13 @@ class ProverWorker:
                 compute_value_target(game.root)
 
                 verify_node(game.root)
+
+                # Verify the linearized proof compiles correctly
+                tactics = linearize_proof(game.root)
+                proof_source = construct_proof_source(theorem, tactics)
+                if not env.is_valid_source(proof_source):
+                    log(f"!! Linearized proof source verification failed:\n\"\"\"\n{proof_source}\n\"\"\"\n... proof tree:\n{game.root.pp_tree()}\n", component="Collection")
+                    game.root.is_solved = False
 
             return game
 

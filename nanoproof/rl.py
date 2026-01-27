@@ -40,6 +40,8 @@ from nanoproof.data.leantree_dataloader import sft_data_generator
 
 # TODO: maybe migrate to newer Lean?
 
+# TODO: the eval is now a bit unfair, since when the prover finds an invalid (e.g. self-referential) proof, it's not allowed to continue
+
 
 def save_eval_results(output_dir: str, step: int, dataset_name: str, results: dict):
     """

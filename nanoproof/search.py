@@ -7,7 +7,7 @@ import uuid
 from leantree.repl_adapter.server import LeanProofBranch, LeanClient
 from leantree.repl_adapter.interaction import LeanProcess
 
-from nanoproof.common import pretty_print_tree, ValueOrError
+from nanoproof.common import pretty_print_tree, ValueOrError, theorem_to_example, Player
 from nanoproof.cli import get_monitor, log_tactic
 from nanoproof.inference import TacticModel, BlockingTacticModel
 
@@ -46,11 +46,6 @@ class Config:
     # Lean server
     server_address: str = "10.10.25.35"
     server_port: int = 8000
-
-
-class Player(enum.Enum):
-    OR = 1
-    AND = 2
 
 
 Action = str | int
@@ -359,7 +354,7 @@ def execute_tree(root: Node, init_branch: LeanProofBranch, allow_premature_end: 
     return node_to_state
 
 def revive_tree_states(root: Node, theorem_str: str, lean_process: LeanProcess):
-    init_branch = lean_process.proof_from_sorry(theorem_str)
+    init_branch = lean_process.proof_from_sorry(theorem_to_example(theorem_str))
     assert init_branch.is_success(), f"revive_tree_states: Failed to create initial branch: '{init_branch.error}'"
     init_branch = init_branch.value
     node_to_state = execute_tree(root, init_branch)
@@ -441,15 +436,12 @@ def _extract_transitions_recursive(node: Node, transitions: list):
     
     # Walk down the OR nodes
     while node.to_play == Player.OR and not node.is_terminal:
-        if len(node.state) != 1:
-            break
-        if not node.children:
-            break
+        assert len(node.state) == 1, f"extract_transitions: Expected 1 branch at OR node, got {len(node.state)}"
+        assert node.children, f"extract_transitions: No children at OR node"
         
         # Find solved actions
         solved_actions = [a for a in node.children if node.children[a].is_solved]
-        # if not solved_actions:
-        #     break
+        assert solved_actions, f"extract_transitions: No solved actions at OR node"
         
         # Pick shortest tactic (more than one terminal node can be solved when expanding)
         # Note: if we ever let the search run even after proof is found, we should here select also based on the sub-tree depth.
@@ -806,7 +798,7 @@ def _main():
             open scoped Topology
             open scoped Polynomial
         """)
-        init_branch = env.proof_from_sorry(theorem)
+        init_branch = env.proof_from_sorry(theorem_to_example(theorem))
         assert init_branch.is_success()
         init_branch = init_branch.value
         

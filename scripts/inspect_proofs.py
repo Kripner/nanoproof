@@ -8,6 +8,7 @@ from collections import Counter
 
 from leantree.repl_adapter.server import LeanClient
 
+from nanoproof.common import linearize_proof, format_linearized_proof
 from nanoproof.search import Node, revive_tree_states, prune_redundant_nodes, compute_value_target
 
 MINIF2F_IMPORTS = """
@@ -77,45 +78,6 @@ def format_proof_tree(proof: dict | None) -> str:
     
     node = Node.deserialize(proof)
     return node.pp_tree()
-
-
-# TODO!!!: only use one solving tactic, not all of them
-def linearize_proof(node: Node) -> list[str]:
-    """Linearize a solved proof tree into a sequence of tactics using DFS.
-    
-    Traverses the AND/OR tree and collects all tactics from the solved path.
-    Returns a list of tactic strings in order of application.
-    """
-    tactics = []
-    
-    def dfs(n: Node):
-        if n.children is None:
-            return
-        
-        # Find solved children
-        solved_children = [(action, child) for action, child in n.children.items() if child.is_solved]
-        
-        for action, child in solved_children:
-            # Record the tactic (action is the tactic string)
-            if isinstance(action, str):
-                tactics.append(action)
-            
-            # Continue DFS into the child
-            dfs(child)
-    
-    dfs(node)
-    return tactics
-
-
-def format_linearized_proof(tactics: list[str]) -> str:
-    """Format a linearized proof as a numbered list of tactics."""
-    if not tactics:
-        return "(no tactics)"
-    
-    lines = []
-    for tactic in tactics:
-        lines.append(f"{tactic}")
-    return "\n".join(lines)
 
 
 def cmd_view(args):
