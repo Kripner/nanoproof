@@ -10,6 +10,11 @@ from leantree.repl_adapter.server import LeanClient
 
 from nanoproof.search import Node, revive_tree_states, prune_redundant_nodes, compute_value_target
 
+MINIF2F_IMPORTS = """
+import Mathlib
+import FormalConjectures.ForMathlib.Analysis.SpecialFunctions.NthRoot
+import FormalConjectures.Util.Answer
+"""
 
 # Lean environment setup commands
 LEAN_OPEN_SCOPED_COMMANDS = """
@@ -382,16 +387,92 @@ def cmd_simplify(args):
             print()
 
 
+def cmd_gather_lean(args):
+    """Gather Lean theorems with proofs from evaluation steps."""
+    from pathlib import Path
+    
+    run_dir = Path(args.run_dir)
+    evals_dir = run_dir / "evals"
+    
+    if not evals_dir.exists():
+        print(f"Error: evals directory not found at {evals_dir}")
+        return
+    
+    # Parse step subdirs as ints and sort
+    steps = []
+    for subdir in evals_dir.iterdir():
+        if subdir.is_dir():
+            step = int(subdir.name)
+            steps.append(step)
+    
+    steps.sort()
+    
+    if not steps:
+        print(f"No step directories found in {evals_dir}")
+        return
+    
+    # Create output directory
+    output_base = Path(args.output_dir) / run_dir.name
+    output_base.mkdir(parents=True, exist_ok=True)
+    
+    print(f"Found {len(steps)} evaluation steps: {steps}")
+    print(f"Output directory: {output_base}")
+    print()
+    
+    for step in steps:
+        step_dir = evals_dir / str(step)
+        minif2f_path = step_dir / "minif2f.jsonl"
+        
+        if not minif2f_path.exists():
+            print(f"Warning: {minif2f_path} not found, skipping step {step}")
+            continue
+        
+        proofs = load_proofs(str(minif2f_path))
+        
+        # Collect theorems
+        lean_content = []
+        proven_count = 0
+        
+        for item in proofs:
+            theorem = item.get("theorem", "").strip()
+            proof_dict = item.get("proof")
+            
+            if proof_dict is not None:
+                # Deserialize and linearize the proof
+                node = Node.deserialize(proof_dict)
+                tactics = linearize_proof(node)
+                
+                assert theorem.endswith("sorry"), "theorem should end with 'sorry'"
+                proven_count += 1
+                # Replace "sorry" with the proof
+                theorem_body = theorem[:-len("sorry")]  # Remove "sorry"
+                if len(tactics) == 1:
+                    theorem = theorem_body + tactics[0]
+                else:
+                    # Multi-line proof with indentation
+                    proof_lines = "\n  ".join(tactics)
+                    theorem = theorem_body + proof_lines
+            
+            lean_content.append(theorem)
+        
+        # Write the Lean file
+        output_path = output_base / f"{step}-minif2f.lean"
+        with open(output_path, "w") as f:
+            f.write(MINIF2F_IMPORTS + "\n" + LEAN_OPEN_SCOPED_COMMANDS + "\n\n" + "\n\n".join(lean_content))
+        
+        print(f"Step {step}: {proven_count}/{len(lean_content)} proven -> {output_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Inspect proofs found during evaluation."
     )
-    parser.add_argument("path", help="Path to the evaluation results JSONL file")
     
     subparsers = parser.add_subparsers(dest="command", required=True)
     
     # View subcommand
     view_parser = subparsers.add_parser("view", help="View proofs in detail")
+    view_parser.add_argument("path", help="Path to the evaluation results JSONL file")
     view_parser.add_argument(
         "--count", "-n", type=int, default=5,
         help="Number of proofs to print (default: 5)"
@@ -416,10 +497,12 @@ def main():
     
     # Stats subcommand
     stats_parser = subparsers.add_parser("stats", help="Print statistics")
+    stats_parser.add_argument("path", help="Path to the evaluation results JSONL file")
     stats_parser.set_defaults(func=cmd_stats)
     
     # List subcommand
     list_parser = subparsers.add_parser("list", help="List theorems with status")
+    list_parser.add_argument("path", help="Path to the evaluation results JSONL file")
     list_parser.add_argument(
         "--count", "-n", type=int, default=20,
         help="Number of theorems to list (default: 20)"
@@ -440,6 +523,7 @@ def main():
     
     # Simplify subcommand
     simplify_parser = subparsers.add_parser("simplify", help="Simplify proof trees by pruning redundant nodes")
+    simplify_parser.add_argument("path", help="Path to the evaluation results JSONL file")
     simplify_parser.add_argument(
         "--count", "-n", type=int, default=1,
         help="Number of proofs to simplify (default: 1)"
@@ -461,6 +545,21 @@ def main():
         help="Lean server port (default: 8000)"
     )
     simplify_parser.set_defaults(func=cmd_simplify)
+    
+    # Gather Lean subcommand
+    gather_parser = subparsers.add_parser(
+        "gather_lean",
+        help="Gather Lean theorems with proofs from evaluation steps"
+    )
+    gather_parser.add_argument(
+        "run_dir",
+        help="Path to the run's output directory (containing 'evals' subdir)"
+    )
+    gather_parser.add_argument(
+        "--output-dir", "-o", type=str, default=".",
+        help="Output directory for Lean files (default: current directory)"
+    )
+    gather_parser.set_defaults(func=cmd_gather_lean)
     
     args = parser.parse_args()
     args.func(args)
