@@ -18,6 +18,7 @@ from nanoproof.search import run_mcts, Config, Game, Node, prune_redundant_nodes
 from nanoproof.inference import TacticModel, BlockingTacticModel
 from nanoproof.cli import log
 
+# TODO: during verification, maybe set 'set_option maxHeartbeats 0\nset_option maxRecDepth 100000'
 
 @dataclass
 class TheoremResult:
