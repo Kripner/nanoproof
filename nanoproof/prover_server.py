@@ -161,22 +161,28 @@ def create_remote_prover_worker(
 # Registration
 # -----------------------------------------------------------------------------
 
-def register_with_rl_server(rl_server: str, my_address: str, retry_delay: float = 5.0):
+def register_with_rl_server(rl_server: str, my_address: str, retry_delay: float = 5.0) -> bool:
+    """Register this prover with the RL server. Returns True on success, False on failure."""
+    try:
+        response = requests.post(
+            f"http://{rl_server}/register",
+            json={"address": my_address},
+            timeout=5.0
+        )
+        response.raise_for_status()
+        return True
+    except Exception as e:
+        return False
+
+
+def register_with_rl_server_blocking(rl_server: str, my_address: str, retry_delay: float = 5.0):
     """Register this prover with the RL server. Retries until successful."""
     while True:
-        try:
-            response = requests.post(
-                f"http://{rl_server}/register",
-                json={"address": my_address},
-                timeout=5.0
-            )
-            response.raise_for_status()
+        if register_with_rl_server(rl_server, my_address):
             print(f"[Registration] Registered with RL server at {rl_server}")
             return
-        except Exception as e:
-            print(f"[Registration] Failed to register with RL server: {e}")
-            print(f"[Registration] Retrying in {retry_delay}s...")
-            time.sleep(retry_delay)
+        print(f"[Registration] Failed to register with RL server, retrying in {retry_delay}s...")
+        time.sleep(retry_delay)
 
 
 def unregister_from_rl_server(rl_server: str, my_address: str):
@@ -204,6 +210,39 @@ def get_local_ip() -> str:
         return ip
     except Exception:
         return "127.0.0.1"
+
+
+def start_registration_loop(
+    rl_server: str,
+    my_address: str,
+    shutdown_event: threading.Event,
+    poll_interval: float = 5.0
+) -> threading.Thread:
+    """
+    Start a background thread that periodically re-registers with the RL server.
+    
+    This ensures the prover stays registered even if the RL server restarts.
+    The thread will poll every poll_interval seconds until shutdown_event is set.
+    """
+    def registration_loop():
+        last_success = False
+        while not shutdown_event.is_set():
+            success = register_with_rl_server(rl_server, my_address)
+            if success and not last_success:
+                print(f"[Registration] Registered with RL server at {rl_server}")
+            elif not success and last_success:
+                print(f"[Registration] Lost connection to RL server, will keep trying...")
+            last_success = success
+            
+            # Wait for poll_interval, checking shutdown_event periodically
+            for _ in range(int(poll_interval * 10)):
+                if shutdown_event.is_set():
+                    break
+                time.sleep(0.1)
+    
+    thread = threading.Thread(target=registration_loop, daemon=True)
+    thread.start()
+    return thread
 
 
 # -----------------------------------------------------------------------------
@@ -383,22 +422,19 @@ def main():
     else:
         print("WARNING: Flask server may not be ready")
     
-    # Register with RL server (after Flask is ready)
-    print(f"Registering as {my_address} with RL server at {rl_server}")
-    register_with_rl_server(rl_server, my_address)
+    # Start registration polling loop (polls every 5 seconds to re-register with RL server)
+    # This ensures we stay registered even if the RL server restarts
+    print(f"Starting registration loop as {my_address} with RL server at {rl_server}")
+    registration_thread = start_registration_loop(rl_server, my_address, shutdown_event, poll_interval=5.0)
     
     print("\nCtrl+C to exit\n")
     
-    # Main loop: wait for actors to start, then monitor for exit
+    # Main loop: keep running until shutdown is requested
+    # The prover remains running even after actors finish their current batch,
+    # so it can be restarted when the RL server starts a new collection/eval phase.
     try:
-        while not prover_worker.has_started_actors() and not shutdown_event.is_set():
+        while not shutdown_event.is_set():
             time.sleep(0.5)
-        
-        while not prover_worker.all_actors_exited() and not shutdown_event.is_set():
-            time.sleep(0.5)
-        
-        if not shutdown_event.is_set():
-            print("\n[ProverServer] All actors have exited. Shutting down...")
     except KeyboardInterrupt:
         print("\n[ProverServer] Interrupted by user")
     

@@ -881,9 +881,12 @@ def main():
             all_results[dataset_name] = results
             print_results(results, dataset_name)
             
-            # Only save results if evaluation completed successfully (no timeout/invalid)
+            # Only save results if evaluation completed successfully
+            # In strict mode (standalone eval), any system error should fail the eval
             if results.get('timed_out') or results.get('invalid'):
                 print0(f"Skipping save for {dataset_name} due to incomplete results")
+            elif results.get('errors', 0) > 0:
+                print0(f"Skipping save for {dataset_name} due to {results['errors']} system errors")
             else:
                 save_eval_results(checkpoint_info, dataset_name, results)
     

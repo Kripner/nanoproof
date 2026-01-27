@@ -25,14 +25,20 @@ from nanoproof.data.leantree_dataloader import STATE_MAX_LEN, TACTIC_MAX_LEN
 
 
 class TheoremsSampler:
-    """Samples theorems for local experience collection."""
+    """Samples theorems for local experience collection.
+    
+    Thread-safe: the sampler may be called from multiple Flask request threads
+    in distributed mode when provers concurrently request theorems.
+    """
     
     def __init__(self, seed: int | None = 0):
         self.theorems = list_theorems(split="train")
         self.rng = random.Random(seed)
+        self._lock = threading.Lock()
     
     def sample_theorem(self) -> str:
-        return self.rng.choice(self.theorems)
+        with self._lock:
+            return self.rng.choice(self.theorems)
 
 
 class ReplayBuffer:
@@ -127,9 +133,13 @@ class ProverWorker:
         self._stats_lock = threading.Lock()
     
     def start(self):
-        """Start the actor threads."""
-        if self._running:
+        """Start the actor threads. Can be called again to restart after actors exit."""
+        # If already running with live threads, do nothing
+        if self._running and not self.all_actors_exited():
             return
+        
+        # Clean up dead threads from previous run
+        self._threads = [t for t in self._threads if t.is_alive()]
         
         self._running = True
         self._paused = False
@@ -186,6 +196,8 @@ class ProverWorker:
         
         consecutive_errors = 0
         max_consecutive_errors = 5
+        max_retries_per_theorem = 3
+        retry_delay = 2.0
         
         while not self._stop_flag.is_set():
             # Check if paused
@@ -204,38 +216,65 @@ class ProverWorker:
             theorem_id, theorem = theorem_data
             self._set_thread_state(actor_id, "running")
             
-            # Try to prove it
-            try:
-                game = self._play_game(client, theorem)
-                consecutive_errors = 0
-                
-                if game is not None and game.root is not None:
+            # Try to prove it with retries for transient errors
+            game = None
+            error = None
+            for attempt in range(max_retries_per_theorem):
+                try:
+                    game = self._play_game(client, theorem)
+                    consecutive_errors = 0
+                    error = None
+                    break  # Success
+                except ConnectionResetError:
+                    error = "Connection reset"
+                    if attempt < max_retries_per_theorem - 1:
+                        self._set_thread_state(actor_id, "retry")
+                        log(f"[Actor {actor_id}] Connection reset, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries_per_theorem})", component="Collection")
+                        time.sleep(retry_delay)
+                        # Reconnect to Lean server
+                        try:
+                            client = LeanClient(self.lean_address, self.lean_port)
+                        except Exception as e:
+                            log(f"[Actor {actor_id}] Failed to reconnect: {e}", component="Collection")
+                    else:
+                        consecutive_errors += 1
+                except Exception as e:
+                    # The inference model returns this when paused
+                    if "Model paused for training" in str(e):
+                        self._set_thread_state(actor_id, "idle")
+                        error = None
+                        game = None
+                        break
+                    error = str(e)
+                    if attempt < max_retries_per_theorem - 1:
+                        self._set_thread_state(actor_id, "retry")
+                        log(f"[Actor {actor_id}] Error: {e}, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries_per_theorem})", component="Collection")
+                        time.sleep(retry_delay)
+                        try:
+                            client = LeanClient(self.lean_address, self.lean_port)
+                        except Exception as reconnect_e:
+                            log(f"[Actor {actor_id}] Failed to reconnect: {reconnect_e}", component="Collection")
+                    else:
+                        consecutive_errors += 1
+                        log(f"[Actor {actor_id}] Error after {max_retries_per_theorem} attempts (lean={self.lean_address}:{self.lean_port}): {e}", component="Collection")
+                        traceback.print_exc()
+            
+            # Report result (skip if we were paused mid-attempt)
+            if error is not None or game is not None:
+                if error is None and game is not None and game.root is not None:
                     with self._stats_lock:
                         self.games_played += 1
                         if game.root.is_solved:
                             self.games_solved += 1
                 
-                # Report result
-                self.on_result(theorem_id, theorem, game, None)
+                if error is not None:
+                    self._set_thread_state(actor_id, "error")
                 
-            except ConnectionResetError:
-                consecutive_errors += 1
-                self._set_thread_state(actor_id, "error")
-                self.on_result(theorem_id, theorem, None, "Connection reset")
-                if consecutive_errors >= max_consecutive_errors:
-                    break
-            except Exception as e:
-                # The inference model returns this when paused, even if the # local _paused flag isn't set yet.
-                if "Model paused for training" in str(e):
-                    self._set_thread_state(actor_id, "idle")
-                    continue
-                consecutive_errors += 1
-                self._set_thread_state(actor_id, "error")
-                self.on_result(theorem_id, theorem, None, str(e))
-                log(f"[Actor {actor_id}] Error (lean={self.lean_address}:{self.lean_port}): {e}", component="Collection")
-                traceback.print_exc()
-                if consecutive_errors >= max_consecutive_errors:
-                    break
+                self.on_result(theorem_id, theorem, game, error)
+            
+            if consecutive_errors >= max_consecutive_errors:
+                log(f"[Actor {actor_id}] Too many consecutive errors, exiting", component="Collection")
+                break
         
         self._set_thread_state(actor_id, "idle")
     

@@ -48,14 +48,22 @@ class ProverRegistry:
         self._autostart: bool = False
         self._lock = threading.Lock()
     
-    def register(self, address: str):
-        """Register a prover server. If autostart is enabled, start it immediately."""
+    def register(self, address: str) -> bool:
+        """Register a prover server. If autostart is enabled, start it immediately.
+        
+        Returns True if this was a new registration, False if already registered.
+        """
         with self._lock:
+            if address in self._provers:
+                return False  # Already registered, no-op
+            
             self._provers.add(address)
             log(f"Prover registered: {address} (total: {len(self._provers)})", component="Registry")
         
             if self._autostart:
                 start_prover(address)
+            
+            return True
     
     def unregister(self, address: str):
         """Unregister a prover server."""
