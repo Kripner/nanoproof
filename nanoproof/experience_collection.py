@@ -224,11 +224,6 @@ class ProverWorker:
                 self.on_result(theorem_id, theorem, None, "Connection reset")
                 if consecutive_errors >= max_consecutive_errors:
                     break
-                try:
-                    self._set_thread_state(actor_id, "blocked")
-                    client = LeanClient(self.lean_address, self.lean_port)
-                except Exception:
-                    pass
             except Exception as e:
                 # The inference model returns this when paused, even if the # local _paused flag isn't set yet.
                 if "Model paused for training" in str(e):
@@ -248,6 +243,7 @@ class ProverWorker:
         """Play a single proof game."""
         process = client.get_process()
         if process is None:
+            log(f"FAILED: Could not get Lean process for theorem", component="Collection")
             return None
         
         with process as env:
@@ -259,6 +255,7 @@ class ProverWorker:
             """)
             init_branch = env.proof_from_sorry(theorem_to_example(theorem))
             if not init_branch.is_success():
+                log(f"FAILED: Could not initialize proof - {init_branch.error if hasattr(init_branch, 'error') else 'unknown error'}", component="Collection")
                 return None
             init_branch = init_branch.value
             
@@ -284,8 +281,7 @@ class ProverWorker:
                 try:
                     verify_node(game.root)
                 except AssertionError as e:
-                    message = f"Verification failed: '{e}'\nTheorem: '{theorem}'\nProof tree:\n{game.root.pp_tree()}"
-                    log(message, component="Collection")
+                    log(f"FAILED: Verification failed after {game.num_iterations} iterations: '{e}'\nTheorem: '{theorem}'\nProof tree:\n{game.root.pp_tree()}", component="Collection")
                     game.root.is_solved = False
                     return game
                 game.unsimplified_root = game.root.clone()
@@ -298,7 +294,7 @@ class ProverWorker:
                 tactics = linearize_proof(game.root)
                 proof_source = construct_proof_source(theorem, tactics)
                 if not env.is_valid_source(proof_source):
-                    log(f"!! Linearized proof source verification failed:\n\"\"\"\n{proof_source}\n\"\"\"\n... proof tree:\n{game.root.pp_tree()}\n", component="Collection")
+                    log(f"FAILED: Linearized proof verification failed after {game.num_iterations} iterations:\n\"\"\"\n{proof_source}\n\"\"\"\n... proof tree:\n{game.root.pp_tree()}\n", component="Collection")
                     game.root.is_solved = False
 
             return game

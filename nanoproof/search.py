@@ -371,8 +371,10 @@ def prune_redundant_nodes(root: Node) -> int:
         pruned_count += 1
     return pruned_count
 
+# TODO: when executing the tree, we can stop once the states match
 def prune_redundant_node(root: Node) -> bool:
-    # all solved interior OR nodes that don't directly finish the proof - candidates for pruning
+    # All solved interior OR nodes that don't directly finish the proof - candidates for pruning.
+    # Sorted in BFS order to delete as much as possible early.
     nodes = [
         n for n in root.get_tree_nodes() if (
             n.is_solved and
@@ -542,12 +544,12 @@ def run_mcts(config: Config, game: Game, model: "TacticModel | BlockingTacticMod
             config,
         )
 
-        # print(root.pp_tree())
-        # print("-" * 80)
         if root.is_solved:
             break
     
     game.num_iterations = num_iterations
+    if not root.is_solved:
+        print(f"GIVING UP after {num_iterations} iterations")
     return num_iterations
 
 

@@ -15,7 +15,7 @@ import torch.distributed as dist
 from tqdm import tqdm
 from leantree.repl_adapter.server import LeanClient
 
-from nanoproof.common import compute_init, compute_cleanup, print0, autodetect_device_type, get_dist_info, theorem_to_example, linearize_proof, construct_proof_source, Player
+from nanoproof.common import compute_init, compute_cleanup, print0, autodetect_device_type, get_dist_info, theorem_to_example, linearize_proof, construct_proof_source, Player, active_barrier_master, active_barrier_wait
 from nanoproof.data import minif2f
 from nanoproof.data import leanworkbook
 from nanoproof.search import run_mcts, Config, Game, Node, prune_redundant_nodes, verify_node, compute_value_target
@@ -558,42 +558,113 @@ def load_model_for_eval(
     return tactic_model, checkpoint_info
 
 
-def run_distributed_eval(
+@dataclass
+class DistributedEvalInfra:
+    """Infrastructure for distributed evaluation (one per process)."""
+    inference_model: BlockingTacticModel
+    is_master: bool
+    
+    def shutdown(self):
+        """Shutdown the inference model (coordinator shutdown handled separately)."""
+        self.inference_model.shutdown()
+
+
+def setup_distributed_eval_infra(
     tactic_model: TacticModel,
-    theorems: list[str],
-    dataset_name: str,
     infra_config,
-) -> dict:
+) -> DistributedEvalInfra:
     """
-    Run distributed evaluation using prover servers.
+    Set up distributed evaluation infrastructure on ALL DDP ranks.
+    
+    Each rank starts an inference server. Rank 0 also starts the coordinator.
+    This should be called once before evaluating any datasets.
     
     Args:
         tactic_model: The TacticModel to use for inference
-        theorems: List of theorem strings to evaluate
-        dataset_name: Name of the dataset (for logging)
         infra_config: InfraConfig from infra.toml
     
     Returns:
-        Dict with 'success_rate', 'solved', 'total', 'errors', 'detailed_results'
+        DistributedEvalInfra handle for cleanup
     """
-    from nanoproof.infra import start_distributed_eval_servers
-    from nanoproof.rl_server import distributed_eval
+    from nanoproof.inference import start_inference_server
+    from nanoproof.rl_server import start_coordinator, shutdown_coordinator
     
+    ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
+    master_process = ddp_rank == 0
     coordinator_port = infra_config.rl_server_port
     
-    # Start infrastructure
-    print0(f"Starting distributed infrastructure on port {coordinator_port}...")
-    handles = start_distributed_eval_servers(tactic_model, coordinator_port)
+    # Create BlockingTacticModel for the inference server
+    inference_model = BlockingTacticModel(
+        inner_model=tactic_model,
+        timeout_seconds=0.2,
+        max_batch_tokens=8000
+    )
     
-    # Register cleanup
+    # Each rank starts its own inference server on a unique port
+    inference_port = coordinator_port + 1 + ddp_rank
+    inference_server_thread = start_inference_server(inference_model, inference_port)
+    log(f"Started inference server on port {inference_port}", component=f"Rank{ddp_rank}")
+    
+    # Sync to ensure all inference servers are up before coordinator starts
+    if ddp:
+        dist.barrier()
+    
+    # Master starts the coordinator with all inference endpoints
+    if master_process:
+        inference_endpoints = [f"http://127.0.0.1:{coordinator_port + 1 + r}" for r in range(ddp_world_size)]
+        print0(f"Starting coordinator on port {coordinator_port} with {len(inference_endpoints)} inference endpoints...")
+        coordinator_thread, inference_router = start_coordinator(
+            coordinator_port, inference_endpoints, startup_timeout=30.0
+        )
+    
+    # Sync again so all ranks wait for coordinator
+    if ddp:
+        dist.barrier()
+    
+    # Register cleanup with atexit
     def cleanup():
-        print0("Shutting down distributed infrastructure...")
-        handles.shutdown()
+        if master_process:
+            print0("Shutting down distributed infrastructure...")
+            shutdown_coordinator()
+        inference_model.shutdown()
     atexit.register(cleanup)
     
-    # Run distributed evaluation
-    print0(f"Running distributed evaluation on {len(theorems)} theorems from {dataset_name}")
-    results = distributed_eval(theorems, dataset_name=dataset_name)
+    return DistributedEvalInfra(inference_model=inference_model, is_master=master_process)
+
+
+def run_distributed_eval_on_dataset(
+    theorems: list[str],
+    dataset_name: str,
+    no_progress_timeout: float = 600.0,
+) -> dict:
+    """
+    Run distributed evaluation on a single dataset.
+    
+    Must be called after setup_distributed_eval_infra(). Only master rank
+    coordinates the actual evaluation; other ranks just return empty dict
+    (their inference servers handle requests in background threads).
+    
+    Args:
+        theorems: List of theorem strings to evaluate
+        dataset_name: Name of the dataset (for logging)
+        no_progress_timeout: Maximum time to wait without progress (seconds)
+    
+    Returns:
+        Dict with 'success_rate', 'solved', 'total', 'errors', 'detailed_results'
+        (only meaningful on rank 0; other ranks return empty dict)
+    """
+    from nanoproof.rl_server import distributed_eval
+    
+    ddp, ddp_rank, _, _ = get_dist_info()
+    master_process = ddp_rank == 0
+    
+    # Only master runs the evaluation coordination
+    if master_process:
+        print0(f"Running distributed evaluation on {len(theorems)} theorems from {dataset_name}")
+        results = distributed_eval(theorems, dataset_name=dataset_name, no_progress_timeout=no_progress_timeout)
+    else:
+        # Other ranks keep their inference server running and wait
+        results = {}
     
     return results
 
@@ -633,12 +704,12 @@ def main():
     eval_group.add_argument("--datasets", type=str, default="minif2f,leanworkbook", help="Comma-separated list of datasets to evaluate (default: minif2f,leanworkbook)")
     eval_group.add_argument("--max-theorems", type=int, default=None, help="Max theorems to evaluate per dataset")
     eval_group.add_argument("--num-actors", type=int, default=4, help="Number of parallel actors for local mode (default: 4)")
-    # TODO: increase
-    eval_group.add_argument("--num-simulations", type=int, default=50, help="Number of MCTS simulations per theorem (default: 50)")
+    eval_group.add_argument("--num-simulations", type=int, default=512, help="Number of MCTS simulations per theorem (default: 50)")
     
     # Distributed mode
     dist_group = parser.add_argument_group("Distributed mode")
     dist_group.add_argument("--infra-file", type=str, default="", help="Path to infra.toml for distributed mode (empty = local mode)")
+    dist_group.add_argument("--no-progress-timeout", type=float, default=6000.0, help="Timeout in seconds if no progress is made (default: 600)")
     
     # Output options
     output_group = parser.add_argument_group("Output")
@@ -710,6 +781,10 @@ def main():
     if master_process:
         if distributed:
             print0(f"Distributed prover mode enabled with {args.infra_file}")
+            # Warn if num_simulations is changed from default - must be set in prover_server.py
+            if args.num_simulations != 512:
+                print0(f"WARNING: --num-simulations={args.num_simulations} is ignored in distributed mode. "
+                       f"Set --num-simulations on prover_server.py instead.")
         else:
             print0("Local mode enabled")
     
@@ -748,11 +823,35 @@ def main():
             print0("WARNING: Evaluation timed out!")
         if results.get('invalid'):
             print0("WARNING: Some results were invalid!")
+        
+        # Print success rates at different simulation thresholds
+        detailed = results.get('detailed_results', [])
+        if detailed:
+            total = len(detailed)
+            thresholds = [8, 16, 32, 64, 128, 256, 512]
+            print0("Success rate by simulation budget:")
+            rates = []
+            for t in thresholds:
+                # Count theorems solved with <= t simulations
+                solved_at_t = sum(
+                    1 for item in detailed
+                    if (hasattr(item, 'is_solved') and item.is_solved and item.num_iterations <= t) or
+                       (isinstance(item, dict) and item.get('proof_tree') is not None and item.get('num_iterations', 0) <= t)
+                )
+                rate = solved_at_t / total if total > 0 else 0.0
+                rates.append(f"{t:>3}: {rate:.2%}")
+            print0("  " + "  |  ".join(rates))
+        
         print0("-" * 80)
     
     print0(f"Evaluating with {args.num_simulations} MCTS simulations per theorem")
     if not distributed:
         print0(f"Using {args.num_actors} parallel actor(s)")
+    
+    # Set up distributed infrastructure once (before evaluating any datasets)
+    if distributed:
+        print0(f"Setting up distributed infrastructure with {ddp_world_size} GPU(s)...")
+        eval_infra = setup_distributed_eval_infra(tactic_model, infra_config)
     
     # Run evaluation for each dataset
     all_results = {}
@@ -760,14 +859,17 @@ def main():
         print0(f"\nEvaluating on {len(theorems)} theorems from {dataset_name}")
         
         if distributed:
-            # Distributed prover mode: only master coordinates with external provers
-            if master_process:
-                results = run_distributed_eval(tactic_model, theorems, dataset_name, infra_config)
-            else:
-                results = None
-            # Sync after distributed eval
+            # Distributed prover mode: all ranks participate in inference
+            results = run_distributed_eval_on_dataset(
+                theorems, dataset_name, no_progress_timeout=args.no_progress_timeout
+            )
+            # Use active barrier (polling) instead of dist.barrier() to avoid NCCL timeout
+            # during long evaluations
             if ddp:
-                dist.barrier()
+                if master_process:
+                    active_barrier_master(f"eval_done_{dataset_name}")
+                else:
+                    active_barrier_wait(f"eval_done_{dataset_name}")
         else:
             # Local mode: each rank evaluates a subset of theorems
             results = eval_success_rate(
@@ -779,8 +881,11 @@ def main():
             all_results[dataset_name] = results
             print_results(results, dataset_name)
             
-            # Save results alongside the checkpoint (only on master)
-            save_eval_results(checkpoint_info, dataset_name, results)
+            # Only save results if evaluation completed successfully (no timeout/invalid)
+            if results.get('timed_out') or results.get('invalid'):
+                print0(f"Skipping save for {dataset_name} due to incomplete results")
+            else:
+                save_eval_results(checkpoint_info, dataset_name, results)
     
     compute_cleanup()
     

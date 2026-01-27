@@ -69,11 +69,11 @@ class LocalBuffer:
 # -----------------------------------------------------------------------------
 
 class ConnectionFailureTracker:
-    """Tracks consecutive connection failures and raises after threshold."""
+    """Tracks consecutive connection failures and waits before retrying."""
     
-    def __init__(self, max_failures: int = 3):
+    def __init__(self, retry_delay: float = 5.0):
         self.consecutive_failures = 0
-        self.max_failures = max_failures
+        self.retry_delay = retry_delay
     
     def record_success(self):
         self.consecutive_failures = 0
@@ -81,9 +81,9 @@ class ConnectionFailureTracker:
     def record_failure(self, error: Exception, url: str = ""):
         self.consecutive_failures += 1
         url_info = f" (url={url})" if url else ""
-        print(f"[Prover] Failed to get theorem ({self.consecutive_failures}/{self.max_failures}): {error}{url_info}")
-        if self.consecutive_failures >= self.max_failures:
-            raise RuntimeError(f"RL server unreachable after {self.max_failures} consecutive failures")
+        print(f"[Prover] Connection failed ({self.consecutive_failures}): {error}{url_info}")
+        print(f"[Prover] Retrying in {self.retry_delay}s...")
+        time.sleep(self.retry_delay)
 
 
 def create_remote_prover_worker(
@@ -99,22 +99,22 @@ def create_remote_prover_worker(
     Create a ProverWorker that gets theorems from coordinator and submits results.
     """
     
-    failure_tracker = ConnectionFailureTracker(max_failures=3)
+    failure_tracker = ConnectionFailureTracker(retry_delay=5.0)
     
     def get_theorem() -> Optional[tuple[str, str]]:
-        """Request next theorem from coordinator."""
+        """Request next theorem from coordinator. Retries on connection failure."""
         url = f"{coordinator_url}/get_theorem"
-        try:
-            response = requests.get(url, timeout=5.0)
-            response.raise_for_status()
-            data = response.json()
-            failure_tracker.record_success()
-            if data.get("done"):
-                return None
-            return data["id"], data["theorem"]
-        except Exception as e:
-            failure_tracker.record_failure(e, url)
-            return None
+        while True:
+            try:
+                response = requests.get(url, timeout=5.0)
+                response.raise_for_status()
+                data = response.json()
+                failure_tracker.record_success()
+                if data.get("done"):
+                    return None
+                return data["id"], data["theorem"]
+            except Exception as e:
+                failure_tracker.record_failure(e, url)
     
     def on_result(theorem_id: str, theorem: str, game: Optional["Game"], error: str | None):
         """Submit proof result to coordinator."""
@@ -132,7 +132,10 @@ def create_remote_prover_worker(
         
         buffer.record_game(is_solved)
         if is_solved:
-            print(f"[Prover] SOLVED {theorem_id}")
+            print(f"[Prover] SOLVED {theorem_id} after {num_iterations} iterations")
+        else:
+            error_info = f" (error: {error})" if error else ""
+            print(f"[Prover] FAILED {theorem_id} after {num_iterations} iterations{error_info}")
         
         # Submit to coordinator
         url = f"{coordinator_url}/submit_result"
@@ -158,20 +161,22 @@ def create_remote_prover_worker(
 # Registration
 # -----------------------------------------------------------------------------
 
-def register_with_rl_server(rl_server: str, my_address: str) -> bool:
-    """Register this prover with the RL server."""
-    try:
-        response = requests.post(
-            f"http://{rl_server}/register",
-            json={"address": my_address},
-            timeout=5.0
-        )
-        response.raise_for_status()
-        print(f"[Registration] Registered with RL server at {rl_server}")
-        return True
-    except Exception as e:
-        print(f"[Registration] Failed to register with RL server: {e}")
-        return False
+def register_with_rl_server(rl_server: str, my_address: str, retry_delay: float = 5.0):
+    """Register this prover with the RL server. Retries until successful."""
+    while True:
+        try:
+            response = requests.post(
+                f"http://{rl_server}/register",
+                json={"address": my_address},
+                timeout=5.0
+            )
+            response.raise_for_status()
+            print(f"[Registration] Registered with RL server at {rl_server}")
+            return
+        except Exception as e:
+            print(f"[Registration] Failed to register with RL server: {e}")
+            print(f"[Registration] Retrying in {retry_delay}s...")
+            time.sleep(retry_delay)
 
 
 def unregister_from_rl_server(rl_server: str, my_address: str):
