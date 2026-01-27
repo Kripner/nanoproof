@@ -750,7 +750,7 @@ def distributed_eval(theorems: list[str], dataset_name: str = "eval", no_progres
     # Wait for at least one prover
     while registry.count() == 0:
         log("Waiting for provers to register...", component="Coordinator")
-        time.sleep(1.0)
+        time.sleep(3.0)
     
     # Set up dispatcher
     dispatcher.get_theorem = get_theorem

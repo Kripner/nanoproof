@@ -68,7 +68,7 @@ def list_theorems(split: str):
         return theorems[:-500]
 
 if __name__ == "__main__":
-    # download_dataset()
+    download_dataset()
     train_theorems = list_theorems(split="train")
     val_theorems = list_theorems(split="val")
     print(f"Retrieved {len(train_theorems)} train theorems")

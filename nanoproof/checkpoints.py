@@ -111,40 +111,58 @@ def find_last_step(checkpoint_dir):
     return last_step
 
 # -----------------------------------------------------------------------------
-# convenience functions that take into account nanoproof's directory structure
+# Checkpoint path resolution
+
+_SOURCE_TO_DIR = {
+    "base": "base_checkpoints",
+    "mid": "mid_checkpoints",
+    "sft": "sft_checkpoints",
+    "rl": "rl_checkpoints",
+}
+
+
+def get_rl_checkpoint_dir(run_name: str) -> str:
+    """Get the checkpoint directory for an RL run."""
+    base_dir = get_base_dir()
+    return os.path.join(base_dir, "rl", run_name, "checkpoints")
+
+
+def get_pretrained_checkpoint_dir(source: str, model_tag: str) -> str:
+    """Get the checkpoint directory for a pretrained model."""
+    base_dir = get_base_dir()
+    return os.path.join(base_dir, _SOURCE_TO_DIR[source], model_tag)
+
+
+def resolve_step(checkpoint_dir: str, step: int | None) -> int:
+    """Resolve step to the latest if not specified."""
+    if step is None:
+        return find_last_step(checkpoint_dir)
+    return step
+
+
+# -----------------------------------------------------------------------------
+# Model loading convenience functions
+
+def _load_from_checkpoint_dir(checkpoint_dir: str, device, phase: str, step: int | None = None):
+    """Load a model from a checkpoint directory."""
+    step = resolve_step(checkpoint_dir, step)
+    log0(f"Loading model from {checkpoint_dir} with step {step}")
+    return build_model(checkpoint_dir, step, device, phase)
+
+
+def load_rl_model(run_name: str, device, phase: str, step: int | None = None):
+    """Load a model from an RL training run."""
+    checkpoint_dir = get_rl_checkpoint_dir(run_name)
+    return _load_from_checkpoint_dir(checkpoint_dir, device, phase, step)
+
+
+def load_model(source: str, device, phase: str, model_tag: str, step: int | None = None):
+    """Load a pretrained model (base/mid/sft/rl checkpoints)."""
+    checkpoint_dir = get_pretrained_checkpoint_dir(source, model_tag)
+    return _load_from_checkpoint_dir(checkpoint_dir, device, phase, step)
+
 
 def load_model_from_dir(checkpoints_dir, device, phase, model_tag, step=None):
+    """Legacy function - load model from a custom checkpoints directory."""
     checkpoint_dir = os.path.join(checkpoints_dir, model_tag)
-    if step is None:
-        # guess the step by defaulting to the last step
-        step = find_last_step(checkpoint_dir)
-    assert step is not None, f"No checkpoints found in {checkpoint_dir}"
-    # build the model
-    log0(f"Loading model from {checkpoint_dir} with step {step}")
-    model, tokenizer, meta_data = build_model(checkpoint_dir, step, device, phase)
-    return model, tokenizer, meta_data
-
-def load_rl_model(run_name, device, phase, step=None):
-    base_dir = get_base_dir()
-    run_dir = os.path.join(base_dir, "rl", run_name)
-    checkpoint_dir = os.path.join(run_dir, "checkpoints")
-
-    if step is None:
-        # guess the step by defaulting to the last step
-        step = find_last_step(checkpoint_dir)
-    assert step is not None, f"No checkpoints found in {checkpoint_dir}"
-    # build the model
-    log0(f"Loading model from {checkpoint_dir} with step {step}")
-    model, tokenizer, meta_data = build_model(checkpoint_dir, step, device, phase)
-    return model, tokenizer, meta_data
-
-def load_model(source, *args, **kwargs):
-    model_dir = {
-        "base": "base_checkpoints",
-        "mid": "mid_checkpoints",
-        "sft": "sft_checkpoints",
-        "rl": "rl_checkpoints",
-    }[source]
-    base_dir = get_base_dir()
-    checkpoints_dir = os.path.join(base_dir, model_dir)
-    return load_model_from_dir(checkpoints_dir, *args, **kwargs)
+    return _load_from_checkpoint_dir(checkpoint_dir, device, phase, step)

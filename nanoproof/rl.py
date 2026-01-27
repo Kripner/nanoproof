@@ -28,7 +28,7 @@ from nanoproof.cli import create_monitor, configure_logging, log, log0, set_ddp_
 from nanoproof.rl_server import distributed_collect, distributed_eval, start_coordinator, shutdown_coordinator
 from nanoproof.inference import start_inference_server
 from nanoproof.infra import load_infra_config, InfraConfig, parse_lean_server
-from scripts.prover_eval import eval_success_rate
+from scripts.prover_eval import eval_success_rate, save_eval_results_to_run_dir
 from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
 from nanoproof.data.leantree_dataloader import sft_data_generator
 
@@ -42,48 +42,6 @@ from nanoproof.data.leantree_dataloader import sft_data_generator
 
 # TODO: the eval is now a bit unfair, since when the prover finds an invalid (e.g. self-referential) proof, it's not allowed to continue
 
-
-def save_eval_results(output_dir: str, step: int, dataset_name: str, results: dict):
-    """
-    Save evaluation results to a JSONL file.
-    
-    Args:
-        output_dir: The output directory for the run
-        step: Current training step
-        dataset_name: Name of the dataset (e.g., "minif2f", "leanworkbook")
-        results: Dict containing 'detailed_results' with evaluation details
-    """
-    # Create evals/{step}/ directory
-    eval_dir = os.path.join(output_dir, "evals", str(step))
-    os.makedirs(eval_dir, exist_ok=True)
-    
-    # Get detailed results
-    detailed_results = results.get("detailed_results", [])
-    
-    # Save to JSONL
-    jsonl_path = os.path.join(eval_dir, f"{dataset_name}.jsonl")
-    with open(jsonl_path, "w") as f:
-        for item in detailed_results:
-            # Handle both dict (from distributed) and TheoremResult (from local) formats
-            if hasattr(item, "theorem"):
-                # It's a TheoremResult dataclass
-                entry = {
-                    "theorem": item.theorem,
-                    "proof": item.proof_tree,
-                    "unsimplified_proof": item.unsimplified_proof_tree,
-                    "num_iterations": item.num_iterations,
-                }
-            else:
-                # It's a dict (from distributed_eval)
-                entry = {
-                    "theorem": item["theorem"],
-                    "proof": item["proof_tree"],
-                    "unsimplified_proof": item.get("unsimplified_proof_tree"),
-                    "num_iterations": item["num_iterations"],
-                }
-            f.write(json.dumps(entry) + "\n")
-    
-    log(f"Saved {len(detailed_results)} eval results to {jsonl_path}", component="Eval")
 
 # -----------------------------------------------------------------------------
 # RL Hyperparameters
@@ -449,8 +407,8 @@ while True:
                 wandb_run.log(wandb_data)
                 
                 # Save detailed evaluation results
-                save_eval_results(output_dir, step, "minif2f", minif2f_results)
-                save_eval_results(output_dir, step, "leanworkbook", leanworkbook_results)
+                save_eval_results_to_run_dir(output_dir, step, "minif2f", minif2f_results)
+                save_eval_results_to_run_dir(output_dir, step, "leanworkbook", leanworkbook_results)
                 
                 active_barrier_master(f"eval_done_{step}")
             else:
@@ -500,8 +458,8 @@ while True:
             })
             
             # Save detailed evaluation results
-            save_eval_results(output_dir, step, "minif2f", minif2f_results)
-            save_eval_results(output_dir, step, "leanworkbook", leanworkbook_results)
+            save_eval_results_to_run_dir(output_dir, step, "minif2f", minif2f_results)
+            save_eval_results_to_run_dir(output_dir, step, "leanworkbook", leanworkbook_results)
 
         model.train()
         timer.end("eval")

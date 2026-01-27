@@ -31,9 +31,14 @@ port = 8000
 ```
 """
 
+import threading
 import tomllib
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from nanoproof.inference import TacticModel, BlockingTacticModel
+    from nanoproof.rl_server import InferenceRouter
 
 
 @dataclass
@@ -140,4 +145,81 @@ def load_infra_config(path: str) -> InfraConfig:
         rl_server_port=rl_server_port,
         lean_servers=lean_servers,
         prover_to_lean=prover_to_lean,
+    )
+
+
+# -----------------------------------------------------------------------------
+# Distributed Infrastructure Setup
+# -----------------------------------------------------------------------------
+
+@dataclass
+class DistributedInfraHandles:
+    """Handles for distributed infrastructure components (for cleanup)."""
+    inference_model: "BlockingTacticModel"
+    inference_server_thread: threading.Thread
+    coordinator_thread: threading.Thread
+    inference_router: "InferenceRouter"
+    coordinator_port: int
+    
+    def shutdown(self):
+        """Shutdown all distributed infrastructure components."""
+        from nanoproof.rl_server import shutdown_coordinator
+        shutdown_coordinator()
+        self.inference_model.shutdown()
+
+
+def start_distributed_eval_servers(
+    tactic_model: "TacticModel",
+    coordinator_port: int,
+    batch_timeout: float = 0.2,
+    max_batch_tokens: int = 8000,
+    startup_timeout: float = 30.0,
+) -> DistributedInfraHandles:
+    """
+    Start distributed evaluation infrastructure (inference server + coordinator).
+    
+    This is used for standalone evaluation scripts that need to set up the same
+    infrastructure as the RL training loop.
+    
+    Args:
+        tactic_model: The TacticModel to use for inference
+        coordinator_port: Port for the coordinator to listen on
+        batch_timeout: Timeout in seconds for batching LLM calls
+        max_batch_tokens: Maximum tokens per inference batch
+        startup_timeout: Maximum time to wait for servers to be healthy
+    
+    Returns:
+        DistributedInfraHandles with references to all started components
+    """
+    from nanoproof.inference import BlockingTacticModel, start_inference_server
+    from nanoproof.rl_server import start_coordinator
+    from nanoproof.cli import log
+    
+    # Create BlockingTacticModel for the inference server
+    inference_model = BlockingTacticModel(
+        inner_model=tactic_model,
+        timeout_seconds=batch_timeout,
+        max_batch_tokens=max_batch_tokens
+    )
+    
+    # Start inference server on port coordinator_port + 1
+    inference_port = coordinator_port + 1
+    inference_server_thread = start_inference_server(inference_model, inference_port)
+    
+    log(f"Started inference server on port {inference_port}", component="Infra")
+    
+    # Start the coordinator (proxies inference + handles prover registration)
+    inference_endpoints = [f"http://127.0.0.1:{inference_port}"]
+    coordinator_thread, inference_router = start_coordinator(
+        coordinator_port, inference_endpoints, startup_timeout=startup_timeout
+    )
+    
+    log(f"Started coordinator on port {coordinator_port}", component="Infra")
+    
+    return DistributedInfraHandles(
+        inference_model=inference_model,
+        inference_server_thread=inference_server_thread,
+        coordinator_thread=coordinator_thread,
+        inference_router=inference_router,
+        coordinator_port=coordinator_port,
     )
