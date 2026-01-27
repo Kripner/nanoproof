@@ -18,10 +18,10 @@ import FormalConjectures.Util.Answer
 
 # Lean environment setup commands
 LEAN_OPEN_SCOPED_COMMANDS = """
-    open scoped Real
-    open scoped Nat
-    open scoped Topology
-    open scoped Polynomial
+open scoped Real
+open scoped Nat
+open scoped Topology
+open scoped Polynomial
 """
 
 
@@ -79,6 +79,7 @@ def format_proof_tree(proof: dict | None) -> str:
     return node.pp_tree()
 
 
+# TODO!!!: only use one solving tactic, not all of them
 def linearize_proof(node: Node) -> list[str]:
     """Linearize a solved proof tree into a sequence of tactics using DFS.
     
@@ -458,7 +459,7 @@ def cmd_gather_lean(args):
         # Write the Lean file
         output_path = output_base / f"{step}-minif2f.lean"
         with open(output_path, "w") as f:
-            f.write(MINIF2F_IMPORTS + "\n" + LEAN_OPEN_SCOPED_COMMANDS + "\n\n" + "\n\n".join(lean_content))
+            f.write(MINIF2F_IMPORTS.strip() + "\n\n" + LEAN_OPEN_SCOPED_COMMANDS.strip() + "\n\n\n" + "\n\n".join(lean_content))
         
         print(f"Step {step}: {proven_count}/{len(lean_content)} proven -> {output_path}")
 

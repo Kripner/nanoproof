@@ -195,6 +195,9 @@ if ddp:
     dist.broadcast_object_list(output_dir_list, src=0)
     output_dir = output_dir_list[0]
 
+# Add output_dir to config for wandb logging
+user_config["output_dir"] = output_dir
+
 # Configure file-based logging (only on master process to avoid duplicate writes)
 if master_process:
     configure_logging(output_dir)
