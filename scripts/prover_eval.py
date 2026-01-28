@@ -701,7 +701,8 @@ def main():
     
     # Evaluation options
     eval_group = parser.add_argument_group("Evaluation settings")
-    eval_group.add_argument("--datasets", type=str, default="minif2f,leanworkbook", help="Comma-separated list of datasets to evaluate (default: minif2f,leanworkbook)")
+    eval_group.add_argument("--datasets", type=str, default="minif2f", help="Comma-separated list of datasets to evaluate (example: minif2f,leanworkbook)")
+    eval_group.add_argument("--split", type=str, default="valid", choices=["valid", "test"], help="Dataset split to evaluate (default: valid)")
     eval_group.add_argument("--max-theorems", type=int, default=None, help="Max theorems to evaluate per dataset")
     eval_group.add_argument("--num-actors", type=int, default=4, help="Number of parallel actors for local mode (default: 4)")
     eval_group.add_argument("--num-simulations", type=int, default=512, help="Number of MCTS simulations per theorem (default: 50)")
@@ -727,6 +728,17 @@ def main():
     for d in datasets:
         if d not in valid_datasets:
             parser.error(f"Unknown dataset: {d}. Valid options: {valid_datasets}")
+    
+    # Validate split for leanworkbook
+    if "leanworkbook" in datasets and args.split == "test":
+        raise ValueError("leanworkbook does not have a test split. Use --split=valid instead.")
+    
+    # Warn about test split evaluation
+    if args.split == "test":
+        print0("WARNING: Evaluating on TEST split. Results will be saved with '-test' suffix.")
+    
+    # Suffix for saved files based on split
+    split_suffix = "-test" if args.split == "test" else ""
     
     # Check distributed prover mode (using external prover servers)
     distributed = bool(args.infra_file)
@@ -757,7 +769,7 @@ def main():
     if master_process:
         existing_results = []
         for dataset_name in datasets:
-            eval_path = checkpoint_info.get_eval_path(dataset_name)
+            eval_path = checkpoint_info.get_eval_path(dataset_name + split_suffix)
             if os.path.exists(eval_path):
                 existing_results.append(eval_path)
         
@@ -802,10 +814,12 @@ def main():
     # Load theorems for each dataset
     dataset_theorems = {}
     if "minif2f" in datasets:
-        dataset_theorems["minif2f"] = minif2f.list_theorems(split="Valid")
+        minif2f_split = "Valid" if args.split == "valid" else "Test"
+        dataset_theorems["minif2f"] = minif2f.list_theorems(split=minif2f_split)
     if "leanworkbook" in datasets:
+        # leanworkbook only has "val" split (validated above that split != "test")
         dataset_theorems["leanworkbook"] = leanworkbook.list_theorems(split="val")
-    
+
     # Apply max_theorems limit
     if args.max_theorems:
         for name in dataset_theorems:
@@ -828,7 +842,7 @@ def main():
         detailed = results.get('detailed_results', [])
         if detailed:
             total = len(detailed)
-            thresholds = [8, 16, 32, 64, 128, 256, 512]
+            thresholds = [8, 16, 32, 64, 128, 256, 512, 1024, 2048]
             print0("Success rate by simulation budget:")
             rates = []
             for t in thresholds:
@@ -881,14 +895,12 @@ def main():
             all_results[dataset_name] = results
             print_results(results, dataset_name)
             
-            # Only save results if evaluation completed successfully
-            # In strict mode (standalone eval), any system error should fail the eval
             if results.get('timed_out') or results.get('invalid'):
-                print0(f"Skipping save for {dataset_name} due to incomplete results")
-            elif results.get('errors', 0) > 0:
-                print0(f"Skipping save for {dataset_name} due to {results['errors']} system errors")
-            else:
-                save_eval_results(checkpoint_info, dataset_name, results)
+                print0(f"WARNING: Evaluation timed out or invalid for {dataset_name}")
+            if results.get('errors', 0) > 0:
+                print0(f"WARNING: Evaluation failed for {dataset_name} due to {results['errors']} system errors")
+
+            save_eval_results(checkpoint_info, dataset_name + split_suffix, results)
     
     compute_cleanup()
     
