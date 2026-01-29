@@ -9,8 +9,6 @@ Two implementations are available:
 
 import os
 
-from nanoproof.model import NetworkConfig
-
 _MIN_VALUE = 1
 _MAX_VALUE = 64  # max value corresponds to "infinity"
 

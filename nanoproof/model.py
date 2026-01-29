@@ -23,6 +23,7 @@ from nanoproof.common import get_dist_info, print0
 from nanoproof.muon import Muon, DistMuon
 from nanoproof.adamw import DistAdamW
 
+# TODO: remove/move some params
 @dataclass
 class NetworkConfig:
     sequence_len: int = 1024
@@ -327,98 +328,3 @@ class Transformer(nn.Module):
             ids = torch.cat((ids, next_ids), dim=1)
             token = next_ids.item()
             yield token
-
-
-@dataclass
-class NetworkTrainingOutput:
-    """Output of the network during training."""
-    value_logits: torch.Tensor
-    policy_logits: torch.Tensor
-
-
-@dataclass
-class NetworkSamplingOutput:
-    """Output of the network when sampling actions."""
-    action_logprobs: dict[list[int], float]
-    value: float
-
-
-class ValueHead(nn.Module):
-    """Predicts of a state value as a categorical distribution."""
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
-        self.c_proj = nn.Linear(4 * config.n_embd, config.num_value_bins, bias=False)
-        self.min_value = config.min_value
-        self.max_value = config.max_value
-        self.num_value_bins = config.num_value_bins
-        
-        # Create bucket values for scalar conversion
-        self.register_buffer("values", torch.linspace(self.min_value, self.max_value, self.num_value_bins), persistent=False)
-
-    def forward(self, x):
-        x = self.c_fc(x)
-        x = F.relu(x).square()
-        x = self.c_proj(x)
-        return x
-
-    def to_scalar(self, logits):
-        probs = F.softmax(logits, dim=-1)
-        return torch.sum(probs * self.values, dim=-1)
-
-    def init_weights(self):
-        self.apply(self._init_weights)
-
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            # https://arxiv.org/pdf/2310.17813
-            fan_out = module.weight.size(0)
-            fan_in = module.weight.size(1)
-            std = 1.0 / math.sqrt(fan_in) * min(1.0, math.sqrt(fan_out / fan_in))
-            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
-            if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
-
-
-    def setup_optimizers(self, value_head_lr=0.004, weight_decay=0.0):
-        ddp, rank, local_rank, world_size = get_dist_info()
-        value_head_params = list(self.value_head.parameters())
-
-        adamw_kwargs = dict(betas=(0.8, 0.95), eps=1e-10, weight_decay=weight_decay)
-        AdamWFactory = DistAdamW if ddp else partial(torch.optim.AdamW, fused=True)
-        # AdamWFactory = partial(torch.optim.AdamW, fused=True)
-        optim = AdamWFactory(dict(params=value_head_params, lr=value_head_lr), **adamw_kwargs),
-
-        for group in optim.param_groups:
-            group["initial_lr"] = group["lr"]
-        return [optim]
-
-
-class Network(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.transformer = Transformer(config)
-        self.value_head = ValueHead(config)
-
-    def init_weights(self):
-        self.transformer.init_weights()
-        self.value_head.init_weights()
-
-    def setup_optimizers(self, unembedding_lr=0.004, embedding_lr=0.2, value_head_lr=0.004, matrix_lr=0.02, weight_decay=0.0):
-        lm_optimizers = self.transformer.setup_optimizers(unembedding_lr=unembedding_lr, embedding_lr=embedding_lr, matrix_lr=matrix_lr, weight_decay=weight_decay)
-        value_optimizers = self.value_head.setup_optimizers(value_head_lr=value_head_lr, weight_decay=weight_decay)
-
-        # Verify we have all parameters
-        all_params_count = len(list(self.parameters()))
-        optimized_params_count = sum(p.numel() for optim in lm_optimizers + value_optimizers for group in optim.param_groups for p in group["params"])
-        assert all_params_count == optimized_params_count, f"Parameters count mismatch: {all_params_count} != {optimized_params_count}"
-
-        return lm_optimizers + value_optimizers
-
-    def forward(self, idx, kv_cache=None):
-        policy_logits = self.transformer(idx, kv_cache=kv_cache)
-        # value_logits = self.value_head(x)
-        
-        return NetworkTrainingOutput(value_logits=None, policy_logits=policy_logits)

@@ -33,6 +33,7 @@ import requests
 from flask import Flask, jsonify
 
 from nanoproof.search import Config, Game
+from nanoproof.common import linearize_proof, construct_proof_source
 from nanoproof.experience_collection import ProverWorker
 from nanoproof.inference import RemoteTacticModel
 from nanoproof.cli import get_and_clear_tactics_buffer
@@ -121,11 +122,19 @@ def create_remote_prover_worker(
         # Only include proof_tree if actually solved
         is_solved = game and game.root and game.root.is_solved
         num_iterations = game.num_iterations if game else 0
+        
+        # Compute linearized proof if solved
+        linearized = None
+        if is_solved:
+            tactics = linearize_proof(game.root)
+            linearized = construct_proof_source(theorem, tactics)
+        
         result = {
             "id": theorem_id,
             "theorem": theorem,
             "proof_tree": game.root.serialize() if is_solved else None,
             "unsimplified_proof_tree": game.unsimplified_root.serialize() if is_solved and game.unsimplified_root else None,
+            "linearized_proof": linearized,
             "error": error,
             "num_iterations": num_iterations,
         }

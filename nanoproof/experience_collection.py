@@ -15,6 +15,7 @@ import traceback
 import torch
 import torch.distributed as dist
 from leantree.repl_adapter.server import LeanClient
+from leantree.repl_adapter.interaction import LeanProcessException
 
 from nanoproof.common import get_dist_info, linearize_proof, construct_proof_source, theorem_to_example, Player
 from nanoproof.search import Node, Config, Game, run_mcts, extract_transitions, compute_value_target, verify_node, prune_redundant_nodes
@@ -214,6 +215,7 @@ class ProverWorker:
         
         consecutive_errors = 0
         max_consecutive_errors = 5
+        max_retries = 3
         
         while not self._stop_flag.is_set():
             # Check if paused
@@ -232,22 +234,27 @@ class ProverWorker:
             theorem_id, theorem = theorem_data
             self._set_thread_state(actor_id, "running")
             
-            # Try to prove it (with one retry for transient connection errors)
+            # Try to prove it (with retries for transient connection errors)
             game = None
             error = None
             skip_report = False
-            for attempt in range(2):  # At most 2 attempts
+            for attempt in range(max_retries):
                 try:
                     game = self._play_game(client, theorem)
                     consecutive_errors = 0
                     break  # Success (game may be None if Lean couldn't init proof)
-                except ConnectionResetError:
-                    if attempt == 0:
-                        # First attempt failed, wait briefly and retry once
+                except (ConnectionResetError, ConnectionRefusedError, BrokenPipeError, LeanProcessException) as e:
+                    if attempt < max_retries - 1:
+                        # Reconnect and retry
                         self._set_thread_state(actor_id, "retry")
-                        time.sleep(1.0)
+                        log(f"[Actor {actor_id}] Connection error (attempt {attempt + 1}/{max_retries}): '{e}', reconnecting...", component="Collection")
+                        time.sleep(1.0 * (attempt + 1))  # Increasing delay
+                        try:
+                            client = LeanClient(self.lean_address, self.lean_port)
+                        except Exception as reconnect_err:
+                            log(f"[Actor {actor_id}] Reconnect failed: {reconnect_err}", component="Collection")
                     else:
-                        error = "Connection reset"
+                        error = str(e)
                         consecutive_errors += 1
                 except Exception as e:
                     if "Model paused for training" in str(e):
