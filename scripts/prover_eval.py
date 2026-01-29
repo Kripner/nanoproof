@@ -42,10 +42,12 @@ class CheckpointInfo:
     """Information about the loaded checkpoint, used for saving eval results."""
     checkpoint_dir: str
     step: int
+    seed: int = 0
     
     def get_eval_path(self, dataset_name: str) -> str:
         """Get the path where eval results should be saved for a dataset."""
-        return os.path.join(self.checkpoint_dir, f"eval_{self.step:06d}_{dataset_name}.jsonl")
+        seed_suffix = f"-{self.seed}" if self.seed != 0 else ""
+        return os.path.join(self.checkpoint_dir, f"eval_{self.step:06d}_{dataset_name}{seed_suffix}.jsonl")
 
 
 # Lean environment setup commands
@@ -559,6 +561,7 @@ def load_model_for_eval(
     source: str = "sft",
     model_tag: Optional[str] = None,
     step: Optional[int] = None,
+    seed: int = 0,
 ) -> tuple[TacticModel, CheckpointInfo]:
     """
     Load a model for evaluation.
@@ -573,6 +576,7 @@ def load_model_for_eval(
         source: Source for pretrained checkpoints ("sft" or "base")
         model_tag: Model tag for pretrained checkpoints
         step: Checkpoint step (optional, defaults to latest)
+        seed: Random seed for tactic generation (default: 0)
     
     Returns:
         Tuple of (TacticModel, CheckpointInfo)
@@ -595,8 +599,8 @@ def load_model_for_eval(
         model, tokenizer, meta_data = load_model(source, device, phase="eval", model_tag=model_tag, step=resolved_step)
     
     engine = Engine(model, tokenizer)
-    tactic_model = TacticModel(model, tokenizer, engine, num_samples=6)
-    checkpoint_info = CheckpointInfo(checkpoint_dir=checkpoint_dir, step=resolved_step)
+    tactic_model = TacticModel(model, tokenizer, engine, num_samples=6, seed=seed)
+    checkpoint_info = CheckpointInfo(checkpoint_dir=checkpoint_dir, step=resolved_step, seed=seed)
     
     return tactic_model, checkpoint_info
 
@@ -717,6 +721,7 @@ def get_checkpoint_info_early(
     source: str,
     model_tag: Optional[str],
     step: Optional[int],
+    seed: int = 0,
 ) -> CheckpointInfo:
     """
     Get checkpoint info without loading the model (for early existence checks).
@@ -729,7 +734,7 @@ def get_checkpoint_info_early(
         checkpoint_dir = get_pretrained_checkpoint_dir(source, model_tag)
     
     resolved_step = resolve_step(checkpoint_dir, step)
-    return CheckpointInfo(checkpoint_dir=checkpoint_dir, step=resolved_step)
+    return CheckpointInfo(checkpoint_dir=checkpoint_dir, step=resolved_step, seed=seed)
 
 
 def main():
@@ -749,6 +754,7 @@ def main():
     eval_group.add_argument("--max-theorems", type=int, default=None, help="Max theorems to evaluate per dataset")
     eval_group.add_argument("--num-actors", type=int, default=4, help="Number of parallel actors for local mode (default: 4)")
     eval_group.add_argument("--num-simulations", type=int, default=512, help="Number of MCTS simulations per theorem (default: 50)")
+    eval_group.add_argument("--seed", type=int, default=0, help="Random seed for tactic generation (default: 0)")
     
     # Distributed mode
     dist_group = parser.add_argument_group("Distributed mode")
@@ -809,6 +815,7 @@ def main():
         source=args.source,
         model_tag=args.model_tag,
         step=args.step,
+        seed=args.seed,
     )
     
     # Check if eval results already exist (only on rank 0, then broadcast decision)
@@ -875,6 +882,7 @@ def main():
         source=args.source,
         model_tag=args.model_tag,
         step=args.step,
+        seed=args.seed,
     )
     
     print0(f"Results will be saved to: {checkpoint_info.checkpoint_dir}")
@@ -934,6 +942,7 @@ def main():
         print0("-" * 80)
     
     print0(f"Evaluating with {args.num_simulations} MCTS simulations per theorem")
+    print0(f"Using random seed: {args.seed}")
     if not distributed:
         print0(f"Using {args.num_actors} parallel actor(s)")
     

@@ -249,10 +249,6 @@ class ProverWorker:
                         self._set_thread_state(actor_id, "retry")
                         log(f"[Actor {actor_id}] Connection error (attempt {attempt + 1}/{max_retries}): '{e}', reconnecting...", component="Collection")
                         time.sleep(1.0 * (attempt + 1))  # Increasing delay
-                        try:
-                            client = LeanClient(self.lean_address, self.lean_port)
-                        except Exception as reconnect_err:
-                            log(f"[Actor {actor_id}] Reconnect failed: {reconnect_err}", component="Collection")
                     else:
                         error = str(e)
                         consecutive_errors += 1

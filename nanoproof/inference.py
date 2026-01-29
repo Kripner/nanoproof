@@ -59,11 +59,12 @@ class TacticModel:
     tokenizer: "HuggingFaceTokenizer"
     engine: "Engine"
     num_samples: int = 6
+    seed: int = 0
 
     def __post_init__(self):
         import torch
         self.rng = torch.Generator(device=self.network.get_device())
-        self.rng.manual_seed(0)
+        self.rng.manual_seed(self.seed)
 
     def sample_tactic(self, state: State) -> ValueOrError[TacticAndValue]:
         """Sample tactics and predict value for a state. Returns (tactics, value)."""
