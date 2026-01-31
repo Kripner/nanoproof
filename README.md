@@ -1,6 +1,6 @@
 # nanoproof
 
-![nanochat logo](dev/combined_plots.pdf)
+![minif2f plots](dev/combined_plots.png)
 
 This is an attempt to replicate AlphaProof / HyperTree Proof Search. It is based on [nanochat](https://github.com/karpathy/nanochat) and the
 official AlphaProof pseudocode (together with several open-source datasets and tools). We have:
