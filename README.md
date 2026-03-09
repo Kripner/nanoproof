@@ -239,6 +239,8 @@ GPU Node (torchrun with DDP)
 - try training on state_after as well, just to give the model more training signal (it was done in some paper, maybe GPT-f)
 - let tokens attend bi-directionally inside the fixed-size state (a la PrefixLM)
 - try proving the negation in each node (if critic deems it likely to succeed)
+- critic training: samplig ratio based on proof length (a la https://leandojo.org/leanprogress.html)
+- tactic logprob filtering and retraining (akin to BFS-Prover-2)
 
 # Questions
 
