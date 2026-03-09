@@ -23,7 +23,7 @@ class Config:
     pb_c_base: int = 3200
     pb_c_init: float = 0.01
     value_discount: float = 0.98
-    prior_temperature: float = 1.5
+    prior_temperature: float = 200
 
     # Other MCTS parameters
     no_legal_actions_value: float = -40.0

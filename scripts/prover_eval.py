@@ -33,6 +33,7 @@ class TheoremResult:
     error: Optional[str]
     proof_tree: Optional[dict]  # Serialized (simplified) Node tree, None if not solved
     unsimplified_proof_tree: Optional[dict]  # Serialized (unsimplified) Node tree, None if not solved
+    linearized_proof: Optional[str]  # Human-readable proof source, None if not solved
     num_iterations: int  # Number of MCTS iterations run
 
 
@@ -41,10 +42,12 @@ class CheckpointInfo:
     """Information about the loaded checkpoint, used for saving eval results."""
     checkpoint_dir: str
     step: int
+    seed: int = 0
     
     def get_eval_path(self, dataset_name: str) -> str:
         """Get the path where eval results should be saved for a dataset."""
-        return os.path.join(self.checkpoint_dir, f"eval_{self.step:06d}_{dataset_name}.jsonl")
+        seed_suffix = f"-{self.seed}" if self.seed != 0 else ""
+        return os.path.join(self.checkpoint_dir, f"eval_{self.step:06d}_{dataset_name}{seed_suffix}.jsonl")
 
 
 # Lean environment setup commands
@@ -130,6 +133,7 @@ def evaluate_theorem(
     is_solved = game.root.is_solved
     proof_tree = None
     unsimplified_proof_tree = None
+    linearized_proof = None
     
     if is_solved:
         verify_node(game.root)
@@ -148,6 +152,7 @@ def evaluate_theorem(
             is_solved = False
         else:
             proof_tree = game.root.serialize()
+            linearized_proof = proof_source
     
     return TheoremResult(
         theorem=theorem,
@@ -155,6 +160,7 @@ def evaluate_theorem(
         error=None,
         proof_tree=proof_tree,
         unsimplified_proof_tree=unsimplified_proof_tree,
+        linearized_proof=linearized_proof,
         num_iterations=game.num_iterations,
     )
 
@@ -447,11 +453,21 @@ def _eval_parallel(
     return results
 
 
-def _write_eval_results_jsonl(jsonl_path: str, results: dict):
-    """Write evaluation results to a JSONL file (internal helper)."""
+def _write_eval_results_jsonl(jsonl_path: str, results: dict, prepend_entries: list[dict] = None):
+    """Write evaluation results to a JSONL file (internal helper).
+    
+    Args:
+        prepend_entries: Optional list of already-converted dict entries to write first
+                        (used by --continue to preserve successful entries from previous run)
+    """
     detailed_results = results.get("detailed_results", [])
     
     with open(jsonl_path, "w") as f:
+        # Write prepended entries first (already in dict format)
+        if prepend_entries:
+            for entry in prepend_entries:
+                f.write(json.dumps(entry) + "\n")
+        
         for item in detailed_results:
             # Handle both dict (from distributed) and TheoremResult (from local) formats
             if hasattr(item, "theorem"):
@@ -460,7 +476,9 @@ def _write_eval_results_jsonl(jsonl_path: str, results: dict):
                     "theorem": item.theorem,
                     "proof": item.proof_tree,
                     "unsimplified_proof": item.unsimplified_proof_tree,
+                    "linearized_proof": item.linearized_proof,
                     "num_iterations": item.num_iterations,
+                    "error": item.error,
                 }
             else:
                 # It's a dict (from distributed_eval)
@@ -468,14 +486,17 @@ def _write_eval_results_jsonl(jsonl_path: str, results: dict):
                     "theorem": item["theorem"],
                     "proof": item["proof_tree"],
                     "unsimplified_proof": item.get("unsimplified_proof_tree"),
+                    "linearized_proof": item.get("linearized_proof"),
                     "num_iterations": item["num_iterations"],
+                    "error": item.get("error"),
                 }
             f.write(json.dumps(entry) + "\n")
     
-    log(f"Saved {len(detailed_results)} eval results to {jsonl_path}", component="Eval")
+    total_count = len(detailed_results) + (len(prepend_entries) if prepend_entries else 0)
+    log(f"Saved {total_count} eval results to {jsonl_path}", component="Eval")
 
 
-def save_eval_results(checkpoint_info: CheckpointInfo, dataset_name: str, results: dict):
+def save_eval_results(checkpoint_info: CheckpointInfo, dataset_name: str, results: dict, prepend_entries: list[dict] = None):
     """
     Save evaluation results to a JSONL file alongside the checkpoint.
     
@@ -486,9 +507,10 @@ def save_eval_results(checkpoint_info: CheckpointInfo, dataset_name: str, result
         checkpoint_info: Information about the checkpoint (directory and step)
         dataset_name: Name of the dataset (e.g., "minif2f", "leanworkbook")
         results: Dict containing 'detailed_results' with evaluation details
+        prepend_entries: Optional entries to write before new results (for --continue mode)
     """
     jsonl_path = checkpoint_info.get_eval_path(dataset_name)
-    _write_eval_results_jsonl(jsonl_path, results)
+    _write_eval_results_jsonl(jsonl_path, results, prepend_entries=prepend_entries)
 
 
 def save_eval_results_to_run_dir(output_dir: str, step: int, dataset_name: str, results: dict):
@@ -510,12 +532,36 @@ def save_eval_results_to_run_dir(output_dir: str, step: int, dataset_name: str, 
     _write_eval_results_jsonl(jsonl_path, results)
 
 
+def load_existing_eval_results(jsonl_path: str) -> tuple[list[dict], list[dict]]:
+    """
+    Load existing evaluation results from a JSONL file.
+    
+    Returns:
+        Tuple of (successful_entries, error_entries) where:
+        - successful_entries: entries with no error (proof may or may not exist)
+        - error_entries: entries with non-null error field
+    """
+    successful = []
+    errors = []
+    
+    with open(jsonl_path, "r") as f:
+        for line in f:
+            entry = json.loads(line.strip())
+            if entry.get("error") is not None:
+                errors.append(entry)
+            else:
+                successful.append(entry)
+    
+    return successful, errors
+
+
 def load_model_for_eval(
     device: torch.device,
     rl_run: Optional[str] = None,
     source: str = "sft",
     model_tag: Optional[str] = None,
     step: Optional[int] = None,
+    seed: int = 0,
 ) -> tuple[TacticModel, CheckpointInfo]:
     """
     Load a model for evaluation.
@@ -530,6 +576,7 @@ def load_model_for_eval(
         source: Source for pretrained checkpoints ("sft" or "base")
         model_tag: Model tag for pretrained checkpoints
         step: Checkpoint step (optional, defaults to latest)
+        seed: Random seed for tactic generation (default: 0)
     
     Returns:
         Tuple of (TacticModel, CheckpointInfo)
@@ -552,8 +599,8 @@ def load_model_for_eval(
         model, tokenizer, meta_data = load_model(source, device, phase="eval", model_tag=model_tag, step=resolved_step)
     
     engine = Engine(model, tokenizer)
-    tactic_model = TacticModel(model, tokenizer, engine, num_samples=6)
-    checkpoint_info = CheckpointInfo(checkpoint_dir=checkpoint_dir, step=resolved_step)
+    tactic_model = TacticModel(model, tokenizer, engine, num_samples=6, seed=seed)
+    checkpoint_info = CheckpointInfo(checkpoint_dir=checkpoint_dir, step=resolved_step, seed=seed)
     
     return tactic_model, checkpoint_info
 
@@ -674,6 +721,7 @@ def get_checkpoint_info_early(
     source: str,
     model_tag: Optional[str],
     step: Optional[int],
+    seed: int = 0,
 ) -> CheckpointInfo:
     """
     Get checkpoint info without loading the model (for early existence checks).
@@ -686,7 +734,7 @@ def get_checkpoint_info_early(
         checkpoint_dir = get_pretrained_checkpoint_dir(source, model_tag)
     
     resolved_step = resolve_step(checkpoint_dir, step)
-    return CheckpointInfo(checkpoint_dir=checkpoint_dir, step=resolved_step)
+    return CheckpointInfo(checkpoint_dir=checkpoint_dir, step=resolved_step, seed=seed)
 
 
 def main():
@@ -701,10 +749,12 @@ def main():
     
     # Evaluation options
     eval_group = parser.add_argument_group("Evaluation settings")
-    eval_group.add_argument("--datasets", type=str, default="minif2f,leanworkbook", help="Comma-separated list of datasets to evaluate (default: minif2f,leanworkbook)")
+    eval_group.add_argument("--datasets", type=str, default="minif2f", help="Comma-separated list of datasets to evaluate (example: minif2f,leanworkbook)")
+    eval_group.add_argument("--split", type=str, default="valid", choices=["valid", "test"], help="Dataset split to evaluate (default: valid)")
     eval_group.add_argument("--max-theorems", type=int, default=None, help="Max theorems to evaluate per dataset")
     eval_group.add_argument("--num-actors", type=int, default=4, help="Number of parallel actors for local mode (default: 4)")
     eval_group.add_argument("--num-simulations", type=int, default=512, help="Number of MCTS simulations per theorem (default: 50)")
+    eval_group.add_argument("--seed", type=int, default=0, help="Random seed for tactic generation (default: 0)")
     
     # Distributed mode
     dist_group = parser.add_argument_group("Distributed mode")
@@ -714,6 +764,7 @@ def main():
     # Output options
     output_group = parser.add_argument_group("Output")
     output_group.add_argument("--force", action="store_true", help="Overwrite existing eval results")
+    output_group.add_argument("--continue", dest="continue_eval", action="store_true", help="Load existing results and retry only theorems that failed with errors")
     
     args = parser.parse_args()
     
@@ -721,12 +772,26 @@ def main():
     if not args.rl_run and not args.model_tag:
         parser.error("Either --rl-run or --model-tag must be specified")
     
+    if args.force and args.continue_eval:
+        parser.error("--force and --continue are mutually exclusive")
+    
     # Parse datasets
     datasets = [d.strip().lower() for d in args.datasets.split(",")]
     valid_datasets = {"minif2f", "leanworkbook"}
     for d in datasets:
         if d not in valid_datasets:
             parser.error(f"Unknown dataset: {d}. Valid options: {valid_datasets}")
+    
+    # Validate split for leanworkbook
+    if "leanworkbook" in datasets and args.split == "test":
+        raise ValueError("leanworkbook does not have a test split. Use --split=valid instead.")
+    
+    # Warn about test split evaluation
+    if args.split == "test":
+        print0("WARNING: Evaluating on TEST split. Results will be saved with '-test' suffix.")
+    
+    # Suffix for saved files based on split
+    split_suffix = "-test" if args.split == "test" else ""
     
     # Check distributed prover mode (using external prover servers)
     distributed = bool(args.infra_file)
@@ -750,22 +815,44 @@ def main():
         source=args.source,
         model_tag=args.model_tag,
         step=args.step,
+        seed=args.seed,
     )
     
     # Check if eval results already exist (only on rank 0, then broadcast decision)
+    # In --continue mode, we load existing results and retry only error theorems
     should_exit = False
+    continue_data = {}  # dataset_name -> (successful_entries, error_theorems)
+    
     if master_process:
         existing_results = []
         for dataset_name in datasets:
-            eval_path = checkpoint_info.get_eval_path(dataset_name)
+            eval_path = checkpoint_info.get_eval_path(dataset_name + split_suffix)
             if os.path.exists(eval_path):
-                existing_results.append(eval_path)
+                existing_results.append((dataset_name, eval_path))
         
-        if existing_results and not args.force:
+        if args.continue_eval:
+            # --continue mode: require existing results
+            if not existing_results:
+                print0("Error: --continue requires existing evaluation results, but none found.")
+                print0(f"Expected files in: {checkpoint_info.checkpoint_dir}")
+                should_exit = True
+            else:
+                # Load existing results and identify error theorems
+                for dataset_name, eval_path in existing_results:
+                    successful, errors = load_existing_eval_results(eval_path)
+                    if not errors:
+                        print0(f"No error entries found in {eval_path}, skipping {dataset_name}")
+                        # Remove from datasets to process
+                        continue_data[dataset_name] = (successful, [])
+                    else:
+                        error_theorems = [e["theorem"] for e in errors]
+                        continue_data[dataset_name] = (successful, error_theorems)
+                        print0(f"Found {len(errors)} error entries to retry in {dataset_name}")
+        elif existing_results and not args.force:
             print0("Evaluation results already exist:")
-            for path in existing_results:
+            for _, path in existing_results:
                 print0(f"  {path}")
-            print0("\nUse --force to overwrite existing results.")
+            print0("\nUse --force to overwrite existing results, or --continue to retry errors.")
             should_exit = True
     
     # Broadcast exit decision to all ranks
@@ -795,21 +882,31 @@ def main():
         source=args.source,
         model_tag=args.model_tag,
         step=args.step,
+        seed=args.seed,
     )
     
     print0(f"Results will be saved to: {checkpoint_info.checkpoint_dir}")
     
     # Load theorems for each dataset
     dataset_theorems = {}
-    if "minif2f" in datasets:
-        dataset_theorems["minif2f"] = minif2f.list_theorems(split="Valid")
-    if "leanworkbook" in datasets:
-        dataset_theorems["leanworkbook"] = leanworkbook.list_theorems(split="val")
-    
-    # Apply max_theorems limit
-    if args.max_theorems:
-        for name in dataset_theorems:
-            dataset_theorems[name] = dataset_theorems[name][:args.max_theorems]
+    if args.continue_eval:
+        # In continue mode, only retry error theorems
+        for dataset_name, (successful, error_theorems) in continue_data.items():
+            if error_theorems:
+                dataset_theorems[dataset_name] = error_theorems
+    else:
+        # Normal mode: load full datasets
+        if "minif2f" in datasets:
+            minif2f_split = "Valid" if args.split == "valid" else "Test"
+            dataset_theorems["minif2f"] = minif2f.list_theorems(split=minif2f_split)
+        if "leanworkbook" in datasets:
+            # leanworkbook only has "val" split (validated above that split != "test")
+            dataset_theorems["leanworkbook"] = leanworkbook.list_theorems(split="val")
+
+        # Apply max_theorems limit
+        if args.max_theorems:
+            for name in dataset_theorems:
+                dataset_theorems[name] = dataset_theorems[name][:args.max_theorems]
     
     def print_results(results, name):
         print0("-" * 80)
@@ -828,7 +925,7 @@ def main():
         detailed = results.get('detailed_results', [])
         if detailed:
             total = len(detailed)
-            thresholds = [8, 16, 32, 64, 128, 256, 512]
+            thresholds = [8, 16, 32, 64, 128, 256, 512, 1024, 2048]
             print0("Success rate by simulation budget:")
             rates = []
             for t in thresholds:
@@ -845,6 +942,7 @@ def main():
         print0("-" * 80)
     
     print0(f"Evaluating with {args.num_simulations} MCTS simulations per theorem")
+    print0(f"Using random seed: {args.seed}")
     if not distributed:
         print0(f"Using {args.num_actors} parallel actor(s)")
     
@@ -881,14 +979,14 @@ def main():
             all_results[dataset_name] = results
             print_results(results, dataset_name)
             
-            # Only save results if evaluation completed successfully
-            # In strict mode (standalone eval), any system error should fail the eval
             if results.get('timed_out') or results.get('invalid'):
-                print0(f"Skipping save for {dataset_name} due to incomplete results")
-            elif results.get('errors', 0) > 0:
-                print0(f"Skipping save for {dataset_name} due to {results['errors']} system errors")
-            else:
-                save_eval_results(checkpoint_info, dataset_name, results)
+                print0(f"WARNING: Evaluation timed out or invalid for {dataset_name}")
+            if results.get('errors', 0) > 0:
+                print0(f"WARNING: Evaluation failed for {dataset_name} due to {results['errors']} system errors")
+
+            # In continue mode, prepend the original successful entries
+            prepend = continue_data[dataset_name][0] if args.continue_eval else None
+            save_eval_results(checkpoint_info, dataset_name + split_suffix, results, prepend_entries=prepend)
     
     compute_cleanup()
     

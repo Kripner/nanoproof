@@ -19,7 +19,26 @@ def list_theorems(split):
     theorems = []
     theorem_lines = []
     in_theorem = False
-    for line in file_path.read_text().split("\n"):
+    text = file_path.read_text()
+    if split == "Test":
+        # These are mistakes in the test file - a proof is already filled in. TODO: submit a pull request
+        text = text.replace("""
+theorem mathd_numbertheory_66 : 194 % 11 = 7 :=
+  rfl
+""",
+"""
+theorem mathd_numbertheory_66 : 194 % 11 = 7 :=
+  sorry
+""")
+        text = text.replace("""
+theorem mathd_algebra_302 : (Complex.I / 2) ^ 2 = -(1 / 4) := by
+  norm_num [div_pow]
+""",
+"""
+theorem mathd_algebra_302 : (Complex.I / 2) ^ 2 = -(1 / 4) := by
+  sorry
+""")
+    for line in text.split("\n"):
         if line.lstrip().startswith("theorem"):
             assert not in_theorem, "minif2f: overlapping theorems"
             in_theorem = True
@@ -81,4 +100,4 @@ if __name__ == "__main__":
             print(theorem)
             print("\n-----------------\n")
     else:
-        raise f"Unknown action {args.action}"
+        raise ValueError(f"Unknown action {args.action}")

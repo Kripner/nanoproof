@@ -112,6 +112,7 @@ class ProofResult:
     theorem: str
     proof_tree: Optional[dict]  # Serialized (simplified) Node tree, None if not proven
     unsimplified_proof_tree: Optional[dict] = None  # Serialized (unsimplified) Node tree, None if not proven
+    linearized_proof: Optional[str] = None  # Human-readable proof source, None if not proven
     error: Optional[str] = None  # Error message, None if no error
     num_iterations: int = 0  # Number of MCTS iterations run (always max when proof is None)
     
@@ -337,6 +338,7 @@ def create_coordinator_app(registry: ProverRegistry, router: InferenceRouter, di
             theorem=data["theorem"],
             proof_tree=data.get("proof_tree"),
             unsimplified_proof_tree=data.get("unsimplified_proof_tree"),
+            linearized_proof=data.get("linearized_proof"),
             error=data.get("error"),
             num_iterations=data.get("num_iterations", 0),
         )
@@ -744,6 +746,7 @@ def distributed_eval(theorems: list[str], dataset_name: str = "eval", no_progres
                         "theorem": r.theorem,
                         "proof_tree": r.proof_tree,
                         "unsimplified_proof_tree": r.unsimplified_proof_tree,
+                        "linearized_proof": r.linearized_proof,
                         "num_iterations": r.num_iterations,
                         "error": r.error,
                     }
