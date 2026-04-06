@@ -3,6 +3,7 @@ Common utilities for nanoproof.
 """
 
 import os
+import json
 import enum
 import time
 import re
@@ -10,6 +11,7 @@ import logging
 import math
 import urllib.request
 import gc
+from datetime import datetime
 from collections import Counter
 from filelock import FileLock
 from typing import Callable, Generic, TypeVar, Self
@@ -76,15 +78,53 @@ setup_default_logging()
 logger = logging.getLogger(__name__)
 
 def get_base_dir():
-    # co-locate nanochat intermediates with other cached data in ~/.cache (by default)
-    if os.environ.get("NANOPROOF_BASE_DIR"):
-        nanochat_dir = os.environ.get("NANOPROOF_BASE_DIR")
+    base = os.environ.get("NANOPROOF_HOME") or os.path.join(os.path.expanduser("~"), ".nanoproof")
+    os.makedirs(base, exist_ok=True)
+    return base
+
+def create_run_dirs(stage: str, run: str, args_dict: dict | None = None):
+    """Create log and model directories for a training run.
+
+    Must be called after compute_init(). Only the master process creates
+    directories; other ranks receive the paths via broadcast.
+
+    Args:
+        stage: one of "pretrain", "midtrain", "sft", "rl"
+        run: the --run name (used in the directory name)
+        args_dict: if provided, dumped as args.json in the log directory
+
+    Returns:
+        (log_dir, model_dir) – absolute paths
+    """
+    import torch.distributed as dist
+
+    ddp = is_ddp_initialized()
+    master = int(os.environ.get("RANK", 0)) == 0
+
+    if master:
+        base_dir = get_base_dir()
+        timestamp = datetime.now().strftime("%H-%M-%S_%d-%m-%y")
+        run_dirname = f"{timestamp}_{run}"
+        log_dir = os.path.join(base_dir, "logs", stage, run_dirname)
+        model_dir = os.path.join(base_dir, "models", stage, run_dirname)
+        os.makedirs(log_dir, exist_ok=True)
+        os.makedirs(model_dir, exist_ok=True)
+        if args_dict is not None:
+            with open(os.path.join(log_dir, "args.json"), "w") as f:
+                json.dump(args_dict, f, indent=2)
+        logger.info(f"Log directory: {log_dir}")
+        logger.info(f"Model directory: {model_dir}")
     else:
-        home_dir = os.path.expanduser("~")
-        cache_dir = os.path.join(home_dir, ".cache")
-        nanochat_dir = os.path.join(cache_dir, "nanoproof")
-    os.makedirs(nanochat_dir, exist_ok=True)
-    return nanochat_dir
+        log_dir = None
+        model_dir = None
+
+    if ddp:
+        paths = [log_dir, model_dir]
+        dist.broadcast_object_list(paths, src=0)
+        log_dir, model_dir = paths
+
+    return log_dir, model_dir
+
 
 def download_file_with_lock(url, filename, postprocess_fn=None):
     """

@@ -1,7 +1,7 @@
 import torch
 
-from nanoproof.common import compute_init, compute_cleanup, get_base_dir, print0, DummyWandb, autodetect_device_type
-from nanoproof.checkpoints import load_model, load_rl_model
+from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, autodetect_device_type
+from nanoproof.checkpoints import load_model
 from nanoproof.engine import Engine
 from nanoproof.inference import TacticModel
 
@@ -9,14 +9,8 @@ MODE = "raw_engine"  # raw_engine | tactic_model
 generate = None
 predict_value = None
 
-model_tag = "d26" # model tag to load the model from
-
-step = 903
-source = "sft" # which checkpoint to load the model from
-
-# run_name = "26-01-21_18-37-value_i03guzht"
-# step = 2000
-# source = "rl" # which checkpoint to load the model from
+model_path = "sft/FIXME"  # model path (relative to models/ or absolute)
+step = None  # None = latest
 
 if MODE == "raw_engine":
     device_type = "" # cuda|cpu|mps (empty => autodetect)
@@ -24,10 +18,7 @@ if MODE == "raw_engine":
     device_type = autodetect_device_type() if device_type == "" else device_type
     device = torch.device(device_type)
 
-    if source == "sft":
-        model, tokenizer, meta = load_model(source, device, phase="eval", model_tag=model_tag, step=step)
-    elif source == "rl":
-        model, tokenizer, meta = load_rl_model(run_name, device, phase="eval", step=step)
+    model, tokenizer, meta = load_model(model_path, device, phase="eval", step=step)
     engine = Engine(model, tokenizer)
     value_token_ids = tokenizer.get_value_token_ids()
     value_bins = tokenizer.get_value_bins()
@@ -53,8 +44,7 @@ if MODE == "raw_engine":
     predict_value = predict_value_
 
 elif MODE == "tactic_model":
-    assert source == "sft", "tactic_model mode only supports sft source for now"
-    tactic_model = TacticModel.create(source=source, model_tag=model_tag, step=step)
+    tactic_model = TacticModel.create(model_path=model_path, step=step)
     _cached_value = None  # Cache value from tactic generation
 
     def generate_(inp_) -> list[str]:

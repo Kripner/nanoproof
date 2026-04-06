@@ -19,7 +19,7 @@ import wandb
 import torch
 import torch.distributed as dist
 
-from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type, is_ddp_initialized
+from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type, is_ddp_initialized, create_run_dirs
 from nanoproof.tokenizer import get_token_bytes
 from nanoproof.checkpoints import save_checkpoint
 from nanoproof.loss_eval import evaluate_bpb
@@ -34,8 +34,8 @@ parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('d
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 # Model source
-parser.add_argument("--model-tag", type=str, default="d32", help="model tag to load the model from")
-parser.add_argument("--step", type=int, default=None, help="step to load the model from")
+parser.add_argument("--model-path", type=str, required=True, help="model path to load from (relative to models/ or absolute)")
+parser.add_argument("--step", type=int, default=None, help="step to load the model from (default: latest)")
 # Training
 parser.add_argument("--dtype", type=str, default="bfloat16", help="data type for training")
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
@@ -67,12 +67,15 @@ master_process = ddp_rank == 0
 synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
 get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
 
+# Run directories
+log_dir, model_dir = create_run_dirs("midtrain", args.run, args_dict=user_config)
+
 # wandb logging init
 use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-mid", name=args.run, config=user_config)
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-mid", name=args.run, config={**user_config, "log_dir": log_dir, "model_dir": model_dir})
 
 # Load the model and tokenizer
-model, tokenizer, meta = load_model("base", device, phase="train", model_tag=args.model_tag, step=args.step)
+model, tokenizer, meta = load_model(args.model_path, device, phase="train", step=args.step)
 pretrain_batch_size = meta.get("device_batch_size", None)
 if pretrain_batch_size is not None and args.device_batch_size > pretrain_batch_size:
     print0(f"FOOTGUN WARNING: base model training used device_batch_size {pretrain_batch_size}, did you pass in a good --device-batch-size to this script?")
@@ -145,10 +148,8 @@ while True:
 
     # save checkpoint at the end of the run (only on master process)
     if master_process and last_step and not args.dry_run:
-        output_dirname = f"d{depth}" # e.g. d12
-        checkpoint_dir = os.path.join(base_dir, "mid_checkpoints", output_dirname)
         save_checkpoint(
-            checkpoint_dir,
+            model_dir,
             step,
             orig_model.state_dict(),
             optimizer.state_dict(),

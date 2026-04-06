@@ -462,7 +462,7 @@ def run_actor(
 
 def _main():
     config = Config()
-    model = TacticModel.create(num_samples=config.num_sampled_tactics)
+    model = TacticModel.create(num_samples=config.num_sampled_tactics, model_path="sft/FIXME")
     replay_buffer = ReplayBuffer(config)
     theorems_sampler = TheoremsSampler()
     

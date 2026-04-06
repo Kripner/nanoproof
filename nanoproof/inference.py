@@ -169,11 +169,11 @@ class TacticModel:
         pass
 
     @classmethod
-    def create(cls, num_samples: int = 6, source: str = "sft", model_tag: str | None = None, step: int | None = None) -> Self:
-        assert model_tag is not None, "model_tag is required in TacticModel.create"
+    def create(cls, num_samples: int = 6, model_path: str | None = None, step: int | None = None) -> Self:
+        assert model_path is not None, "model_path is required in TacticModel.create"
         device = torch.device("cuda")
 
-        model, tokenizer, _ = load_model(source, device, phase="eval", model_tag=model_tag, step=step)
+        model, tokenizer, _ = load_model(model_path, device, phase="eval", step=step)
         engine = Engine(model, tokenizer)
         return cls(model, tokenizer, engine, num_samples=num_samples)
 
@@ -562,13 +562,12 @@ def main():
     parser.add_argument("--num-samples", type=int, default=6, help="Tactics to sample per state")
     parser.add_argument("--batch-timeout", type=float, default=0.1, help="Timeout for batching (seconds)")
     parser.add_argument("--max-batch-tokens", type=int, default=32000, help="Max total tokens per batch (controls memory)")
-    parser.add_argument("--model-source", default="sft", help="Model source (sft, pretrain, etc)")
-    parser.add_argument("--model-tag", default="d26", help="Model tag")
+    parser.add_argument("--model-path", required=True, help="Model path (relative to models/ or absolute)")
     args = parser.parse_args()
 
     print(f"[Inference] Loading model...")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, tokenizer, _ = load_model(args.model_source, device, phase="eval", model_tag=args.model_tag)
+    model, tokenizer, _ = load_model(args.model_path, device, phase="eval")
     engine = Engine(model, tokenizer)
     tactic_model = TacticModel(model, tokenizer, engine, num_samples=args.num_samples)
     blocking_model = BlockingTacticModel(

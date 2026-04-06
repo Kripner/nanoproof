@@ -27,7 +27,7 @@ import torch.distributed as dist
 
 from nanoproof.model import Transformer, NetworkConfig, Linear
 from nanoproof.data.nemotron_dataloader import tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
-from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
+from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized, create_run_dirs
 from nanoproof.tokenizer import get_tokenizer, get_token_bytes
 from nanoproof.checkpoints import save_checkpoint, load_checkpoint
 from nanoproof.engine import Engine
@@ -66,14 +66,13 @@ parser.add_argument("--scalar-lr", type=float, default=0.5, help="learning rate 
 parser.add_argument("--warmup-steps", type=int, default=40, help="number of steps for LR warmup")
 parser.add_argument("--warmdown-ratio", type=float, default=0.65, help="ratio of iterations for LR warmdown")
 parser.add_argument("--final-lr-frac", type=float, default=0.05, help="final LR as fraction of initial LR")
-parser.add_argument("--resume-from-step", type=int, default=-1, help="resume training from this step (-1 = disable)")
+parser.add_argument("--resume-from", type=str, default=None, help="model path to resume from (relative to models/ or absolute)")
+parser.add_argument("--resume-from-step", type=int, default=-1, help="resume training from this step (-1 = latest)")
 # Evaluation
 parser.add_argument("--eval-every", type=int, default=250, help="evaluate val bpb every N steps (-1 = disable)")
 parser.add_argument("--eval-tokens", type=int, default=80*524288, help="number of tokens to evaluate val loss on")
 parser.add_argument("--sample-every", type=int, default=2000, help="sample from model every N steps (-1 = disable)")
 parser.add_argument("--save-every", type=int, default=5000, help="save checkpoints every N steps (-1 = only at end)")
-# Output
-parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
 args = parser.parse_args()
 user_config = vars(args).copy()
 # -----------------------------------------------------------------------------
@@ -92,9 +91,12 @@ else:
     gpu_peak_flops = float('inf')
 print0(f"COMPUTE_DTYPE: {COMPUTE_DTYPE} ({COMPUTE_DTYPE_REASON})")
 
+# Run directories
+log_dir, model_dir = create_run_dirs("pretrain", args.run, args_dict=user_config)
+
 # wandb logging init
 use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof", name=args.run, config=user_config)
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof", name=args.run, config={**user_config, "log_dir": log_dir, "model_dir": model_dir})
 
 # Tokenizer
 tokenizer = get_tokenizer()
@@ -127,14 +129,15 @@ print0(f"Model config:\n{json.dumps(model_config_kwargs, indent=2)}")
 model.to_empty(device=device)
 model.init_weights()
 
-# If resuming, overwrite model parameters
-base_dir = get_base_dir()
-output_dirname = args.model_tag if args.model_tag else f"d{args.depth}"
-checkpoint_dir = os.path.join(base_dir, "base_checkpoints", output_dirname)
-resuming = args.resume_from_step != -1
+# If resuming, overwrite model parameters from the specified checkpoint directory
+resuming = args.resume_from is not None
+resume_step = -1
 if resuming:
-    print0(f"Resuming optimization from step {args.resume_from_step}")
-    model_data, optimizer_data, meta_data = load_checkpoint(checkpoint_dir, args.resume_from_step, device, load_optimizer=True, rank=ddp_rank)
+    from nanoproof.checkpoints import resolve_model_dir, resolve_step
+    resume_checkpoint_dir = resolve_model_dir(args.resume_from)
+    resume_step = resolve_step(resume_checkpoint_dir, resume_step if resume_step != -1 else None)
+    print0(f"Resuming optimization from step {resume_step} (from {resume_checkpoint_dir})")
+    model_data, optimizer_data, meta_data = load_checkpoint(resume_checkpoint_dir, resume_step, device, load_optimizer=True, rank=ddp_rank)
     model.load_state_dict(model_data, strict=True, assign=True)
     del model_data
 
@@ -375,9 +378,9 @@ while True:
         model.train()
 
     # Save checkpoint
-    if last_step or (step > 0 and step != args.resume_from_step and args.save_every > 0 and step % args.save_every == 0):
+    if last_step or (step > 0 and step != resume_step and args.save_every > 0 and step % args.save_every == 0):
         save_checkpoint(
-            checkpoint_dir, step,
+            model_dir, step,
             orig_model.state_dict(),
             optimizer.state_dict(),
             {
@@ -457,7 +460,7 @@ while True:
         })
 
     # State update
-    first_step_of_run = (step == 0) or (resuming and step == args.resume_from_step)
+    first_step_of_run = (step == 0) or (resuming and step == resume_step)
     step += 1
 
     # GC management

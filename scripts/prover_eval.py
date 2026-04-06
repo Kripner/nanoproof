@@ -20,7 +20,7 @@ from nanoproof.data import minif2f
 from nanoproof.data import leanworkbook
 from nanoproof.search import run_mcts, Config, Game, Node, prune_redundant_nodes, verify_node, compute_value_target
 from nanoproof.inference import TacticModel, BlockingTacticModel
-from nanoproof.checkpoints import load_model, load_rl_model, get_rl_checkpoint_dir, get_pretrained_checkpoint_dir, resolve_step
+from nanoproof.checkpoints import load_model, resolve_model_dir, resolve_step
 from nanoproof.cli import log
 
 # TODO: during verification, maybe set 'set_option maxHeartbeats 0\nset_option maxRecDepth 100000'
@@ -557,51 +557,33 @@ def load_existing_eval_results(jsonl_path: str) -> tuple[list[dict], list[dict]]
 
 def load_model_for_eval(
     device: torch.device,
-    rl_run: Optional[str] = None,
-    source: str = "sft",
-    model_tag: Optional[str] = None,
+    model_path: str,
     step: Optional[int] = None,
     seed: int = 0,
 ) -> tuple[TacticModel, CheckpointInfo]:
     """
     Load a model for evaluation.
-    
-    Supports two modes:
-    1. RL checkpoint: --rl-run <run_name> [--step <step>]
-    2. Pretrained checkpoint: --source <sft|base> --model-tag <tag> [--step <step>]
-    
+
     Args:
         device: Device to load the model on
-        rl_run: Name of RL run to load from (e.g., "25-01-15_10-30-my-run")
-        source: Source for pretrained checkpoints ("sft" or "base")
-        model_tag: Model tag for pretrained checkpoints
+        model_path: Model path (relative to models/ or absolute)
         step: Checkpoint step (optional, defaults to latest)
         seed: Random seed for tactic generation (default: 0)
-    
+
     Returns:
         Tuple of (TacticModel, CheckpointInfo)
     """
     from nanoproof.engine import Engine
-    
-    if rl_run:
-        # Load from RL checkpoint
-        checkpoint_dir = get_rl_checkpoint_dir(rl_run)
-        resolved_step = resolve_step(checkpoint_dir, step)
-        print0(f"Loading RL checkpoint: run={rl_run}, step={resolved_step}")
-        model, tokenizer, meta_data = load_rl_model(rl_run, device, phase="eval", step=resolved_step)
-    else:
-        # Load from pretrained checkpoint
-        if model_tag is None:
-            raise ValueError("--model-tag is required when not using --rl-run")
-        checkpoint_dir = get_pretrained_checkpoint_dir(source, model_tag)
-        resolved_step = resolve_step(checkpoint_dir, step)
-        print0(f"Loading pretrained checkpoint: source={source}, model_tag={model_tag}, step={resolved_step}")
-        model, tokenizer, meta_data = load_model(source, device, phase="eval", model_tag=model_tag, step=resolved_step)
-    
+
+    checkpoint_dir = resolve_model_dir(model_path)
+    resolved_step = resolve_step(checkpoint_dir, step)
+    print0(f"Loading checkpoint: {checkpoint_dir}, step={resolved_step}")
+    model, tokenizer, meta_data = load_model(model_path, device, phase="eval", step=resolved_step)
+
     engine = Engine(model, tokenizer)
     tactic_model = TacticModel(model, tokenizer, engine, num_samples=6, seed=seed)
     checkpoint_info = CheckpointInfo(checkpoint_dir=checkpoint_dir, step=resolved_step, seed=seed)
-    
+
     return tactic_model, checkpoint_info
 
 
@@ -717,22 +699,14 @@ def run_distributed_eval_on_dataset(
 
 
 def get_checkpoint_info_early(
-    rl_run: Optional[str],
-    source: str,
-    model_tag: Optional[str],
+    model_path: str,
     step: Optional[int],
     seed: int = 0,
 ) -> CheckpointInfo:
     """
     Get checkpoint info without loading the model (for early existence checks).
     """
-    if rl_run:
-        checkpoint_dir = get_rl_checkpoint_dir(rl_run)
-    else:
-        if model_tag is None:
-            raise ValueError("--model-tag is required when not using --rl-run")
-        checkpoint_dir = get_pretrained_checkpoint_dir(source, model_tag)
-    
+    checkpoint_dir = resolve_model_dir(model_path)
     resolved_step = resolve_step(checkpoint_dir, step)
     return CheckpointInfo(checkpoint_dir=checkpoint_dir, step=resolved_step, seed=seed)
 
@@ -740,11 +714,9 @@ def get_checkpoint_info_early(
 def main():
     parser = argparse.ArgumentParser(description="Evaluate a prover model on theorem proving benchmarks")
     
-    # Model loading options (mutually exclusive groups)
+    # Model loading options
     model_group = parser.add_argument_group("Model selection")
-    model_group.add_argument("--rl-run", type=str, default=None, help="Load from RL checkpoint (run name, e.g., '25-01-15_10-30-my-run')")
-    model_group.add_argument("--source", type=str, default="sft", choices=["sft", "base"], help="Source for pretrained checkpoints (default: sft)")
-    model_group.add_argument("--model-tag", type=str, default="d26", help="Model tag for pretrained checkpoints (e.g., 'd26')")
+    model_group.add_argument("--model-path", type=str, required=True, help="Model path (relative to models/ or absolute, e.g., 'sft/14-45-26_06-04-26_run')")
     model_group.add_argument("--step", type=int, default=None, help="Checkpoint step (default: latest)")
     
     # Evaluation options
@@ -767,10 +739,6 @@ def main():
     output_group.add_argument("--continue", dest="continue_eval", action="store_true", help="Load existing results and retry only theorems that failed with errors")
     
     args = parser.parse_args()
-    
-    # Validate arguments
-    if not args.rl_run and not args.model_tag:
-        parser.error("Either --rl-run or --model-tag must be specified")
     
     if args.force and args.continue_eval:
         parser.error("--force and --continue are mutually exclusive")
@@ -811,9 +779,7 @@ def main():
     
     # Get checkpoint info early to check for existing results before loading model
     checkpoint_info = get_checkpoint_info_early(
-        rl_run=args.rl_run,
-        source=args.source,
-        model_tag=args.model_tag,
+        model_path=args.model_path,
         step=args.step,
         seed=args.seed,
     )
@@ -878,9 +844,7 @@ def main():
     # Load model
     tactic_model, checkpoint_info = load_model_for_eval(
         device=device,
-        rl_run=args.rl_run,
-        source=args.source,
-        model_tag=args.model_tag,
+        model_path=args.model_path,
         step=args.step,
         seed=args.seed,
     )

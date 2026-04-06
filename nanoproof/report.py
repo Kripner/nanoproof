@@ -78,7 +78,7 @@ def get_system_info():
 
     # User and environment
     info['user'] = os.environ.get('USER', 'unknown')
-    info['nanoproof_base_dir'] = os.environ.get('NANOPROOF_BASE_DIR', 'out')
+    info['nanoproof_home'] = os.environ.get('NANOPROOF_HOME', '~/.nanoproof')
     info['working_dir'] = os.getcwd()
 
     return info

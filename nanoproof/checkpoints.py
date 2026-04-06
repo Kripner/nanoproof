@@ -113,24 +113,18 @@ def find_last_step(checkpoint_dir):
 # -----------------------------------------------------------------------------
 # Checkpoint path resolution
 
-_SOURCE_TO_DIR = {
-    "base": "base_checkpoints",
-    "mid": "mid_checkpoints",
-    "sft": "sft_checkpoints",
-    "rl": "rl_checkpoints",
-}
 
+def resolve_model_dir(model_path: str) -> str:
+    """Resolve a model path to an absolute checkpoint directory.
 
-def get_rl_checkpoint_dir(run_name: str) -> str:
-    """Get the checkpoint directory for an RL run."""
-    base_dir = get_base_dir()
-    return os.path.join(base_dir, "rl", run_name, "checkpoints")
-
-
-def get_pretrained_checkpoint_dir(source: str, model_tag: str) -> str:
-    """Get the checkpoint directory for a pretrained model."""
-    base_dir = get_base_dir()
-    return os.path.join(base_dir, _SOURCE_TO_DIR[source], model_tag)
+    If *model_path* is absolute, it is returned as-is.
+    Otherwise it is resolved relative to ``{base_dir}/models/``,
+    e.g. ``"pretrain/14-45-26_06-04-26_run"`` →
+    ``~/.nanoproof/models/pretrain/14-45-26_06-04-26_run``.
+    """
+    if os.path.isabs(model_path):
+        return model_path
+    return os.path.join(get_base_dir(), "models", model_path)
 
 
 def resolve_step(checkpoint_dir: str, step: int | None) -> int:
@@ -143,26 +137,16 @@ def resolve_step(checkpoint_dir: str, step: int | None) -> int:
 # -----------------------------------------------------------------------------
 # Model loading convenience functions
 
-def _load_from_checkpoint_dir(checkpoint_dir: str, device, phase: str, step: int | None = None):
-    """Load a model from a checkpoint directory."""
+
+def load_model(model_path: str, device, phase: str, step: int | None = None):
+    """Load a model from a checkpoint directory.
+
+    *model_path* is resolved via :func:`resolve_model_dir`:
+    absolute paths are used as-is; relative paths (e.g.
+    ``"pretrain/14-45-26_06-04-26_run"``) are resolved under
+    ``{NANOPROOF_HOME}/models/``.
+    """
+    checkpoint_dir = resolve_model_dir(model_path)
     step = resolve_step(checkpoint_dir, step)
     log0(f"Loading model from {checkpoint_dir} with step {step}")
     return build_model(checkpoint_dir, step, device, phase)
-
-
-def load_rl_model(run_name: str, device, phase: str, step: int | None = None):
-    """Load a model from an RL training run."""
-    checkpoint_dir = get_rl_checkpoint_dir(run_name)
-    return _load_from_checkpoint_dir(checkpoint_dir, device, phase, step)
-
-
-def load_model(source: str, device, phase: str, model_tag: str, step: int | None = None):
-    """Load a pretrained model (base/mid/sft/rl checkpoints)."""
-    checkpoint_dir = get_pretrained_checkpoint_dir(source, model_tag)
-    return _load_from_checkpoint_dir(checkpoint_dir, device, phase, step)
-
-
-def load_model_from_dir(checkpoints_dir, device, phase, model_tag, step=None):
-    """Legacy function - load model from a custom checkpoints directory."""
-    checkpoint_dir = os.path.join(checkpoints_dir, model_tag)
-    return _load_from_checkpoint_dir(checkpoint_dir, device, phase, step)

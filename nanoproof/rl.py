@@ -1,6 +1,5 @@
 import atexit
 import os
-from datetime import datetime
 import json
 import sys
 import argparse
@@ -15,7 +14,7 @@ import torch.distributed as dist
 import leantree.augmentations
 from leantree.core.lean import LeanGoal
 
-from nanoproof.common import compute_init, compute_cleanup, get_base_dir, DummyWandb, autodetect_device_type, SimpleTimer, flush, active_barrier_master, active_barrier_wait
+from nanoproof.common import compute_init, compute_cleanup, get_base_dir, DummyWandb, autodetect_device_type, SimpleTimer, flush, active_barrier_master, active_barrier_wait, create_run_dirs
 from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
 from nanoproof.data.leantree import iter_data
@@ -48,8 +47,8 @@ from nanoproof.data.leantree_dataloader import sft_data_generator
 parser = argparse.ArgumentParser(description="RL training for nanoproof")
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb)")
 parser.add_argument("--seed", type=int, default=0)
-parser.add_argument("--model-tag", type=str, default="d26")
-parser.add_argument("--model-step", type=int, default=903)
+parser.add_argument("--model-path", type=str, required=True, help="model path to load from (relative to models/ or absolute)")
+parser.add_argument("--model-step", type=int, default=None, help="step to load from (default: latest)")
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 parser.add_argument("--device-batch-size", type=int, default=8)
 parser.add_argument("--infra-file", type=str, default="infra-ms.toml", help="path to infra.toml (empty = local mode)")
@@ -83,7 +82,7 @@ user_config = vars(args).copy()
 # Backward-compatible aliases for the rest of the file
 run = args.run
 seed = args.seed
-model_tag = args.model_tag
+model_path = args.model_path
 model_step = args.model_step
 device_type = args.device_type
 device_batch_size = args.device_batch_size
@@ -154,29 +153,10 @@ set_ddp_info(is_master=master_process, rank=ddp_rank)
 # Model handles dtype internally via Linear class, no autocast needed
 
 # Output directory init
-
-if master_process:
-    base_dir = get_base_dir()
-    timestamp = datetime.now().strftime("%y-%m-%d_%H-%M")
-    output_dirname = f"{timestamp}-{run}"
-    output_dir = os.path.join(base_dir, "rl", output_dirname)
-    if os.path.exists(output_dir):
-        log(f"Error: Output directory {output_dir} already exists", component="Main")
-        if ddp:
-            dist.destroy_process_group()
-        sys.exit(1)
-    os.makedirs(output_dir)
-    log(f"Output directory: {output_dir}", component="Main")
-else:
-    output_dir = None
-
-if ddp:
-    output_dir_list = [output_dir]
-    dist.broadcast_object_list(output_dir_list, src=0)
-    output_dir = output_dir_list[0]
-
-# Add output_dir to config for wandb logging
-user_config["output_dir"] = output_dir
+log_dir, model_dir = create_run_dirs("rl", run, args_dict=user_config)
+output_dir = log_dir  # RL logs, replay buffers, eval results go in log_dir
+user_config["log_dir"] = log_dir
+user_config["model_dir"] = model_dir
 
 # Configure file-based logging (only on master process to avoid duplicate writes)
 if master_process:
@@ -190,7 +170,7 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-r
 # In distributed mode, we use BlockingTacticModel for inference servers (started later)
 # In local mode, we use BlockingTacticModel for parallel actors
 log0(f"Distributed mode: {distributed}", component="Config")
-inner_tactic_model = TacticModel.create(num_samples=num_sampled_tactics, model_tag=model_tag, step=model_step)
+inner_tactic_model = TacticModel.create(num_samples=num_sampled_tactics, model_path=model_path, step=model_step)
 if distributed:
     # In distributed mode, we don't need BlockingTacticModel here - 
     # inference servers are started later with their own BlockingTacticModel
@@ -547,7 +527,6 @@ while True:
                         f.write(json.dumps({"context": context, "tactic": tactic, "value_target": value_target}) + "\n")
 
     if step % save_every == 0 and step > 0 and master_process:
-        checkpoint_dir = os.path.join(output_dir, "checkpoints")
         model_config_kwargs = model.config.__dict__  # slightly naughty, abusing the simplicity of GPTConfig, TODO nicer
         checkpoint_meta = {
             "step": step,
@@ -558,7 +537,7 @@ while True:
         if leanworkbook_results:
             checkpoint_meta["leanworkbook_val"] = leanworkbook_results['success_rate']
         save_checkpoint(
-            checkpoint_dir,
+            model_dir,
             step,
             model.state_dict(),
             optimizer.state_dict(),  # optimizer state

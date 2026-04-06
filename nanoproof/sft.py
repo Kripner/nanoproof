@@ -20,7 +20,7 @@ import torch
 import torch.distributed as dist
 import leantree.augmentations
 
-from nanoproof.common import compute_init, compute_cleanup, get_base_dir, print0, DummyWandb, autodetect_device_type
+from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, autodetect_device_type, create_run_dirs
 from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
 from nanoproof.data.leantree import iter_data
@@ -35,10 +35,9 @@ parser = argparse.ArgumentParser(description="Finetune a base model to be a prov
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
 parser.add_argument("--seed", type=int, default=0, help="random seed")
 # Model source
-parser.add_argument("--source", type=str, default="mid", help="base|mid, which checkpoint to load from")
-parser.add_argument("--model-tag", type=str, default="d26", help="model tag to load the model from")
-parser.add_argument("--step", type=int, default=None, help="step to load the model from")
-parser.add_argument("--resume-from", type=str, default=None, help="step to resume from (None = don't resume, int = specific step, 'latest' = auto-detect)")
+parser.add_argument("--model-path", type=str, required=True, help="model path to load from (relative to models/ or absolute)")
+parser.add_argument("--step", type=int, default=None, help="step to load the model from (default: latest)")
+parser.add_argument("--resume-from", type=str, default=None, help="model path to resume SFT from (overrides --model-path)")
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 parser.add_argument("--dtype", type=str, default="bfloat16", help="data type for training")
@@ -68,20 +67,22 @@ device_type = autodetect_device_type() if args.device_type == "" else args.devic
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 master_process = ddp_rank == 0
 
+# Run directories
+log_dir, model_dir = create_run_dirs("sft", args.run, args_dict=user_config)
+
 # wandb logging init
 use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-sft", name=args.run, config=user_config, save_code=True)
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-sft", name=args.run, config={**user_config, "log_dir": log_dir, "model_dir": model_dir}, save_code=True)
 
 # Load the model and tokenizer
 if args.resume_from is not None:
     # Resume from an SFT checkpoint
-    resume_step = args.resume_from if args.resume_from != "latest" else None
-    model, tokenizer, meta = load_model("sft", device, phase="train", model_tag=args.model_tag, step=resume_step)
+    model, tokenizer, meta = load_model(args.resume_from, device, phase="train")
     start_step = meta.get("step", 0)
     print0(f"Resuming from SFT checkpoint at step {start_step}")
 else:
     # Start fresh from base/mid checkpoint
-    model, tokenizer, meta = load_model(args.source, device, phase="train", model_tag=args.model_tag, step=args.step)
+    model, tokenizer, meta = load_model(args.model_path, device, phase="train", step=args.step)
     start_step = 0
 orig_model = model # original, uncompiled model
 # model = torch.compile(model, dynamic=True) # doesn't work super well because of variable lengths of inputs
@@ -337,13 +338,9 @@ hx0 : P x0
 
 # Save the model at the end of the run
 if master_process:
-    base_dir = get_base_dir()
-    depth = model.config.n_layer
-    model_tag = f"d{depth}" # base the model tag on the depth of the base model
-    checkpoint_dir = os.path.join(base_dir, "sft_checkpoints", model_tag)
     model_config_kwargs = model.config.__dict__ # slightly naughty, abusing the simplicity of GPTConfig, TODO nicer
     save_checkpoint(
-        checkpoint_dir,
+        model_dir,
         step,
         model.state_dict(),
         None, # note: we don't bother to save the optimizer state
@@ -353,7 +350,7 @@ if master_process:
             "model_config": model_config_kwargs,
         }
     )
-    print(f"Saved model checkpoint to {checkpoint_dir}")
+    print(f"Saved model checkpoint to {model_dir}")
 
 # Log to report
 from nanoproof.report import get_report
