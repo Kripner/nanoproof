@@ -2,22 +2,22 @@
 Finetune a base model to be a prover model.
 Run on one GPU e.g. for debugging:
 
-python -m scripts.sft
+python -m nanoproof.sft
 
 Or torchrun for training:
 
-torchrun --standalone --nproc_per_node=8 -m scripts.sft
+torchrun --standalone --nproc_per_node=8 -m nanoproof.sft
 """
 
 import os
 import random
+import argparse
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import wandb
 import torch
 import torch.distributed as dist
-from contextlib import nullcontext
 import leantree.augmentations
 
 from nanoproof.common import compute_init, compute_cleanup, get_base_dir, print0, DummyWandb, autodetect_device_type
@@ -29,61 +29,59 @@ from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
 
 
 # -----------------------------------------------------------------------------
-# SFT Hyperparameters
-run = "dummy" # wandb run name default ("dummy" is special - we won't log to wandb)
-seed = 0
-# input model options
-source = "mid" # base|mid , which checkpoint to load the model from (base model or midtrained model)
-model_tag = "d26" # model tag to load the model from (base model or midtrained model)
-step = None # step to load the model from (base model or midtrained model)
-resume_from = None # step to resume from (None = don't resume, int = specific step, "latest" = auto-detect latest)
-# compute/precision
-device_type = "" # cuda|cpu|mps (empty => autodetect)
-dtype = "bfloat16"
-device_batch_size = 8 # (maybe) max to avoid OOM (on A100 40GB)
-# optimization
-num_epochs = 5
-num_iterations = -1 # override number of iterations (-1 = disable, use num_epochs to derive it)
-target_examples_per_step = 512
-unembedding_lr = 0.004
-embedding_lr = 0.2
-matrix_lr = 0.02
-weight_decay = 0.0
-init_lr_frac = 0.02
-# evaluation and logging there of
-eval_every = 100
-eval_steps = 200
-sample_every = 100
-eval_metrics_max_problems = 1024
-# loss weighting
-value_weight = 0.01  # weight for value (critic) samples relative to policy samples
-# now allow CLI to override the settings via the configurator lol
-config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
-exec(open(os.path.join('nanoproof', 'configurator.py')).read()) # overrides from command line or config file
-user_config = {k: globals()[k] for k in config_keys} # possibly useful for logging
+# CLI arguments
+parser = argparse.ArgumentParser(description="Finetune a base model to be a prover model")
+# Logging
+parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
+parser.add_argument("--seed", type=int, default=0, help="random seed")
+# Model source
+parser.add_argument("--source", type=str, default="mid", help="base|mid, which checkpoint to load from")
+parser.add_argument("--model-tag", type=str, default="d26", help="model tag to load the model from")
+parser.add_argument("--step", type=int, default=None, help="step to load the model from")
+parser.add_argument("--resume-from", type=str, default=None, help="step to resume from (None = don't resume, int = specific step, 'latest' = auto-detect)")
+# Runtime
+parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
+parser.add_argument("--dtype", type=str, default="bfloat16", help="data type for training")
+parser.add_argument("--device-batch-size", type=int, default=8, help="per-device batch size")
+# Optimization
+parser.add_argument("--num-epochs", type=int, default=5, help="number of training epochs")
+parser.add_argument("--num-iterations", type=int, default=-1, help="override number of iterations (-1 = use num_epochs)")
+parser.add_argument("--target-examples-per-step", type=int, default=512, help="target examples per optimization step")
+parser.add_argument("--unembedding-lr", type=float, default=0.004, help="learning rate for unembedding parameters")
+parser.add_argument("--embedding-lr", type=float, default=0.2, help="learning rate for embedding parameters")
+parser.add_argument("--matrix-lr", type=float, default=0.02, help="learning rate for matrix parameters (Muon)")
+parser.add_argument("--weight-decay", type=float, default=0.0, help="weight decay")
+parser.add_argument("--init-lr-frac", type=float, default=0.02, help="initial learning rate fraction")
+# Evaluation
+parser.add_argument("--eval-every", type=int, default=100, help="evaluate every N steps")
+parser.add_argument("--eval-steps", type=int, default=200, help="number of eval steps")
+parser.add_argument("--sample-every", type=int, default=100, help="sample from model every N steps")
+parser.add_argument("--eval-metrics-max-problems", type=int, default=1024, help="max problems for eval metrics")
+# Loss weighting
+parser.add_argument("--value-weight", type=float, default=0.01, help="weight for value (critic) samples relative to policy samples")
+args = parser.parse_args()
+user_config = vars(args).copy()
 # -----------------------------------------------------------------------------
 
 # Compute init
-device_type = autodetect_device_type() if device_type == "" else device_type
+device_type = autodetect_device_type() if args.device_type == "" else args.device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 master_process = ddp_rank == 0
-ptdtype = torch.float32 if dtype == 'float32' else torch.bfloat16
-autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
 # wandb logging init
-use_dummy_wandb = run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-sft", name=run, config=user_config, save_code=True)
+use_dummy_wandb = args.run == "dummy" or not master_process
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-sft", name=args.run, config=user_config, save_code=True)
 
 # Load the model and tokenizer
-if resume_from is not None:
+if args.resume_from is not None:
     # Resume from an SFT checkpoint
-    resume_step = resume_from if resume_from != "latest" else None
-    model, tokenizer, meta = load_model("sft", device, phase="train", model_tag=model_tag, step=resume_step)
+    resume_step = args.resume_from if args.resume_from != "latest" else None
+    model, tokenizer, meta = load_model("sft", device, phase="train", model_tag=args.model_tag, step=resume_step)
     start_step = meta.get("step", 0)
     print0(f"Resuming from SFT checkpoint at step {start_step}")
 else:
     # Start fresh from base/mid checkpoint
-    model, tokenizer, meta = load_model(source, device, phase="train", model_tag=model_tag, step=step)
+    model, tokenizer, meta = load_model(args.source, device, phase="train", model_tag=args.model_tag, step=args.step)
     start_step = 0
 orig_model = model # original, uncompiled model
 # model = torch.compile(model, dynamic=True) # doesn't work super well because of variable lengths of inputs
@@ -94,20 +92,20 @@ value_delim_tok = tokenizer.encode_special("<|value|>")  # for distinguishing po
 # -----------------------------------------------------------------------------
 # DataLoader
 
-examples_per_step = device_batch_size * ddp_world_size
-print0(f"Target examples per step: {target_examples_per_step}")
-print0(f"Device batch size: {device_batch_size}")
+examples_per_step = args.device_batch_size * ddp_world_size
+print0(f"Target examples per step: {args.target_examples_per_step}")
+print0(f"Device batch size: {args.device_batch_size}")
 print0(f"Examples per step is device_batch_size * ddp_world_size: {examples_per_step}")
-assert target_examples_per_step % examples_per_step == 0, "Target examples per step must be divisible by examples per step"
-grad_accum_steps = target_examples_per_step // examples_per_step
+assert args.target_examples_per_step % examples_per_step == 0, "Target examples per step must be divisible by examples per step"
+grad_accum_steps = args.target_examples_per_step // examples_per_step
 print0(f"=> Setting grad accum steps: {grad_accum_steps}")
 
 augmentations = [
-    leantree.augmentations.ShuffleGoalsAndHypotheses(seed=seed),
-    leantree.augmentations.RandomRename(seed=seed),
+    leantree.augmentations.ShuffleGoalsAndHypotheses(seed=args.seed),
+    leantree.augmentations.RandomRename(seed=args.seed),
 ]
 train_ds = list(iter_data(split="train", augmentations=augmentations))
-random.Random(seed).shuffle(train_ds)
+random.Random(args.seed).shuffle(train_ds)
 val_ds = list(iter_data(split="val"))
 print0(f"Train rows count: {len(train_ds)} | Val rows count: {len(val_ds)}")
 
@@ -116,23 +114,22 @@ print0(f"Train rows count: {len(train_ds)} | Val rows count: {len(val_ds)}")
 #     assert num_epochs > 0, "num_epochs must be positive if num_iterations is -1"
 #     num_iterations = (len(train_ds) // target_examples_per_step) * num_epochs
 #     print0(f"=> Setting number of iterations: {num_iterations}")
-train_loader = sft_data_generator(train_ds, batch_size=device_batch_size)
-build_val_loader = lambda: sft_data_generator(val_ds, batch_size=device_batch_size)
+train_loader = sft_data_generator(train_ds, batch_size=args.device_batch_size)
+build_val_loader = lambda: sft_data_generator(val_ds, batch_size=args.device_batch_size)
 
 # -----------------------------------------------------------------------------
 # Initialize the Optimizer
 
-optimizers = model.setup_optimizers(
-    unembedding_lr=unembedding_lr,
-    embedding_lr=embedding_lr,
-    matrix_lr=matrix_lr,
-    weight_decay=weight_decay,
+optimizer = model.setup_optimizer(
+    unembedding_lr=args.unembedding_lr,
+    embedding_lr=args.embedding_lr,
+    matrix_lr=args.matrix_lr,
+    weight_decay=args.weight_decay,
 )
 # Set the initial learning rate as a fraction of the base learning rate
-for opt in optimizers:
-    for group in opt.param_groups:
-        group["lr"] = group["lr"] * init_lr_frac
-        group["initial_lr"] = group["lr"] # save the initial learning so we can decay easily later
+for group in optimizer.param_groups:
+    group["lr"] = group["lr"] * args.init_lr_frac
+    group["initial_lr"] = group["lr"] # save the initial learning so we can decay easily later
 
 # -----------------------------------------------------------------------------
 # Training loop
@@ -146,7 +143,7 @@ for opt in optimizers:
 # Learning rate scheduler
 def get_lr_multiplier(progress):
     # return max(0.0, 1.0 - progress)
-    global_progress = (epoch + progress) / num_epochs
+    global_progress = (epoch + progress) / args.num_epochs
     return max(0.0, 1.0 - global_progress)
 
 # Go!
@@ -161,15 +158,15 @@ while True:
         dist.all_reduce(last_step_tensor, op=dist.ReduceOp.MAX)
         last_step = bool(last_step_tensor.item())
 
-    if last_step or step % eval_every == 0:
+    if last_step or step % args.eval_every == 0:
         model.eval()
 
         # evaluate the validation loss
         val_iter = iter(build_val_loader())
         losses = []
-        for _ in range(eval_steps):
+        for _ in range(args.eval_steps):
             val_inputs, val_targets, _, _ = next(val_iter)
-            with torch.no_grad(), autocast_ctx:
+            with torch.no_grad():
                 loss = model(val_inputs, val_targets)
             losses.append(loss)
         val_loss = torch.stack(losses).mean() # average over eval_steps
@@ -177,16 +174,15 @@ while True:
             dist.all_reduce(val_loss, op=dist.ReduceOp.AVG) # average over ranks
         val_loss = val_loss.item()
 
-        with autocast_ctx:
-            tactic_results = eval_tactic_accuracy(model, tokenizer, build_val_loader(), max_steps=eval_steps)
-            critic_results = eval_critic_errors(model, tokenizer, build_val_loader(), max_steps=eval_steps)
+        tactic_results = eval_tactic_accuracy(model, tokenizer, build_val_loader(), max_steps=args.eval_steps)
+        critic_results = eval_critic_errors(model, tokenizer, build_val_loader(), max_steps=args.eval_steps)
 
         print0(f"Step {step:05d} | Validation loss: {val_loss:.6f} | Tactic full accuracy: {tactic_results['full_acc']:.4%} | Tactic first token accuracy: {tactic_results['first_token_acc']:.4%} | Critic argmax MSE: {critic_results['argmax_mse']:.4f} | Critic soft MSE: {critic_results['soft_mse']:.4f}")
         print0(f"  Entropy - Tactic first: {tactic_results['first_token_entropy']:.4f} | Tactic all: {tactic_results['all_tokens_entropy']:.4f} | Critic: {critic_results['entropy']:.4f}")
 
         # Create confusion matrix for wandb
         bin_labels = [str(i) for i in range(1, 65)]
-        
+
         wandb_run.log({
             "step": step,
             "val_loss": val_loss,
@@ -209,71 +205,70 @@ while True:
         model.train()
 
     # evaluate accuracy of the multiple choice tasks (which are quick to run)
-    if last_step or (step > 0 and step % sample_every == 0):
+    if last_step or (step > 0 and step % args.sample_every == 0):
         model.eval()
         prompts = [
             "The capital of France is",
             "If 5*x + 3 = 13, then x is",
             # gold from mathlib: 'exact LipschitzWith.comp_locallyBoundedVariationOn (A i) h'
             """case h
-ι : Type u_4
-inst✝ : Fintype ι
-f : ℝ → ι → ℝ
-s : Set ℝ
+\u03b9 : Type u_4
+inst\u271d : Fintype \u03b9
+f : \u211d \u2192 \u03b9 \u2192 \u211d
+s : Set \u211d
 h : LocallyBoundedVariationOn f s
-A : ∀ (i : ι), LipschitzWith 1 fun x => x i
-i : ι
-⊢ LocallyBoundedVariationOn (fun x => f x i) s
+A : \u2200 (i : \u03b9), LipschitzWith 1 fun x => x i
+i : \u03b9
+\u22a2 LocallyBoundedVariationOn (fun x => f x i) s
 <|tactic|>""",
             # sensible tactic: 'intro h'
             """p q : Prop
-⊢ p ∧ q → p
+\u22a2 p \u2227 q \u2192 p
 <|tactic|>""",
             # sensible tactic: 'rfl'
-            """⊢ 2 + 3 = 5
+            """\u22a2 2 + 3 = 5
 <|tactic|>""",
-            # sensible tactic: 'exact Or.inl ⟨hp, hq⟩'
+            # sensible tactic: 'exact Or.inl \u27e8hp, hq\u27e9'
             """case mp.inl
 p q r : Prop
 hp : p
 hq : q
-⊢ p ∧ q ∨ p ∧ r
+\u22a2 p \u2227 q \u2228 p \u2227 r
 <|tactic|>""",
             # sensible tactic: 'exact Exists.intro x0 hx0'
-            """α : Type
-P : α → Prop
-inst✝ : Inhabited α
-h : ∀ (x : α), P x
-x0 : α := default
+            """\u03b1 : Type
+P : \u03b1 \u2192 Prop
+inst\u271d : Inhabited \u03b1
+h : \u2200 (x : \u03b1), P x
+x0 : \u03b1 := default
 hx0 : P x0
-⊢ ∃ x, P x
+\u22a2 \u2203 x, P x
 <|tactic|>""",
 
             """p q : Prop
-⊢ p ∧ q → p
+\u22a2 p \u2227 q \u2192 p
 <|value|>""",
-            """α : Type
-P : α → Prop
-inst✝ : Inhabited α
-h : ∀ (x : α), P x
-x0 : α := default
+            """\u03b1 : Type
+P : \u03b1 \u2192 Prop
+inst\u271d : Inhabited \u03b1
+h : \u2200 (x : \u03b1), P x
+x0 : \u03b1 := default
 hx0 : P x0
-⊢ ∃ x, P x
+\u22a2 \u2203 x, P x
 <|value|>""",
         ]
         engine = Engine(orig_model, tokenizer) # use orig_model to avoid recompilation
         for prompt in prompts:
             tokens = tokenizer(prompt, prepend=bos_token)
-            with autocast_ctx:
-                sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
+            sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
             print0(tokenizer.decode(sample[0]) + "\n---")
         model.train()
 
     if last_step:
-        if epoch < num_epochs - 1:
+        if epoch < args.num_epochs - 1:
             print0(f"Epoch {epoch} done, starting next one.")
             epoch += 1
-            train_loader = sft_data_generator(train_ds, batch_size=device_batch_size)
+            train_loader = sft_data_generator(train_ds, batch_size=args.device_batch_size)
             progress = 0
         else:
             print0(f"Epoch {epoch} done, terminating.")
@@ -285,49 +280,22 @@ hx0 : P x0
         train_inputs, train_targets, approx_progress, last_step = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
         progress = max(progress, approx_progress) # only increase progress monotonically
 
-        # # Detokenize and print train_inputs and train_targets for inspection
-        # # We'll decode each input/target sequence in the batch.
-        # tokens_to_decode = train_inputs.detach().cpu().numpy()
-        # targets_to_decode = train_targets.detach().cpu().numpy()
-        # print0("Sample detokenized inputs/targets:")
-        # for i in range(min(3, tokens_to_decode.shape[0])):  # Print up to 3 samples
-        #     input_tokens = tokens_to_decode[i]
-        #     target_tokens = targets_to_decode[i]
-        #     # For display, replace pad tokens with None
-        #     input_str = tokenizer.decode([t for t in input_tokens if t != tokenizer.encode_special("<|pad|>")])
-        #     # For targets, skip ignore indices (-1), pad tokens, and detokenize
-        #     target_str = tokenizer.decode([t for t in target_tokens if t != -1 and t != tokenizer.encode_special("<|pad|>")])
+        # Compute per-token losses to apply different weights to value vs policy samples
+        per_token_loss = model(train_inputs, train_targets, loss_reduction='none')  # (B*T,)
+        per_token_loss = per_token_loss.view(train_inputs.shape)  # (B, T)
 
-        #     # Print (token, target) pairs with tokens rather than token ids
-        #     input_tokens_list = input_tokens.tolist()
-        #     target_tokens_list = target_tokens.tolist()
-        #     input_tokens_strs = [tokenizer.decode([tok]) for tok in input_tokens_list]
-        #     target_tokens_strs = [tokenizer.decode([tok]) if tok != -1 and tok != tokenizer.encode_special("<|pad|>") else "<pad/-1>" for tok in target_tokens_list]
-        #     pairs = list(zip(input_tokens_strs, target_tokens_strs))
-        #     print0(f"Input {i} (token, target) pairs: {pairs}")
+        # Identify value samples: those where input contains the value delimiter token
+        is_value_sample = (train_inputs == value_delim_tok).any(dim=1)  # (B,)
 
-        #     print0(f"Input {i} detokenized: {input_str!r}")
-        #     print0(f"Target {i} detokenized: {target_str!r}")
-        #     print0("-" * 40)
+        # Create per-sample weights: value_weight for value samples, 1.0 for policy samples
+        sample_weights = torch.where(is_value_sample, args.value_weight, 1.0)  # (B,)
 
-        
-        with autocast_ctx:
-            # Compute per-token losses to apply different weights to value vs policy samples
-            per_token_loss = model(train_inputs, train_targets, loss_reduction='none')  # (B*T,)
-            per_token_loss = per_token_loss.view(train_inputs.shape)  # (B, T)
-            
-            # Identify value samples: those where input contains the value delimiter token
-            is_value_sample = (train_inputs == value_delim_tok).any(dim=1)  # (B,)
-            
-            # Create per-sample weights: value_weight for value samples, 1.0 for policy samples
-            sample_weights = torch.where(is_value_sample, value_weight, 1.0)  # (B,)
-            
-            # Compute weighted loss: weight each token by its sample's weight
-            token_mask = (train_targets >= 0)  # (B, T)
-            weighted_token_loss = per_token_loss * sample_weights.unsqueeze(1)  # (B, T)
-            
-            # Mean over all valid tokens (weighted)
-            loss = (weighted_token_loss * token_mask).sum() / token_mask.sum()
+        # Compute weighted loss: weight each token by its sample's weight
+        token_mask = (train_targets >= 0)  # (B, T)
+        weighted_token_loss = per_token_loss * sample_weights.unsqueeze(1)  # (B, T)
+
+        # Mean over all valid tokens (weighted)
+        loss = (weighted_token_loss * token_mask).sum() / token_mask.sum()
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         loss.backward() # accumulate the gradient
@@ -337,13 +305,11 @@ hx0 : P x0
 
     # learning rate scheduler
     lrm = get_lr_multiplier(progress)
-    for opt in optimizers:
-        for group in opt.param_groups:
-            group["lr"] = group["initial_lr"] * lrm
+    for group in optimizer.param_groups:
+        group["lr"] = group["initial_lr"] * lrm
 
-    # step the optimizers
-    for opt in optimizers:
-        opt.step()
+    # step the optimizer
+    optimizer.step()
     model.zero_grad(set_to_none=True)
 
     pct_done = 100 * progress
@@ -359,7 +325,7 @@ hx0 : P x0
     # logging
     train_loss_item = train_loss.item()
     num_tokens_item = num_tokens.item()
-    print0(f"Step {step:05d} ({pct_done_str}, ep {epoch:02d}/{num_epochs:02d}) | Training loss: {train_loss_item:.6f}| lrm: {lrm:.6f}| num_tokens: {num_tokens_item:,}")
+    print0(f"Step {step:05d} ({pct_done_str}, ep {epoch:02d}/{args.num_epochs:02d}) | Training loss: {train_loss_item:.6f}| lrm: {lrm:.6f}| num_tokens: {num_tokens_item:,}")
     wandb_run.log({
         "step": step,
         "lrm": lrm,
@@ -387,7 +353,7 @@ if master_process:
             "model_config": model_config_kwargs,
         }
     )
-    print(f"✅ Saved model checkpoint to {checkpoint_dir}")
+    print(f"Saved model checkpoint to {checkpoint_dir}")
 
 # Log to report
 from nanoproof.report import get_report

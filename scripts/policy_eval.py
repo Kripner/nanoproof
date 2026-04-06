@@ -3,7 +3,7 @@ import torch.distributed as dist
 from itertools import islice
 import sys
 import os
-from contextlib import nullcontext
+
 
 from nanoproof.common import compute_init, autodetect_device_type, print0, is_ddp, get_dist_info
 from nanoproof.checkpoints import load_model
@@ -269,11 +269,7 @@ def main():
     
     data_gen = sft_data_generator(dataset, batch_size, device=device)
     
-    dtype = "bfloat16"
-    ptdtype = torch.float32 if dtype == 'float32' else torch.bfloat16
-    autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
-    with autocast_ctx:
-        results = eval_tactic_accuracy(model, tokenizer, data_gen, max_steps=steps)
+    results = eval_tactic_accuracy(model, tokenizer, data_gen, max_steps=steps)
     
     print0(f"Results for split '{split}':")
     print0(f"Full Accuracy: {results['full_acc']:.4%}")

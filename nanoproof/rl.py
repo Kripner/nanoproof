@@ -3,7 +3,7 @@ import os
 from datetime import datetime
 import json
 import sys
-from contextlib import nullcontext
+import argparse
 import random
 import time
 
@@ -45,52 +45,73 @@ from nanoproof.data.leantree_dataloader import sft_data_generator
 
 # -----------------------------------------------------------------------------
 # RL Hyperparameters
-run = "dummy"  # wandb run name default ("dummy" is special - we won't log to wandb)
-seed = 0
-model_tag = "d26"
-model_step = 903
-# model_tag = "d32"
-# model_step = 4515
-# compute/precision
-device_type = ""  # cuda|cpu|mps (empty => autodetect)
-dtype = "bfloat16"
-device_batch_size = 8  # (maybe) max to avoid OOM (on A100 40GB)
-# distributed mode - controlled by infra_file
-infra_file = "infra-ms.toml"  # path to infra.toml for distributed mode (empty => local mode)
-inference_server_port = 5000  # port for inference server (distributed mode only)
-poll_interval = 3.0  # how often to poll provers for transitions (seconds)
-# local mode settings
-lean_server = "10.10.25.31:8000"  # lean server for local mode (host:port)
-# data
-fraction_sft = 0.2  # 20% of data will come from Mathlib (leantree), 80% from replay buffer
-collect_every = 1  # how many steps to train between RL data collections  # TODO: when collect_every>1, we need some warmup (collect collect_every*collect_transitions)
-collect_transitions = 100  # how many proof transitions to collect in one collection
-# parallel experience collection (local mode only)
-num_actors = 32  # number of parallel actor threads for experience collection and evaluation
-num_sampled_tactics = 6  # number of tactics to sample per state in MCTS
-num_simulations_collect = 50  # number of MCTS simulations for experience collection
-num_simulations_eval = 50  # number of MCTS simulations for evaluation
-batch_timeout = 0.2  # timeout in seconds for batching LLM calls
-max_batch_tokens = 8000  # (maybe) max total tokens per inference batch (A100 40GB)
-# optimization
-target_examples_per_step = 512
-unembedding_lr = 0.004
-embedding_lr = 0.2
-matrix_lr = 0.02
-weight_decay = 0.0
-init_lr_frac = 0.02
-augment_data = True
-value_weight = 0.1  # weight for value (critic) samples relative to policy samples
-# evaluation and logging there of
-eval_every = 100 
-eval_start = 0  # step to start evaluation at (skip evaluation before this step)
-save_every = 500
-# resuming from a previous run - Note: don't forget to also set eval_start and seed!
-resume_from = ""  # path to a previous run's output directory to resume from (uses its replay buffers)
-# now allow CLI to override the settings via the configurator lol
-config_keys = [k for k, v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
-exec(open(os.path.join("nanoproof", "configurator.py")).read())  # overrides from command line or config file
-user_config = {k: globals()[k] for k in config_keys}  # possibly useful for logging
+parser = argparse.ArgumentParser(description="RL training for nanoproof")
+parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb)")
+parser.add_argument("--seed", type=int, default=0)
+parser.add_argument("--model-tag", type=str, default="d26")
+parser.add_argument("--model-step", type=int, default=903)
+parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
+parser.add_argument("--device-batch-size", type=int, default=8)
+parser.add_argument("--infra-file", type=str, default="infra-ms.toml", help="path to infra.toml (empty = local mode)")
+parser.add_argument("--inference-server-port", type=int, default=5000)
+parser.add_argument("--poll-interval", type=float, default=3.0)
+parser.add_argument("--lean-server", type=str, default="10.10.25.31:8000")
+parser.add_argument("--fraction-sft", type=float, default=0.2)
+parser.add_argument("--collect-every", type=int, default=1)
+parser.add_argument("--collect-transitions", type=int, default=100)
+parser.add_argument("--num-actors", type=int, default=32)
+parser.add_argument("--num-sampled-tactics", type=int, default=6)
+parser.add_argument("--num-simulations-collect", type=int, default=50)
+parser.add_argument("--num-simulations-eval", type=int, default=50)
+parser.add_argument("--batch-timeout", type=float, default=0.2)
+parser.add_argument("--max-batch-tokens", type=int, default=8000)
+parser.add_argument("--target-examples-per-step", type=int, default=512)
+parser.add_argument("--unembedding-lr", type=float, default=0.004)
+parser.add_argument("--embedding-lr", type=float, default=0.2)
+parser.add_argument("--matrix-lr", type=float, default=0.02)
+parser.add_argument("--weight-decay", type=float, default=0.0)
+parser.add_argument("--init-lr-frac", type=float, default=0.02)
+parser.add_argument("--augment-data", type=bool, default=True)
+parser.add_argument("--value-weight", type=float, default=0.1)
+parser.add_argument("--eval-every", type=int, default=100)
+parser.add_argument("--eval-start", type=int, default=0)
+parser.add_argument("--save-every", type=int, default=500)
+parser.add_argument("--resume-from", type=str, default="")
+args = parser.parse_args()
+user_config = vars(args).copy()
+
+# Backward-compatible aliases for the rest of the file
+run = args.run
+seed = args.seed
+model_tag = args.model_tag
+model_step = args.model_step
+device_type = args.device_type
+device_batch_size = args.device_batch_size
+infra_file = args.infra_file
+inference_server_port = args.inference_server_port
+poll_interval = args.poll_interval
+lean_server = args.lean_server
+fraction_sft = args.fraction_sft
+collect_every = args.collect_every
+collect_transitions = args.collect_transitions
+num_actors = args.num_actors
+num_sampled_tactics = args.num_sampled_tactics
+num_simulations_collect = args.num_simulations_collect
+num_simulations_eval = args.num_simulations_eval
+batch_timeout = args.batch_timeout
+max_batch_tokens = args.max_batch_tokens
+target_examples_per_step = args.target_examples_per_step
+unembedding_lr = args.unembedding_lr
+embedding_lr = args.embedding_lr
+matrix_lr = args.matrix_lr
+weight_decay = args.weight_decay
+init_lr_frac = args.init_lr_frac
+augment_data = args.augment_data
+value_weight = args.value_weight
+eval_every = args.eval_every
+eval_start = args.eval_start
+save_every = args.save_every
+resume_from = args.resume_from
 
 # -----------------------------------------------------------------------------
 # Distributed mode configuration
@@ -130,8 +151,7 @@ device_type = autodetect_device_type() if device_type == "" else device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 master_process = ddp_rank == 0
 set_ddp_info(is_master=master_process, rank=ddp_rank)
-ptdtype = torch.float32 if dtype == "float32" else torch.bfloat16
-autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
+# Model handles dtype internally via Linear class, no autocast needed
 
 # Output directory init
 
@@ -264,16 +284,15 @@ value_delim_tok = inner_tactic_model.tokenizer.encode_special("<|value|>")  # fo
 # -----------------------------------------------------------------------------
 # Initialize the Optimizer
 
-optimizers = model.setup_optimizers(
+optimizer = model.setup_optimizer(
     unembedding_lr=unembedding_lr,
     embedding_lr=embedding_lr,
     matrix_lr=matrix_lr,
     weight_decay=weight_decay,
 )
 # Set the initial learning rate as a fraction of the base learning rate
-for opt in optimizers:
-    for group in opt.param_groups:
-        group["lr"] = group["lr"] * init_lr_frac
+for group in optimizer.param_groups:
+    group["lr"] = group["lr"] * init_lr_frac
 
 
 # -----------------------------------------------------------------------------
@@ -339,9 +358,8 @@ while True:
         # Policy evaluation (tactic accuracy and critic errors on mathlib val)
         eval_steps = 200
         build_val_loader = lambda: sft_data_generator(mathlib_val, batch_size=device_batch_size)
-        with autocast_ctx:
-            tactic_results = eval_tactic_accuracy(model, inner_tactic_model.tokenizer, build_val_loader(), max_steps=eval_steps)
-            critic_results = eval_critic_errors(model, inner_tactic_model.tokenizer, build_val_loader(), max_steps=eval_steps)
+        tactic_results = eval_tactic_accuracy(model, inner_tactic_model.tokenizer, build_val_loader(), max_steps=eval_steps)
+        critic_results = eval_critic_errors(model, inner_tactic_model.tokenizer, build_val_loader(), max_steps=eval_steps)
         
         if master_process:
             log(f"Step {step:05d} | Tactic full acc: {tactic_results['full_acc']:.4%} | Tactic first acc: {tactic_results['first_token_acc']:.4%} | Critic argmax MSE: {critic_results['argmax_mse']:.4f} | Critic soft MSE: {critic_results['soft_mse']:.4f}", component="Eval")
@@ -543,7 +561,7 @@ while True:
             checkpoint_dir,
             step,
             model.state_dict(),
-            [opt.state_dict() for opt in optimizers],  # optimizer states
+            optimizer.state_dict(),  # optimizer state
             checkpoint_meta,
             rank=ddp_rank,
         )
@@ -559,23 +577,22 @@ while True:
     num_tokens = torch.tensor(0, device=device)  # the number of "active" tokens of supervision seen
     for micro_step in range(grad_accum_steps):
         train_inputs, train_targets = next(train_loader)  # prefetch the next batch while the GPU is busy with forward/backward
-        with autocast_ctx:
-            # Compute per-token losses to apply different weights to value vs policy samples
-            per_token_loss = model(train_inputs, train_targets, loss_reduction='none')  # (B*T,)
-            per_token_loss = per_token_loss.view(train_inputs.shape)  # (B, T)
-            
-            # Identify value samples: those where input contains the value delimiter token
-            is_value_sample = (train_inputs == value_delim_tok).any(dim=1)  # (B,)
-            
-            # Create per-sample weights: value_weight for value samples, 1.0 for policy samples
-            sample_weights = torch.where(is_value_sample, value_weight, 1.0)  # (B,)
-            
-            # Compute weighted loss: weight each token by its sample's weight
-            token_mask = (train_targets >= 0)  # (B, T)
-            weighted_token_loss = per_token_loss * sample_weights.unsqueeze(1)  # (B, T)
-            
-            # Mean over all valid tokens (weighted)
-            loss = (weighted_token_loss * token_mask).sum() / token_mask.sum()
+        # Compute per-token losses to apply different weights to value vs policy samples
+        per_token_loss = model(train_inputs, train_targets, loss_reduction='none')  # (B*T,)
+        per_token_loss = per_token_loss.view(train_inputs.shape)  # (B, T)
+
+        # Identify value samples: those where input contains the value delimiter token
+        is_value_sample = (train_inputs == value_delim_tok).any(dim=1)  # (B,)
+
+        # Create per-sample weights: value_weight for value samples, 1.0 for policy samples
+        sample_weights = torch.where(is_value_sample, value_weight, 1.0)  # (B,)
+
+        # Compute weighted loss: weight each token by its sample's weight
+        token_mask = (train_targets >= 0)  # (B, T)
+        weighted_token_loss = per_token_loss * sample_weights.unsqueeze(1)  # (B, T)
+
+        # Mean over all valid tokens (weighted)
+        loss = (weighted_token_loss * token_mask).sum() / token_mask.sum()
         train_loss = loss.detach()  # for logging
         loss = loss / grad_accum_steps  # each .backward() is a grad sum => normalize loss here
         loss.backward()  # accumulate the gradient
@@ -583,9 +600,8 @@ while True:
     if ddp:
         dist.all_reduce(num_tokens, op=dist.ReduceOp.SUM)  # sum over ranks
 
-    # step the optimizers
-    for opt in optimizers:
-        opt.step()
+    # step the optimizer
+    optimizer.step()
     model.zero_grad(set_to_none=True)
     
     # Resume inference server after training

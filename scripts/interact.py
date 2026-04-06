@@ -1,5 +1,3 @@
-from contextlib import nullcontext
-
 import torch
 
 from nanoproof.common import compute_init, compute_cleanup, get_base_dir, print0, DummyWandb, autodetect_device_type
@@ -22,12 +20,9 @@ source = "sft" # which checkpoint to load the model from
 
 if MODE == "raw_engine":
     device_type = "" # cuda|cpu|mps (empty => autodetect)
-    dtype = "bfloat16"
 
     device_type = autodetect_device_type() if device_type == "" else device_type
     device = torch.device(device_type)
-    ptdtype = torch.float32 if dtype == "float32" else torch.bfloat16
-    autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
     if source == "sft":
         model, tokenizer, meta = load_model(source, device, phase="eval", model_tag=model_tag, step=step)
@@ -39,22 +34,20 @@ if MODE == "raw_engine":
 
     def generate_(inp_) -> list[str]:
         tokens = tokenizer(inp_.strip() + "\n<|tactic|>", prepend=tokenizer.get_bos_token_id())
-        with autocast_ctx:
-            sample_toks, _ = engine.generate_batch(tokens, num_samples=6, min_tokens=1, max_tokens=64)
+        sample_toks, _ = engine.generate_batch(tokens, num_samples=6, min_tokens=1, max_tokens=64)
         return [tokenizer.decode(sample_toks[i]) for i in range(6)]
 
     def predict_value_(inp_) -> float:
         tokens = tokenizer(inp_.strip() + "\n<|value|>", prepend=tokenizer.get_bos_token_id())
-        with autocast_ctx:
-            _, _, value_logits = engine.generate_batch(tokens, num_samples=1, min_tokens=1, max_tokens=1, return_logits=True)
-            value_logits = value_logits[0][-1]
-            value_logits = torch.gather(value_logits, 0, torch.tensor(value_token_ids, device=device))
-            value_probs = torch.softmax(value_logits, dim=-1)
-            for i, prob in enumerate(value_probs):
-                print(f"BIN {value_bins[i]}: {prob.item()}")
-            value_probs = value_probs * torch.tensor(value_bins, device=device, dtype=value_probs.dtype)
-            value_probs = value_probs.sum()
-            return value_probs.item()
+        _, _, value_logits = engine.generate_batch(tokens, num_samples=1, min_tokens=1, max_tokens=1, return_logits=True)
+        value_logits = value_logits[0][-1]
+        value_logits = torch.gather(value_logits, 0, torch.tensor(value_token_ids, device=device))
+        value_probs = torch.softmax(value_logits, dim=-1)
+        for i, prob in enumerate(value_probs):
+            print(f"BIN {value_bins[i]}: {prob.item()}")
+        value_probs = value_probs * torch.tensor(value_bins, device=device, dtype=value_probs.dtype)
+        value_probs = value_probs.sum()
+        return value_probs.item()
 
     generate = generate_
     predict_value = predict_value_
