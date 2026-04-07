@@ -17,19 +17,19 @@ from leantree.core.lean import LeanGoal
 from nanoproof.common import compute_init, compute_cleanup, get_base_dir, DummyWandb, autodetect_device_type, SimpleTimer, flush, active_barrier_master, active_barrier_wait, create_run_dirs
 from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
-from nanoproof.data.leantree import iter_data
-from nanoproof.data.leantree_dataloader import rl_data_generator
+from nanoproof.data.sft.leantree import iter_data
+from nanoproof.data.sft.leantree_dataloader import rl_data_generator
 from nanoproof.experience_collection import ReplayBuffer, TheoremsSampler, Config, run_actor
 from nanoproof.inference import TacticModel, BlockingTacticModel
-from nanoproof.data import minif2f
-from nanoproof.data import leanworkbook
+from nanoproof.data.bench import minif2f
+from nanoproof.data.rl import leanworkbook
 from nanoproof.cli import create_monitor, configure_logging, log, log0, set_ddp_info
 from nanoproof.rl_server import distributed_collect, distributed_eval, start_coordinator, shutdown_coordinator
 from nanoproof.inference import start_inference_server
 from nanoproof.infra import load_infra_config, InfraConfig, parse_lean_server
 from scripts.prover_eval import eval_success_rate, save_eval_results_to_run_dir
 from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
-from nanoproof.data.leantree_dataloader import sft_data_generator
+from nanoproof.data.sft.leantree_dataloader import sft_data_generator
 
 # TODO: in each episode, save a sample of training data (right before it goes into the model)
 

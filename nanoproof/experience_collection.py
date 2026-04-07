@@ -21,10 +21,10 @@ from nanoproof.common import get_dist_info, linearize_proof, construct_proof_sou
 from nanoproof.search import Node, Config, Game, run_mcts, extract_transitions, compute_value_target, verify_node, prune_redundant_nodes
 from nanoproof.inference import BlockingTacticModel, TacticModel
 from nanoproof.cli import get_monitor, log
-from nanoproof.data import leanworkbook
-from nanoproof.data import deepseek_prover
-from nanoproof.data import numinamath
-from nanoproof.data.leantree_dataloader import STATE_MAX_LEN, TACTIC_MAX_LEN
+from nanoproof.data.rl import leanworkbook
+from nanoproof.data.rl import deepseek_prover
+from nanoproof.data.rl import numinamath
+from nanoproof.data.sft.leantree_dataloader import STATE_MAX_LEN, TACTIC_MAX_LEN
 
 
 class TheoremsSampler:

@@ -24,7 +24,7 @@ from nanoproof.tokenizer import get_token_bytes
 from nanoproof.checkpoints import save_checkpoint
 from nanoproof.loss_eval import evaluate_bpb
 from nanoproof.checkpoints import load_model
-from nanoproof.data.leangithubraw import iter_data
+from nanoproof.data.midtrain.leangithubraw import iter_data
 
 # -----------------------------------------------------------------------------
 # CLI arguments

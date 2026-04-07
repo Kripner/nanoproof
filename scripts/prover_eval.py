@@ -16,8 +16,8 @@ from tqdm import tqdm
 from leantree.repl_adapter.server import LeanClient
 
 from nanoproof.common import compute_init, compute_cleanup, print0, autodetect_device_type, get_dist_info, theorem_to_example, linearize_proof, construct_proof_source, Player, active_barrier_master, active_barrier_wait
-from nanoproof.data import minif2f
-from nanoproof.data import leanworkbook
+from nanoproof.data.bench import minif2f
+from nanoproof.data.rl import leanworkbook
 from nanoproof.search import run_mcts, Config, Game, Node, prune_redundant_nodes, verify_node, compute_value_target
 from nanoproof.inference import TacticModel, BlockingTacticModel
 from nanoproof.checkpoints import load_model, resolve_model_dir, resolve_step

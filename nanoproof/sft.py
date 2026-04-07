@@ -23,8 +23,8 @@ import leantree.augmentations
 from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, autodetect_device_type, create_run_dirs
 from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
-from nanoproof.data.leantree import iter_data
-from nanoproof.data.leantree_dataloader import sft_data_generator
+from nanoproof.data.sft.leantree import iter_data
+from nanoproof.data.sft.leantree_dataloader import sft_data_generator
 from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
 
 
@@ -110,11 +110,6 @@ random.Random(args.seed).shuffle(train_ds)
 val_ds = list(iter_data(split="val"))
 print0(f"Train rows count: {len(train_ds)} | Val rows count: {len(val_ds)}")
 
-# if num_iterations == -1:
-#     # derive num_iterations from num_epochs and the size of the dataset
-#     assert num_epochs > 0, "num_epochs must be positive if num_iterations is -1"
-#     num_iterations = (len(train_ds) // target_examples_per_step) * num_epochs
-#     print0(f"=> Setting number of iterations: {num_iterations}")
 train_loader = sft_data_generator(train_ds, batch_size=args.device_batch_size)
 build_val_loader = lambda: sft_data_generator(val_ds, batch_size=args.device_batch_size)
 
@@ -134,12 +129,6 @@ for group in optimizer.param_groups:
 
 # -----------------------------------------------------------------------------
 # Training loop
-
-# Learning rate scheduler
-# def get_lr_multiplier(it):
-#     lrm = 1.0 - it / num_iterations
-#     return lrm
-
 
 # Learning rate scheduler
 def get_lr_multiplier(progress):

@@ -26,7 +26,7 @@ import torch
 import torch.distributed as dist
 
 from nanoproof.model import Transformer, NetworkConfig, Linear
-from nanoproof.data.nemotron_dataloader import tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
+from nanoproof.data.pretrain.nemotron_dataloader import tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
 from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized, create_run_dirs
 from nanoproof.tokenizer import get_tokenizer, get_token_bytes
 from nanoproof.checkpoints import save_checkpoint, load_checkpoint

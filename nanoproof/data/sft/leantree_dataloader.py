@@ -4,7 +4,7 @@ from itertools import islice
 from nanoproof.tokenizer import _MAX_VALUE
 from nanoproof.common import get_dist_info
 from nanoproof.tokenizer import get_tokenizer, value_to_token_ids
-from nanoproof.data.leantree import iter_data
+from nanoproof.data.sft.leantree import iter_data
 
 STATE_MAX_LEN = 640
 TACTIC_MAX_LEN = 128

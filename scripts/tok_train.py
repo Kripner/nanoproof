@@ -8,8 +8,8 @@ import argparse
 import torch
 from nanoproof.tokenizer import HuggingFaceTokenizer, SPECIAL_TOKENS
 from nanoproof.common import get_base_dir
-from nanoproof.data.nemotron import parquets_iter_batched
-from nanoproof.data.leangithubraw import iter_texts_batched
+from nanoproof.data.pretrain.nemotron import parquets_iter_batched
+from nanoproof.data.midtrain.leangithubraw import iter_texts_batched
 
 # -----------------------------------------------------------------------------
 # Parse command line arguments

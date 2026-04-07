@@ -7,8 +7,8 @@ import os
 
 from nanoproof.common import compute_init, autodetect_device_type, print0, is_ddp, get_dist_info
 from nanoproof.checkpoints import load_model
-from nanoproof.data.leantree import iter_data
-from nanoproof.data.leantree_dataloader import sft_data_generator
+from nanoproof.data.sft.leantree import iter_data
+from nanoproof.data.sft.leantree_dataloader import sft_data_generator
 
 _MIN_VALUE = 1
 _MAX_VALUE = 64

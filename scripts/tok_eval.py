@@ -3,8 +3,8 @@ Evaluate compression ratio of the tokenizer.
 """
 
 from nanoproof.tokenizer import get_tokenizer, HuggingFaceTokenizer
-from nanoproof.data.nemotron import parquets_iter_batched
-from nanoproof.data.leangithubraw import iter_texts_batched
+from nanoproof.data.pretrain.nemotron import parquets_iter_batched
+from nanoproof.data.midtrain.leangithubraw import iter_texts_batched
 
 # Random text I got from a random website this morning
 news_text = r"""
