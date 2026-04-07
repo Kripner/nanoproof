@@ -32,22 +32,22 @@ from nanoproof.flash_attention import flash_attn
 
 @dataclass
 class NetworkConfig:
-    sequence_len: int = 1024
-    vocab_size: int = 50304
-    n_layer: int = 12
-    n_head: int = 6 # number of query heads
-    n_kv_head: int = 6 # number of key/value heads (GQA)
-    n_embd: int = 768
+    sequence_len: int
+    vocab_size: int
+    n_layer: int
+    n_head: int # number of query heads
+    n_kv_head: int # number of key/value heads (GQA)
+    n_embd: int
     # Sliding window attention pattern string, tiled across layers. Final layer always L.
     # Characters: L=long (full context), S=short (quarter context)
-    window_pattern: str = "SSSL"
+    window_pattern: str
 
-    # value head (nanoproof-specific)
+    # value head
     num_value_bins: int = 64
     min_value: float = 0.0
     max_value: float = 1.0
 
-    # sampling (nanoproof-specific)
+    # sampling
     policy_num_tactics: int = 6
     max_tactic_len: int = 32
 
