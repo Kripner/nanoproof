@@ -230,8 +230,8 @@ if total_batch_size % world_tokens_per_fwdbwd != 0:
     rounded = math.ceil(total_batch_size / world_tokens_per_fwdbwd) * world_tokens_per_fwdbwd
     print0(f"Rounding total_batch_size from {total_batch_size:,} up to {rounded:,} "
            f"to be divisible by world_tokens_per_fwdbwd={world_tokens_per_fwdbwd:,}")
+    user_config["real_total_batch_size"] = rounded
     total_batch_size = rounded
-user_config["total_batch_size"] = total_batch_size
 
 # Run directories (now that user_config reflects the resolved total_batch_size)
 log_dir, model_dir = create_run_dirs("pretrain", args.run, args_dict=user_config)
