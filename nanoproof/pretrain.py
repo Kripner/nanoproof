@@ -91,13 +91,6 @@ else:
     gpu_peak_flops = float('inf')
 print0(f"COMPUTE_DTYPE: {COMPUTE_DTYPE} ({COMPUTE_DTYPE_REASON})")
 
-# Run directories
-log_dir, model_dir = create_run_dirs("pretrain", args.run, args_dict=user_config)
-
-# wandb logging init
-use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof", name=args.run, config={**user_config, "log_dir": log_dir, "model_dir": model_dir})
-
 # Tokenizer
 tokenizer = get_tokenizer()
 token_bytes = get_token_bytes(device=device)
@@ -230,6 +223,23 @@ if total_batch_size == -1:
     total_batch_size = 2 ** round(math.log2(predicted_batch_size))
     print0(f"Auto-computed optimal batch size: {total_batch_size:,} tokens")
 
+# Round total_batch_size up to a multiple of world_tokens_per_fwdbwd so that
+# gradient accumulation divides evenly across ranks.
+world_tokens_per_fwdbwd = args.device_batch_size * args.max_seq_len * ddp_world_size
+if total_batch_size % world_tokens_per_fwdbwd != 0:
+    rounded = math.ceil(total_batch_size / world_tokens_per_fwdbwd) * world_tokens_per_fwdbwd
+    print0(f"Rounding total_batch_size from {total_batch_size:,} up to {rounded:,} "
+           f"to be divisible by world_tokens_per_fwdbwd={world_tokens_per_fwdbwd:,}")
+    total_batch_size = rounded
+user_config["total_batch_size"] = total_batch_size
+
+# Run directories (now that user_config reflects the resolved total_batch_size)
+log_dir, model_dir = create_run_dirs("pretrain", args.run, args_dict=user_config)
+
+# wandb logging init
+use_dummy_wandb = args.run == "dummy" or not master_process
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof", name=args.run, config={**user_config, "log_dir": log_dir, "model_dir": model_dir})
+
 # LR scaling for batch size
 batch_lr_scale = 1.0
 batch_ratio = total_batch_size / B_REF
@@ -317,8 +327,7 @@ def get_weight_decay(it):
 
 # Gradient accumulation
 tokens_per_fwdbwd = args.device_batch_size * args.max_seq_len
-world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size
-assert total_batch_size % world_tokens_per_fwdbwd == 0, f"total_batch_size {total_batch_size} must be divisible by world_tokens_per_fwdbwd {world_tokens_per_fwdbwd}"
+assert total_batch_size % world_tokens_per_fwdbwd == 0
 grad_accum_steps = total_batch_size // world_tokens_per_fwdbwd
 print0(f"Tokens / micro-batch / rank: {args.device_batch_size} x {args.max_seq_len} = {tokens_per_fwdbwd:,}")
 print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
