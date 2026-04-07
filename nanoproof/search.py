@@ -13,39 +13,19 @@ from nanoproof.inference import TacticModel, BlockingTacticModel
 
 
 @dataclass
-class Config:
-    # Acting
-    num_simulations: int = 50
+class SearchConfig:
+    # Acting (num_simulations always varies; num_actors only used by ProverWorker)
+    num_simulations: int
     num_actors: int = 4
-    num_sampled_tactics: int = 6
 
-    # UCB formula
+    # MCTS hyperparameters (defaults — rarely tuned)
     pb_c_base: int = 3200
     pb_c_init: float = 0.01
     value_discount: float = 0.98
     prior_temperature: float = 200
-
-    # Other MCTS parameters
     no_legal_actions_value: float = -40.0
-
-    # Progressive sampling parameters
     ps_c: float = 0.03
     ps_alpha: float = 0.8
-
-    # Value predictions
-    num_value_bins: int = 64
-
-    # Training
-    training_steps: int = int(500e3)
-    batch_size: int = 64
-    sequence_length: int = 32
-    window_size: int = 60_000_000
-    lr: float = 1e-4
-    value_weight: float = 0.002
-
-    # Lean server
-    server_address: str = "10.10.25.35"
-    server_port: int = 8000
 
 
 Action = str | int
@@ -478,7 +458,7 @@ class MCTSAbortedError(Exception):
     pass
 
 
-def run_mcts(config: Config, game: Game, model: "TacticModel | BlockingTacticModel", expansion_callback=None, tactic_callback=None, abort_check=None) -> int:
+def run_mcts(config: SearchConfig, game: Game, model: "TacticModel | BlockingTacticModel", expansion_callback=None, tactic_callback=None, abort_check=None) -> int:
     """
     Run MCTS to find a proof.
     
@@ -553,7 +533,7 @@ def run_mcts(config: Config, game: Game, model: "TacticModel | BlockingTacticMod
     return num_iterations
 
 
-def progressive_sample(node: Node, config: Config) -> bool:
+def progressive_sample(node: Node, config: SearchConfig) -> bool:
     """Whether to expand a node in the search tree again (progressive sampling)."""
     return (
             node.to_play == Player.OR
@@ -561,7 +541,7 @@ def progressive_sample(node: Node, config: Config) -> bool:
     )
 
 
-def select_child(config: Config, node: Node) -> tuple[Action, Node]:
+def select_child(config: SearchConfig, node: Node) -> tuple[Action, Node]:
     """Selects the child with the highest UCB score."""
     _, action, child = max(
         (ucb_score(config, node, child), action, child)
@@ -572,7 +552,7 @@ def select_child(config: Config, node: Node) -> tuple[Action, Node]:
 
 # The score for a node is based on its value, plus an exploration bonus based on
 # the prior.
-def ucb_score(config: Config, parent: Node, child: Node) -> float:
+def ucb_score(config: SearchConfig, parent: Node, child: Node) -> float:
     pb_c = (
         math.log((parent.visit_count + config.pb_c_base + 1) / config.pb_c_base)
         + config.pb_c_init
@@ -673,7 +653,7 @@ def expand_node(
 def backpropagate(
         search_path: list[Node],
         value: float,
-        config: Config,
+        config: SearchConfig,
 ):
     if len(search_path[-1].children) == 0:
         value = config.no_legal_actions_value

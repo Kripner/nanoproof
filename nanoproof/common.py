@@ -11,6 +11,7 @@ import logging
 import math
 import urllib.request
 import gc
+from dataclasses import dataclass
 from datetime import datetime
 from collections import Counter
 from filelock import FileLock
@@ -39,6 +40,40 @@ def _detect_compute_dtype():
         return torch.float32, f"auto-detected: CUDA SM {capability[0]}{capability[1]} (pre-Ampere, bf16 not supported, using fp32)"
     return torch.float32, "auto-detected: no CUDA (CPU/MPS)"
 COMPUTE_DTYPE, COMPUTE_DTYPE_REASON = _detect_compute_dtype()
+
+# -----------------------------------------------------------------------------
+# Global config: hardcoded constants that we want centralized but not exposed
+# as CLI flags. The values here are coupled to the tokenizer (num_value_bins
+# must match the number of <|bin_XX|> special tokens) and to the data layout
+# (state_max_len + tactic_max_len define the natural max sequence length used
+# by training and the dataloader's hard cutoff).
+
+@dataclass(frozen=True)
+class GlobalConfig:
+    state_max_len: int = 640      # max state length (tokens) accepted by the dataloader
+    tactic_max_len: int = 128     # max tactic length (tokens)
+    num_value_bins: int = 64      # value head bin count; must match tokenizer special tokens
+
+    @property
+    def max_seq_len(self) -> int:
+        return self.state_max_len + self.tactic_max_len  # 768
+
+GLOBAL_CONFIG = GlobalConfig()
+
+
+def get_lr_multiplier(progress: float, args) -> float:
+    """Linear warmup → flat → linear warmdown to ``final_lr_frac``.
+
+    ``progress`` is in [0, 1]. ``args`` must expose ``warmup_ratio``,
+    ``warmdown_ratio`` and ``final_lr_frac`` (typically argparse Namespace).
+    """
+    if args.warmup_ratio > 0 and progress < args.warmup_ratio:
+        return (progress + 1e-8) / args.warmup_ratio
+    if args.warmdown_ratio == 0 or progress <= 1.0 - args.warmdown_ratio:
+        return 1.0
+    decay = (progress - (1.0 - args.warmdown_ratio)) / args.warmdown_ratio
+    return (1 - decay) + decay * args.final_lr_frac
+
 
 class ColoredFormatter(logging.Formatter):
     """Custom formatter that adds colors to log messages."""

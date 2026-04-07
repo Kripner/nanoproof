@@ -18,7 +18,7 @@ from leantree.repl_adapter.server import LeanClient
 from nanoproof.common import compute_init, compute_cleanup, print0, autodetect_device_type, get_dist_info, theorem_to_example, linearize_proof, construct_proof_source, Player, active_barrier_master, active_barrier_wait
 from nanoproof.data.bench import minif2f
 from nanoproof.data.rl import leanworkbook
-from nanoproof.search import run_mcts, Config, Game, Node, prune_redundant_nodes, verify_node, compute_value_target
+from nanoproof.search import run_mcts, SearchConfig, Game, Node, prune_redundant_nodes, verify_node, compute_value_target
 from nanoproof.inference import TacticModel, BlockingTacticModel
 from nanoproof.checkpoints import load_model, resolve_model_dir, resolve_step
 from nanoproof.cli import log
@@ -97,7 +97,7 @@ class EvalCounters:
 def evaluate_theorem(
     theorem: str,
     env,
-    config: Config,
+    config: SearchConfig,
     model: Union[TacticModel, BlockingTacticModel],
 ) -> TheoremResult:
     """
@@ -230,6 +230,8 @@ def broadcast_progress(
 @torch.inference_mode()
 def eval_success_rate(
     tactic_model: Union[TacticModel, BlockingTacticModel],
+    lean_address: str,
+    lean_port: int,
     theorems=None,
     use_tqdm=False,
     progress: Optional[EvalProgressCallback] = None,
@@ -239,9 +241,11 @@ def eval_success_rate(
     """
     Evaluates the success rate of the model on the given theorems.
     Returns a dictionary with 'success_rate', 'solved', and 'total'.
-    
+
     Args:
         tactic_model: The model to evaluate (TacticModel or BlockingTacticModel)
+        lean_address: Lean server host
+        lean_port: Lean server port
         theorems: List of theorems to evaluate
         use_tqdm: Whether to show tqdm progress bar
         progress: Optional callback object for progress updates
@@ -252,14 +256,14 @@ def eval_success_rate(
     """
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     theorems_subset = theorems[ddp_rank::ddp_world_size]
-    
+
     if progress is not None and ddp_rank == 0:
         progress.on_start("", len(theorems))
-    
+
     if num_actors > 1:
-        return _eval_parallel(tactic_model, theorems_subset, progress, num_actors, num_simulations)
+        return _eval_parallel(tactic_model, theorems_subset, progress, num_actors, num_simulations, lean_address, lean_port)
     else:
-        return _eval_sequential(tactic_model, theorems_subset, use_tqdm, progress, num_simulations)
+        return _eval_sequential(tactic_model, theorems_subset, use_tqdm, progress, num_simulations, lean_address, lean_port)
 
 
 def _eval_sequential(
@@ -267,20 +271,22 @@ def _eval_sequential(
     theorems_subset: list[str],
     use_tqdm: bool,
     progress: Optional[EvalProgressCallback],
-    num_simulations: int = 50,
+    num_simulations: int,
+    lean_address: str,
+    lean_port: int,
 ) -> dict:
     """Sequential (single-threaded) evaluation."""
     ddp, ddp_rank, _, _ = get_dist_info()
-    config = Config(num_simulations=num_simulations)
+    config = SearchConfig(num_simulations=num_simulations)
     device = tactic_model.network.get_device()
-    
+
     counters = EvalCounters()
     detailed_results: list[TheoremResult] = []
-    client = LeanClient(config.server_address, config.server_port)
-    
+    client = LeanClient(lean_address, lean_port)
+
     process = client.get_process()
     if process is None:
-        raise RuntimeError(f"Failed to acquire Lean process from {config.server_address}:{config.server_port}")
+        raise RuntimeError(f"Failed to acquire Lean process from {lean_address}:{lean_port}")
     
     with process as env:
         env.send_command(LEAN_OPEN_SCOPED_COMMANDS)
@@ -314,11 +320,13 @@ def _eval_parallel(
     theorems_subset: list[str],
     progress: Optional[EvalProgressCallback],
     num_actors: int,
-    num_simulations: int = 50,
+    num_simulations: int,
+    lean_address: str,
+    lean_port: int,
 ) -> dict:
     """Parallel evaluation using multiple threads with work-stealing."""
     ddp, ddp_rank, _, _ = get_dist_info()
-    config = Config(num_simulations=num_simulations)
+    config = SearchConfig(num_simulations=num_simulations)
     
     # Wrap in BlockingTacticModel if necessary
     if isinstance(tactic_model, TacticModel):
@@ -342,10 +350,10 @@ def _eval_parallel(
         asyncio.set_event_loop(asyncio.new_event_loop())
         local_processed = 0
         
-        log(f"[Eval Actor {actor_id}] Connecting to {config.server_address}:{config.server_port}")
-        
+        log(f"[Eval Actor {actor_id}] Connecting to {lean_address}:{lean_port}")
+
         try:
-            client = LeanClient(config.server_address, config.server_port)
+            client = LeanClient(lean_address, lean_port)
         except Exception as e:
             log(f"[Eval Actor {actor_id}] Failed to connect: {e}")
             return
@@ -731,6 +739,7 @@ def main():
     # Distributed mode
     dist_group = parser.add_argument_group("Distributed mode")
     dist_group.add_argument("--infra-file", type=str, default="", help="Path to infra.toml for distributed mode (empty = local mode)")
+    dist_group.add_argument("--lean-server", type=str, default="10.10.25.31:8000", help="Lean server host:port for local mode (ignored when --infra-file is set)")
     dist_group.add_argument("--no-progress-timeout", type=float, default=6000.0, help="Timeout in seconds if no progress is made (default: 600)")
     
     # Output options
@@ -934,8 +943,10 @@ def main():
                     active_barrier_wait(f"eval_done_{dataset_name}")
         else:
             # Local mode: each rank evaluates a subset of theorems
+            from nanoproof.infra import parse_lean_server
+            local_lean = parse_lean_server(args.lean_server)
             results = eval_success_rate(
-                tactic_model, theorems, use_tqdm=True,
+                tactic_model, local_lean.address, local_lean.port, theorems, use_tqdm=True,
                 num_actors=args.num_actors, num_simulations=args.num_simulations
             )
         

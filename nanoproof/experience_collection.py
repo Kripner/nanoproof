@@ -17,14 +17,13 @@ import torch.distributed as dist
 from leantree.repl_adapter.server import LeanClient
 from leantree.repl_adapter.interaction import LeanProcessException
 
-from nanoproof.common import get_dist_info, linearize_proof, construct_proof_source, theorem_to_example, Player
-from nanoproof.search import Node, Config, Game, run_mcts, extract_transitions, compute_value_target, verify_node, prune_redundant_nodes
+from nanoproof.common import get_dist_info, linearize_proof, construct_proof_source, theorem_to_example, Player, GLOBAL_CONFIG
+from nanoproof.search import Node, SearchConfig, Game, run_mcts, extract_transitions, compute_value_target, verify_node, prune_redundant_nodes
 from nanoproof.inference import BlockingTacticModel, TacticModel
 from nanoproof.cli import get_monitor, log
 from nanoproof.data.rl import leanworkbook
 from nanoproof.data.rl import deepseek_prover
 from nanoproof.data.rl import numinamath
-from nanoproof.data.sft.leantree_dataloader import STATE_MAX_LEN, TACTIC_MAX_LEN
 
 
 class TheoremsSampler:
@@ -63,13 +62,11 @@ class TheoremsSampler:
 class ReplayBuffer:
     """
     Replay buffer for storing proof transitions.
-    
+
     Supports DDP synchronization across multiple ranks.
     """
-    def __init__(self, config: Config, seed: int = 0):
-        self.window_size = config.window_size
-        self.batch_size = config.batch_size
-        self.sequence_length = config.sequence_length
+    def __init__(self, window_size: int = 60_000_000, seed: int = 0):
+        self.window_size = window_size
         self.local_buffer = []
         self.buffer = []
         self.rng = random.Random(seed)
@@ -81,7 +78,7 @@ class ReplayBuffer:
             transitions = [
                 (context.strip(), tactic.strip(), value_target)
                 for context, tactic, value_target in transitions
-                if len(context.strip()) <= STATE_MAX_LEN and len(tactic.strip()) <= TACTIC_MAX_LEN
+                if len(context.strip()) <= GLOBAL_CONFIG.state_max_len and len(tactic.strip()) <= GLOBAL_CONFIG.tactic_max_len
             ]
             # log(f"Adding {len(transitions)}/{received_count} transitions to replay buffer:" + "\n".join(f"  {context} {tactic} {value_target}" for context, tactic, value_target in transitions), component="Collection")
             for context, tactic, value_target in transitions:
@@ -122,7 +119,7 @@ class ProverWorker:
     
     def __init__(
         self,
-        config: Config,
+        config: SearchConfig,
         tactic_model,  # TacticModel or RemoteTacticModel
         lean_address: str,
         lean_port: int,
@@ -346,10 +343,12 @@ class ProverWorker:
 @torch.no_grad()
 def run_actor(
     total_to_collect: int,
-    config: Config,
+    config: SearchConfig,
     model: BlockingTacticModel,
     replay_buffer: ReplayBuffer,
-    theorems_sampler: TheoremsSampler
+    theorems_sampler: TheoremsSampler,
+    lean_address: str,
+    lean_port: int,
 ):
     """
     Run parallel actors to collect proofs locally.
@@ -393,8 +392,8 @@ def run_actor(
     worker = ProverWorker(
         config=config,
         tactic_model=model,
-        lean_address=config.server_address,
-        lean_port=config.server_port,
+        lean_address=lean_address,
+        lean_port=lean_port,
         get_theorem=get_theorem,
         on_result=on_result,
         num_actors=num_actors,
@@ -456,24 +455,5 @@ def run_actor(
             monitor.clear_local_actors()
 
     if master_process:
-        log(f"Collection complete: {len(replay_buffer.local_buffer)} local transitions", 
+        log(f"Collection complete: {len(replay_buffer.local_buffer)} local transitions",
             component="Collection")
-
-
-def _main():
-    config = Config()
-    model = TacticModel.create(num_samples=config.num_sampled_tactics, model_path="sft/FIXME")
-    replay_buffer = ReplayBuffer(config)
-    theorems_sampler = TheoremsSampler()
-    
-    # For testing, use BlockingTacticModel
-    batched_model = BlockingTacticModel(
-        inner_model=model,
-        batch_size=config.num_actors,
-        timeout_seconds=0.1
-    )
-    run_actor(100, config, batched_model, replay_buffer, theorems_sampler)
-
-
-if __name__ == "__main__":
-    _main()

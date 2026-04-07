@@ -9,15 +9,14 @@ Two implementations are available:
 
 import os
 
-_MIN_VALUE = 1
-_MAX_VALUE = 64  # max value corresponds to "infinity"
+from nanoproof.common import GLOBAL_CONFIG
 
 SPECIAL_TOKENS = [
     # every document begins with the Beginning of Sequence (BOS) token that delimits documents
     "<|pad|>",
     "<|tactic|>",
     "<|value|>",
-    *[f"<|bin_{i:02d}|>" for i in range(_MIN_VALUE, _MAX_VALUE + 1)],
+    *[f"<|bin_{i:02d}|>" for i in range(1, GLOBAL_CONFIG.num_value_bins + 1)],
     # these occur at least 1000 times in Mathlib but do not have dedicated tokens in GPT-2
     "ˢ", "ˣ", "Γ", "Δ", "Λ", "Π", "Σ", "Φ", "Ω", "δ", "ζ", "η", "θ", "φ", "χ", "ψ", "ϕ", "ᵈ", "ᵐ", "ᵒ", "ᵖ", "ᵢ", "ᵣ", "ᵥ", "ᶜ", "ᶠ", "‖", "‹", "›", "⁅", "⁆", "⁰", "⁻", "₀", "₁", "₂", "₃", "₄", "₊", "ₐ", "ₑ", "ₗ", "ₘ", "ₙ", "ₚ", "ₛ", "ₜ", "ℂ", "ℕ", "ℚ", "ℝ", "ℤ", "ℱ", "←", "↔", "↦", "↪", "⇑", "∀", "∂", "∃", "∅", "∈", "∉", "∏", "∑", "∘", "∞", "∣", "∧", "∨", "∩", "∪", "∫", "≃", "≅", "≠", "≡", "≤", "≥", "≪", "≫", "⊆", "⊓", "⊔", "⊕", "⊗", "⊢", "⊤", "⊥", "⋂", "⋃", "⋆", "⋙", "▷", "▸", "◁", "⟦", "⟧", "⟨", "⟩", "⟪", "⟫", "⟶", "⥤", "⦃", "⦄", "⧸", "⨅", "⨆", "𝒜", "𝒰", "𝓘", "𝓝", "𝔖", "𝕜", "𝟙",
     # these are left out because they are already in GPT2 tokenizer (although weirdly not reported in tok_show): "¬", "¹"
@@ -150,24 +149,24 @@ class HuggingFaceTokenizer:
         print(f"Saved tokenizer to {tokenizer_path}")
 
     def get_value_token_ids(self) -> list[int]:
-        return [self.encode_special(f"<|bin_{i:02d}|>") for i in range(_MIN_VALUE, _MAX_VALUE + 1)]
+        return [self.encode_special(f"<|bin_{i:02d}|>") for i in range(1, GLOBAL_CONFIG.num_value_bins + 1)]
 
     def get_value_bins(self) -> list[int]:
-        return list(range(_MIN_VALUE, _MAX_VALUE + 1))
+        return list(range(1, GLOBAL_CONFIG.num_value_bins + 1))
 
 def value_to_token_ids(tokenizer, value: int) -> list[int]:
-    """Convert a value (1-64) to a single bin token ID."""
-    assert _MIN_VALUE <= value <= _MAX_VALUE
+    """Convert a value (1..num_value_bins) to a single bin token ID."""
+    assert 1 <= value <= GLOBAL_CONFIG.num_value_bins
     bin_token = f"<|bin_{value:02d}|>"
     return [tokenizer.encode_special(bin_token)]
 
 def token_ids_to_value(tokenizer, token_ids: list[int]) -> int | None:
-    """Convert a bin token ID back to a value (1-64). Returns None if not a valid bin token."""
+    """Convert a bin token ID back to a value (1..num_value_bins). Returns None if not a valid bin token."""
     if len(token_ids) != 1:
         return None
     token_id = token_ids[0]
     # Check each bin token
-    for i in range(_MIN_VALUE, _MAX_VALUE + 1):
+    for i in range(1, GLOBAL_CONFIG.num_value_bins + 1):
         if tokenizer.encode_special(f"<|bin_{i:02d}|>") == token_id:
             return i
     return None

@@ -1,13 +1,9 @@
 import torch
 from itertools import islice
 
-from nanoproof.tokenizer import _MAX_VALUE
-from nanoproof.common import get_dist_info
+from nanoproof.common import get_dist_info, GLOBAL_CONFIG
 from nanoproof.tokenizer import get_tokenizer, value_to_token_ids
 from nanoproof.data.sft.leantree import iter_data
-
-STATE_MAX_LEN = 640
-TACTIC_MAX_LEN = 128
 
 def sft_data_generator(dataset, batch_size, device="cuda"):
     assert batch_size % 2 == 0  # need this because we generate both tactic and value samples for each datapoint
@@ -54,15 +50,15 @@ def sft_data_generator(dataset, batch_size, device="cuda"):
             tactic_toks = tokenizer.encode(tactic, append=eos_token)
 
             value_delim_tok = tokenizer.encode_special("<|value|>")
-            proof_depth = min(proof_depth, _MAX_VALUE)
+            proof_depth = min(proof_depth, GLOBAL_CONFIG.num_value_bins)
             value_toks = value_to_token_ids(tokenizer, proof_depth) + [eos_token]
 
             # these are <0.1% of mathlib
-            if len(tactic_toks) > TACTIC_MAX_LEN:
+            if len(tactic_toks) > GLOBAL_CONFIG.tactic_max_len:
                 continue
-            if len(state_toks) + 1 + len(tactic_toks) > 768:
+            if len(state_toks) + 1 + len(tactic_toks) > GLOBAL_CONFIG.max_seq_len:
                 continue
-            assert len(state_toks) + 1 + len(value_toks) <= 768
+            assert len(state_toks) + 1 + len(value_toks) <= GLOBAL_CONFIG.max_seq_len
 
             batch.append((
                 state_toks + [tactic_delim_tok] + tactic_toks,
@@ -121,15 +117,15 @@ def rl_data_generator(generator, batch_size, device="cuda"):
         tactic_toks = tokenizer.encode(tactic, append=eos_token)
 
         value_delim_tok = tokenizer.encode_special("<|value|>")
-        proof_depth = min(proof_depth, _MAX_VALUE)
+        proof_depth = min(proof_depth, GLOBAL_CONFIG.num_value_bins)
         value_toks = value_to_token_ids(tokenizer, proof_depth) + [eos_token]
 
         # these are <0.1% of mathlib
-        if len(tactic_toks) > TACTIC_MAX_LEN:
+        if len(tactic_toks) > GLOBAL_CONFIG.tactic_max_len:
             continue
-        if len(state_toks) + 1 + len(tactic_toks) > 768:
+        if len(state_toks) + 1 + len(tactic_toks) > GLOBAL_CONFIG.max_seq_len:
             continue
-        assert len(state_toks) + 1 + len(value_toks) <= 768
+        assert len(state_toks) + 1 + len(value_toks) <= GLOBAL_CONFIG.max_seq_len
 
         batch.append((
             state_toks + [tactic_delim_tok] + tactic_toks,

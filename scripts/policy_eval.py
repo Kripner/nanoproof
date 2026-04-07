@@ -5,13 +5,10 @@ import sys
 import os
 
 
-from nanoproof.common import compute_init, autodetect_device_type, print0, is_ddp, get_dist_info
+from nanoproof.common import compute_init, autodetect_device_type, print0, is_ddp, get_dist_info, GLOBAL_CONFIG
 from nanoproof.checkpoints import load_model
 from nanoproof.data.sft.leantree import iter_data
 from nanoproof.data.sft.leantree_dataloader import sft_data_generator
-
-_MIN_VALUE = 1
-_MAX_VALUE = 64
 
 
 def _reduce_if_ddp(tensor):
@@ -58,8 +55,8 @@ def eval_critic_errors(model, tokenizer, leantree_batches, max_steps=None):
     
     # Bin token IDs in order: index i corresponds to bin value (i+1)
     bin_token_ids = torch.tensor([
-        tokenizer.encode_special(f"<|bin_{i:02d}|>") 
-        for i in range(_MIN_VALUE, _MAX_VALUE + 1)
+        tokenizer.encode_special(f"<|bin_{i:02d}|>")
+        for i in range(1, GLOBAL_CONFIG.num_value_bins + 1)
     ])
     # Reverse mapping: token_id -> bin_index (0-based)
     token_to_bin_idx = {tok.item(): i for i, tok in enumerate(bin_token_ids)}
@@ -88,7 +85,7 @@ def eval_critic_errors(model, tokenizer, leantree_batches, max_steps=None):
         bin_logits = value_logits[:, bin_token_ids.to(x.device)]  # (B, 64)
         argmax_bin_idx = bin_logits.argmax(dim=-1)  # (B,) 0-indexed
         bin_probs = torch.softmax(bin_logits, dim=-1)  # (B, 64)
-        bin_values = torch.arange(1, _MAX_VALUE + 1, dtype=bin_probs.dtype, device=x.device)
+        bin_values = torch.arange(1, GLOBAL_CONFIG.num_value_bins + 1, dtype=bin_probs.dtype, device=x.device)
         soft_predictions = (bin_probs * bin_values).sum(dim=-1)  # (B,)
         
         # Compute entropy over bin tokens

@@ -12,6 +12,7 @@ torchrun --standalone --nproc_per_node=8 -m nanoproof.sft
 import os
 import random
 import argparse
+from dataclasses import asdict
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -20,7 +21,7 @@ import torch
 import torch.distributed as dist
 import leantree.augmentations
 
-from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, autodetect_device_type, create_run_dirs
+from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, autodetect_device_type, create_run_dirs, get_lr_multiplier
 from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
 from nanoproof.data.sft.leantree import iter_data
@@ -47,12 +48,15 @@ parser.add_argument("--num-epochs", type=int, default=5, help="number of trainin
 parser.add_argument("--num-iterations", type=int, default=-1, help="override number of iterations (-1 = use num_epochs)")
 parser.add_argument("--target-examples-per-step", type=int, default=512, help="target examples per optimization step")
 parser.add_argument("--unembedding-lr", type=float, default=0.004, help="learning rate for unembedding parameters")
-parser.add_argument("--embedding-lr", type=float, default=0.2, help="learning rate for embedding parameters")
+parser.add_argument("--embedding-lr", type=float, default=0.3, help="learning rate for embedding parameters")
 parser.add_argument("--matrix-lr", type=float, default=0.02, help="learning rate for matrix parameters (Muon)")
 parser.add_argument("--weight-decay", type=float, default=0.0, help="weight decay")
-parser.add_argument("--init-lr-frac", type=float, default=0.02, help="initial learning rate fraction")
+parser.add_argument("--init-lr-frac", type=float, default=0.8, help="initial learning rate fraction")
+parser.add_argument("--warmup-ratio", type=float, default=0.0, help="ratio of progress for LR warmup")
+parser.add_argument("--warmdown-ratio", type=float, default=0.5, help="ratio of progress for LR warmdown")
+parser.add_argument("--final-lr-frac", type=float, default=0.0, help="final LR as fraction of initial LR")
 # Evaluation
-parser.add_argument("--eval-every", type=int, default=100, help="evaluate every N steps")
+parser.add_argument("--eval-every", type=int, default=200, help="evaluate every N steps")
 parser.add_argument("--eval-steps", type=int, default=200, help="number of eval steps")
 parser.add_argument("--sample-every", type=int, default=100, help="sample from model every N steps")
 parser.add_argument("--eval-metrics-max-problems", type=int, default=1024, help="max problems for eval metrics")
@@ -129,12 +133,6 @@ for group in optimizer.param_groups:
 
 # -----------------------------------------------------------------------------
 # Training loop
-
-# Learning rate scheduler
-def get_lr_multiplier(progress):
-    # return max(0.0, 1.0 - progress)
-    global_progress = (epoch + progress) / args.num_epochs
-    return max(0.0, 1.0 - global_progress)
 
 # Go!
 progress = 0 # will go from 0 to 1 over the course of the epoch
@@ -293,8 +291,9 @@ hx0 : P x0
     if ddp:
         dist.all_reduce(num_tokens, op=dist.ReduceOp.SUM) # sum over ranks
 
-    # learning rate scheduler
-    lrm = get_lr_multiplier(progress)
+    # learning rate scheduler (uses global progress across all epochs)
+    global_progress = (epoch + progress) / args.num_epochs
+    lrm = get_lr_multiplier(global_progress, args)
     for group in optimizer.param_groups:
         group["lr"] = group["initial_lr"] * lrm
 
@@ -327,7 +326,6 @@ hx0 : P x0
 
 # Save the model at the end of the run
 if master_process:
-    model_config_kwargs = model.config.__dict__ # slightly naughty, abusing the simplicity of GPTConfig, TODO nicer
     save_checkpoint(
         model_dir,
         step,
@@ -336,7 +334,7 @@ if master_process:
         {
             "step": step,
             "val_loss": val_loss,
-            "model_config": model_config_kwargs,
+            "model_config": asdict(orig_model.config),
         }
     )
     print(f"Saved model checkpoint to {model_dir}")

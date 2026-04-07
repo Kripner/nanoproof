@@ -10,6 +10,7 @@ torchrun --standalone --nproc_per_node=8 -m nanoproof.midtrain -- --device-batch
 """
 
 from collections import deque
+from dataclasses import asdict
 import os
 import time
 import argparse
@@ -19,7 +20,7 @@ import wandb
 import torch
 import torch.distributed as dist
 
-from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type, is_ddp_initialized, create_run_dirs
+from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type, is_ddp_initialized, create_run_dirs, GLOBAL_CONFIG, get_lr_multiplier
 from nanoproof.tokenizer import get_token_bytes
 from nanoproof.checkpoints import save_checkpoint
 from nanoproof.loss_eval import evaluate_bpb
@@ -39,15 +40,18 @@ parser.add_argument("--step", type=int, default=None, help="step to load the mod
 # Training
 parser.add_argument("--dtype", type=str, default="bfloat16", help="data type for training")
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
-parser.add_argument("--max-seq-len", type=int, default=768, help="max context length")
+parser.add_argument("--max-seq-len", type=int, default=GLOBAL_CONFIG.max_seq_len, help="max context length")
 parser.add_argument("--device-batch-size", type=int, default=16, help="per-device batch size")
 parser.add_argument("--total-batch-size", type=int, default=491520, help="total batch size in tokens")
 parser.add_argument("--eval-tokens", type=int, default=-1, help="number of tokens to evaluate val loss on (-1 = 20*total_batch_size)")
 # Optimization
 parser.add_argument("--unembedding-lr", type=float, default=0.004, help="learning rate for unembedding parameters")
-parser.add_argument("--embedding-lr", type=float, default=0.2, help="learning rate for embedding parameters")
+parser.add_argument("--embedding-lr", type=float, default=0.3, help="learning rate for embedding parameters")
 parser.add_argument("--matrix-lr", type=float, default=0.02, help="learning rate for matrix parameters (Muon)")
-parser.add_argument("--init-lr-frac", type=float, default=1.0, help="initial learning rate fraction")
+parser.add_argument("--init-lr-frac", type=float, default=0.8, help="initial learning rate fraction")
+parser.add_argument("--warmup-ratio", type=float, default=0.0, help="ratio of progress for LR warmup")
+parser.add_argument("--warmdown-ratio", type=float, default=0.5, help="ratio of progress for LR warmdown")
+parser.add_argument("--final-lr-frac", type=float, default=0.0, help="final LR as fraction of initial LR")
 parser.add_argument("--weight-decay", type=float, default=0.0, help="weight decay")
 # Evaluation
 parser.add_argument("--eval-every", type=int, default=150, help="evaluate val bpb every N steps (-1 = disable)")
@@ -106,12 +110,6 @@ build_val_loader = lambda: iter_data(args.device_batch_size, args.max_seq_len, "
 
 progress = 0 # will go from 0 to 1 over the course of the epoch
 
-# TODO: try adding warmup (now, loss goes up first few steps)
-# Learning rate scheduler
-def get_lr_multiplier(progress):
-    # first 80% of training: no decay, then linearly ramp down to 0.01
-    return 1 if progress < 0.8 else max(0.01, 1 - (progress - 0.8) / 0.2)
-
 # -----------------------------------------------------------------------------
 # Training loop
 x, y, approx_progress, last_step = next(train_loader) # prefetch the very first batch of data
@@ -156,14 +154,7 @@ while True:
             {
                 "step": step,
                 "val_bpb": val_bpb, # loss at last step
-                "model_config": {
-                    "sequence_len": args.max_seq_len,
-                    "vocab_size": tokenizer.get_vocab_size(),
-                    "n_layer": depth,
-                    "n_head": model.config.n_head,
-                    "n_kv_head": model.config.n_kv_head,
-                    "n_embd": model.config.n_embd,
-                },
+                "model_config": asdict(orig_model.config),
                 "user_config": user_config, # inputs to the training script
             }
         )
@@ -184,7 +175,7 @@ while True:
         x, y, approx_progress, last_step = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
         progress = max(progress, approx_progress) # only increase progress monotonically
     # step the optimizer
-    lrm = get_lr_multiplier(progress)
+    lrm = get_lr_multiplier(progress, args)
     for group in optimizer.param_groups:
         group["lr"] = group["initial_lr"] * lrm
     optimizer.step()

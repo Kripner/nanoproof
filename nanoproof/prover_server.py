@@ -32,7 +32,7 @@ from typing import Optional
 import requests
 from flask import Flask, jsonify
 
-from nanoproof.search import Config, Game
+from nanoproof.search import SearchConfig, Game
 from nanoproof.common import linearize_proof, construct_proof_source
 from nanoproof.experience_collection import ProverWorker
 from nanoproof.inference import RemoteTacticModel
@@ -88,7 +88,7 @@ class ConnectionFailureTracker:
 
 
 def create_remote_prover_worker(
-    config: Config,
+    config: SearchConfig,
     tactic_model: RemoteTacticModel,
     coordinator_url: str,
     lean_address: str,
@@ -351,12 +351,9 @@ def main():
         my_address = f"{my_ip}:{args.port}"
     
     # Create components
-    config = Config(
+    config = SearchConfig(
         num_simulations=args.num_simulations,
         num_actors=args.num_actors,
-        num_sampled_tactics=args.num_sampled_tactics,
-        server_address=lean_host,
-        server_port=lean_port,
     )
     
     coordinator_url = f"http://{rl_server}"

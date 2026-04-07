@@ -41,15 +41,6 @@ class NetworkConfig:
     # Characters: L=long (full context), S=short (quarter context)
     window_pattern: str
 
-    # value head
-    num_value_bins: int = 64
-    min_value: float = 0.0
-    max_value: float = 1.0
-
-    # sampling
-    policy_num_tactics: int = 6
-    max_tactic_len: int = 32
-
 
 def norm(x):
     return F.rms_norm(x, (x.size(-1),))

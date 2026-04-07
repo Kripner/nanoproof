@@ -29,9 +29,9 @@ from flask import Flask, request, jsonify
 
 from nanoproof.checkpoints import load_model
 from nanoproof.cli import log, log0
-from nanoproof.common import ValueOrError
+from nanoproof.common import ValueOrError, GLOBAL_CONFIG
 from nanoproof.engine import Engine
-from nanoproof.tokenizer import _MIN_VALUE, _MAX_VALUE, HuggingFaceTokenizer
+from nanoproof.tokenizer import HuggingFaceTokenizer
 from nanoproof.model import Transformer
 
 
@@ -151,7 +151,7 @@ class TacticModel:
         # Extract bin logits and compute soft predictions
         bin_logits = value_logits[:, bin_token_ids].float()  # (B, 64)
         bin_probs = torch.softmax(bin_logits, dim=-1)  # (B, 64)
-        bin_values = torch.arange(_MIN_VALUE, _MAX_VALUE + 1, dtype=bin_probs.dtype, device=device)
+        bin_values = torch.arange(1, GLOBAL_CONFIG.num_value_bins + 1, dtype=bin_probs.dtype, device=device)
         values = (bin_probs * bin_values).sum(dim=-1)  # (B,)
         values_list = values.tolist()
 

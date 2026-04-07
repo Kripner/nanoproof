@@ -5,6 +5,7 @@ import sys
 import argparse
 import random
 import time
+from dataclasses import asdict
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -17,9 +18,10 @@ from leantree.core.lean import LeanGoal
 from nanoproof.common import compute_init, compute_cleanup, get_base_dir, DummyWandb, autodetect_device_type, SimpleTimer, flush, active_barrier_master, active_barrier_wait, create_run_dirs
 from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
+from nanoproof.search import SearchConfig
 from nanoproof.data.sft.leantree import iter_data
 from nanoproof.data.sft.leantree_dataloader import rl_data_generator
-from nanoproof.experience_collection import ReplayBuffer, TheoremsSampler, Config, run_actor
+from nanoproof.experience_collection import ReplayBuffer, TheoremsSampler, run_actor
 from nanoproof.inference import TacticModel, BlockingTacticModel
 from nanoproof.data.bench import minif2f
 from nanoproof.data.rl import leanworkbook
@@ -71,7 +73,7 @@ parser.add_argument("--matrix-lr", type=float, default=0.02)
 parser.add_argument("--weight-decay", type=float, default=0.0)
 parser.add_argument("--init-lr-frac", type=float, default=0.02)
 parser.add_argument("--augment-data", type=bool, default=True)
-parser.add_argument("--value-weight", type=float, default=0.1)
+parser.add_argument("--value-weight", type=float, default=0.01)
 parser.add_argument("--eval-every", type=int, default=100)
 parser.add_argument("--eval-start", type=int, default=0)
 parser.add_argument("--save-every", type=int, default=500)
@@ -79,81 +81,48 @@ parser.add_argument("--resume-from", type=str, default="")
 args = parser.parse_args()
 user_config = vars(args).copy()
 
-# Backward-compatible aliases for the rest of the file
-run = args.run
-seed = args.seed
-model_path = args.model_path
-model_step = args.model_step
-device_type = args.device_type
-device_batch_size = args.device_batch_size
-infra_file = args.infra_file
-inference_server_port = args.inference_server_port
-poll_interval = args.poll_interval
-lean_server = args.lean_server
-fraction_sft = args.fraction_sft
-collect_every = args.collect_every
-collect_transitions = args.collect_transitions
-num_actors = args.num_actors
-num_sampled_tactics = args.num_sampled_tactics
-num_simulations_collect = args.num_simulations_collect
-num_simulations_eval = args.num_simulations_eval
-batch_timeout = args.batch_timeout
-max_batch_tokens = args.max_batch_tokens
-target_examples_per_step = args.target_examples_per_step
-unembedding_lr = args.unembedding_lr
-embedding_lr = args.embedding_lr
-matrix_lr = args.matrix_lr
-weight_decay = args.weight_decay
-init_lr_frac = args.init_lr_frac
-augment_data = args.augment_data
-value_weight = args.value_weight
-eval_every = args.eval_every
-eval_start = args.eval_start
-save_every = args.save_every
-resume_from = args.resume_from
-
 # -----------------------------------------------------------------------------
 # Distributed mode configuration
-# If infra_file is provided, load the infrastructure config and enable distributed mode
-# Otherwise, use local mode with lean_server parameter
+# If --infra-file is provided, load the infrastructure config and enable distributed mode
+# Otherwise, use local mode with --lean-server.
 
-distributed = bool(infra_file)  # distributed mode is enabled if infra_file is provided
+distributed = bool(args.infra_file)
 infra_config: InfraConfig | None = None
 
 if distributed:
-    if not os.path.exists(infra_file):
-        log(f"Error: Infrastructure file {infra_file} does not exist", component="Main")
+    if not os.path.exists(args.infra_file):
+        log(f"Error: Infrastructure file {args.infra_file} does not exist", component="Main")
         sys.exit(1)
-    infra_config = load_infra_config(infra_file)
+    infra_config = load_infra_config(args.infra_file)
     # Override inference_server_port from infra config
-    inference_server_port = infra_config.rl_server_port
+    args.inference_server_port = infra_config.rl_server_port
     # Get lean servers for monitoring
     lean_servers = infra_config.get_lean_server_list()
     # Lean server for local actors not used in distributed mode
     local_lean_server = parse_lean_server("localhost:8000")
     # Warn if num_simulations is changed from default - must be set in prover_server.py
-    if num_simulations_collect != 50:
-        print(f"WARNING: num_simulations_collect={num_simulations_collect} is ignored in distributed mode. "
+    if args.num_simulations_collect != 50:
+        print(f"WARNING: num_simulations_collect={args.num_simulations_collect} is ignored in distributed mode. "
               f"Set --num-simulations in prover_server.py instead.")
-    if num_simulations_eval != 50:
-        print(f"WARNING: num_simulations_eval={num_simulations_eval} is ignored in distributed mode. "
+    if args.num_simulations_eval != 50:
+        print(f"WARNING: num_simulations_eval={args.num_simulations_eval} is ignored in distributed mode. "
               f"Set --num-simulations in prover_server.py instead.")
 else:
     # Local mode: parse lean_server and use it for both actors and monitoring
-    local_lean_server = parse_lean_server(lean_server)
+    local_lean_server = parse_lean_server(args.lean_server)
     lean_servers = [str(local_lean_server)]
 
 # -----------------------------------------------------------------------------
 
 # Compute init
-device_type = autodetect_device_type() if device_type == "" else device_type
-ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+args.device_type = autodetect_device_type() if args.device_type == "" else args.device_type
+ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(args.device_type)
 master_process = ddp_rank == 0
 set_ddp_info(is_master=master_process, rank=ddp_rank)
 # Model handles dtype internally via Linear class, no autocast needed
 
 # Output directory init
-log_dir, model_dir = create_run_dirs("rl", run, args_dict=user_config)
+log_dir, model_dir = create_run_dirs("rl", args.run, args_dict=user_config)
 output_dir = log_dir  # RL logs, replay buffers, eval results go in log_dir
 user_config["log_dir"] = log_dir
 user_config["model_dir"] = model_dir
@@ -163,61 +132,58 @@ if master_process:
     configure_logging(output_dir)
 
 # wandb logging init
-use_dummy_wandb = run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-rl", name=run, dir=log_dir, config=user_config, save_code=True)
+use_dummy_wandb = args.run == "dummy" or not master_process
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-rl", name=args.run, dir=log_dir, config=user_config, save_code=True)
 
 # Create the tactic model
 # In distributed mode, we use BlockingTacticModel for inference servers (started later)
 # In local mode, we use BlockingTacticModel for parallel actors
 log0(f"Distributed mode: {distributed}", component="Config")
-inner_tactic_model = TacticModel.create(num_samples=num_sampled_tactics, model_path=model_path, step=model_step)
+inner_tactic_model = TacticModel.create(num_samples=args.num_sampled_tactics, model_path=args.model_path, step=args.model_step)
 if distributed:
-    # In distributed mode, we don't need BlockingTacticModel here - 
+    # In distributed mode, we don't need BlockingTacticModel here -
     # inference servers are started later with their own BlockingTacticModel
     tactic_model = None
     model = inner_tactic_model.network
 else:
     tactic_model = BlockingTacticModel(
         inner_model=inner_tactic_model,
-        timeout_seconds=batch_timeout,
-        max_batch_tokens=max_batch_tokens
+        timeout_seconds=args.batch_timeout,
+        max_batch_tokens=args.max_batch_tokens,
     )
     model = tactic_model.network
 
 # -----------------------------------------------------------------------------
 # DataLoader
 
-examples_per_step = device_batch_size * ddp_world_size
-log0(f"Target examples per step: {target_examples_per_step}", component="Config")
-log0(f"Device batch size: {device_batch_size}", component="Config")
+examples_per_step = args.device_batch_size * ddp_world_size
+log0(f"Target examples per step: {args.target_examples_per_step}", component="Config")
+log0(f"Device batch size: {args.device_batch_size}", component="Config")
 log0(f"Examples per step is device_batch_size * ddp_world_size: {examples_per_step}", component="Config")
-assert target_examples_per_step % examples_per_step == 0, "Target examples per step must be divisible by examples per step"
-grad_accum_steps = target_examples_per_step // examples_per_step
+assert args.target_examples_per_step % examples_per_step == 0, "Target examples per step must be divisible by examples per step"
+grad_accum_steps = args.target_examples_per_step // examples_per_step
 log0(f"=> Setting grad accum steps: {grad_accum_steps}", component="Config")
 
-rank_seed = seed + ddp_rank
+rank_seed = args.seed + ddp_rank
 
-config = Config(
-    num_actors=num_actors,
-    num_sampled_tactics=num_sampled_tactics,
-    num_simulations=num_simulations_collect,
-    server_address=local_lean_server.address,
-    server_port=local_lean_server.port,
+search_config = SearchConfig(
+    num_actors=args.num_actors,
+    num_simulations=args.num_simulations_collect,
 )
-replay_buffer = ReplayBuffer(config, seed=rank_seed)
+replay_buffer = ReplayBuffer(seed=rank_seed)
 theorems_sampler = TheoremsSampler(seed=rank_seed)
 
 # Create the RL monitor (only show on master process)
-rl_monitor = create_monitor(num_actors=num_actors, enabled=master_process)
+rl_monitor = create_monitor(num_actors=args.num_actors, enabled=master_process)
 rl_monitor.set_output_dir(output_dir)
 rl_monitor.set_lean_servers(lean_servers)
 
-shuffle_goals_and_hypotheses = leantree.augmentations.ShuffleGoalsAndHypotheses(seed=seed)
-random_rename = leantree.augmentations.RandomRename(seed=seed)
+shuffle_goals_and_hypotheses = leantree.augmentations.ShuffleGoalsAndHypotheses(seed=args.seed)
+random_rename = leantree.augmentations.RandomRename(seed=args.seed)
 
 mathlib_train = list(iter_data(
     split="train",
-    augmentations=[shuffle_goals_and_hypotheses, random_rename] if augment_data else None,
+    augmentations=[shuffle_goals_and_hypotheses, random_rename] if args.augment_data else None,
 ))
 random.Random(rank_seed).shuffle(mathlib_train)
 mathlib_val = list(iter_data(split="val"))
@@ -241,8 +207,8 @@ def train_generator():
     rng = random.Random(rank_seed)
     mathlib_iter = iter(mathlib_train)
     while True:
-        assert len(replay_buffer.buffer) >= collect_transitions
-        if rng.random() < fraction_sft:
+        assert len(replay_buffer.buffer) >= args.collect_transitions
+        if rng.random() < args.fraction_sft:
             try:
                 state, tactic, proof_depth = next(mathlib_iter)
             except StopIteration:
@@ -252,27 +218,27 @@ def train_generator():
             state, tactic, value_target = replay_buffer.sample_transition()
             proof_depth = -value_target
             # Only run augmentations on replay buffer data - Mathlib data is already augmented.
-            if augment_data:
+            if args.augment_data:
                 state, tactic = augment(state, tactic)
 
         yield state, tactic, proof_depth
 
 
-train_loader = rl_data_generator(train_generator(), batch_size=device_batch_size)
+train_loader = rl_data_generator(train_generator(), batch_size=args.device_batch_size)
 value_delim_tok = inner_tactic_model.tokenizer.encode_special("<|value|>")  # for distinguishing policy vs value samples
 
 # -----------------------------------------------------------------------------
 # Initialize the Optimizer
 
 optimizer = model.setup_optimizer(
-    unembedding_lr=unembedding_lr,
-    embedding_lr=embedding_lr,
-    matrix_lr=matrix_lr,
-    weight_decay=weight_decay,
+    unembedding_lr=args.unembedding_lr,
+    embedding_lr=args.embedding_lr,
+    matrix_lr=args.matrix_lr,
+    weight_decay=args.weight_decay,
 )
 # Set the initial learning rate as a fraction of the base learning rate
 for group in optimizer.param_groups:
-    group["lr"] = group["lr"] * init_lr_frac
+    group["lr"] = group["lr"] * args.init_lr_frac
 
 
 # -----------------------------------------------------------------------------
@@ -284,22 +250,22 @@ if distributed:
     # Create BlockingTacticModel for the inference server
     inference_model = BlockingTacticModel(
         inner_model=inner_tactic_model,
-        timeout_seconds=batch_timeout,
-        max_batch_tokens=max_batch_tokens
+        timeout_seconds=args.batch_timeout,
+        max_batch_tokens=args.max_batch_tokens,
     )
     # Each rank starts an inference server on its own port
-    inference_port = inference_server_port + 1 + ddp_rank  # ports 5001, 5002, ...
+    inference_port = args.inference_server_port + 1 + ddp_rank  # ports 5001, 5002, ...
     inference_server_thread = start_inference_server(inference_model, inference_port)
-    
+
     # Sync to ensure all inference servers are up before coordinator starts
     if ddp:
         dist.barrier()
-    
+
     # Master also starts the coordinator (proxies inference + handles registration)
     if master_process:
-        inference_endpoints = [f"http://127.0.0.1:{inference_server_port + 1 + r}" for r in range(ddp_world_size)]
+        inference_endpoints = [f"http://127.0.0.1:{args.inference_server_port + 1 + r}" for r in range(ddp_world_size)]
         coordinator_thread, inference_router = start_coordinator(
-            inference_server_port, inference_endpoints, startup_timeout=30.0
+            args.inference_server_port, inference_endpoints, startup_timeout=30.0
         )
     
     # Sync again so all ranks wait for coordinator
@@ -329,15 +295,15 @@ atexit.register(cleanup)
 
 while True:
     timer = SimpleTimer()
-    
-    if step % eval_every == 0 and step >= eval_start:
+
+    if step % args.eval_every == 0 and step >= args.eval_start:
         timer.start("eval")
         model.eval()
         rl_monitor.set_phase("evaluating")
 
         # Policy evaluation (tactic accuracy and critic errors on mathlib val)
         eval_steps = 200
-        build_val_loader = lambda: sft_data_generator(mathlib_val, batch_size=device_batch_size)
+        build_val_loader = lambda: sft_data_generator(mathlib_val, batch_size=args.device_batch_size)
         tactic_results = eval_tactic_accuracy(model, inner_tactic_model.tokenizer, build_val_loader(), max_steps=eval_steps)
         critic_results = eval_critic_errors(model, inner_tactic_model.tokenizer, build_val_loader(), max_steps=eval_steps)
         
@@ -425,16 +391,18 @@ while True:
 
             log(f"Evaluating on {len(minif2f_theorems)} theorems from MiniF2F", component="Eval")
             minif2f_results = eval_success_rate(
-                inner_tactic_model, minif2f_theorems, progress=MonitorProgress("MiniF2F"),
-                num_actors=num_actors, num_simulations=num_simulations_eval
+                inner_tactic_model, local_lean_server.address, local_lean_server.port,
+                minif2f_theorems, progress=MonitorProgress("MiniF2F"),
+                num_actors=args.num_actors, num_simulations=args.num_simulations_eval,
             )
             rl_monitor.record_eval(step, "MiniF2F", minif2f_results['success_rate'],
                                    minif2f_results['solved'], minif2f_results['total'], minif2f_results['errors'])
 
             log(f"Evaluating on {len(leanworkbook_theorems)} theorems from LeanWorkBook", component="Eval")
             leanworkbook_results = eval_success_rate(
-                inner_tactic_model, leanworkbook_theorems, progress=MonitorProgress("LeanWorkBook"),
-                num_actors=num_actors, num_simulations=num_simulations_eval
+                inner_tactic_model, local_lean_server.address, local_lean_server.port,
+                leanworkbook_theorems, progress=MonitorProgress("LeanWorkBook"),
+                num_actors=args.num_actors, num_simulations=args.num_simulations_eval,
             )
             rl_monitor.record_eval(step, "LeanWorkBook", leanworkbook_results['success_rate'],
                                    leanworkbook_results['solved'], leanworkbook_results['total'],
@@ -463,9 +431,9 @@ while True:
         timer.end("eval")
         flush()  # Free memory from evaluation
 
-    if step % collect_every == 0:
+    if step % args.collect_every == 0:
         # Check if we can resume from a previous run's replay buffer
-        resume_file = os.path.join(resume_from, f"replay_buffer_{step:05d}.jsonl") if resume_from else None
+        resume_file = os.path.join(args.resume_from, f"replay_buffer_{step:05d}.jsonl") if args.resume_from else None
         if resume_file and os.path.exists(resume_file):
             if master_process:
                 log(f"Loading replay buffer at step {step} from {resume_file}", component="Main")
@@ -487,34 +455,39 @@ while True:
             # collect proofs
             timer.start("collect")
             model.eval()
-            rl_monitor.start_collection(target_samples=collect_transitions, num_actors=num_actors)
+            rl_monitor.start_collection(target_samples=args.collect_transitions, num_actors=args.num_actors)
             rl_monitor.set_step(step)
-            
+
             if distributed:
                 if master_process:
                     # Distributed mode: coordinate remote provers (only master does this)
                     # Retry until we have enough transitions
-                    while len(replay_buffer.local_buffer) < collect_transitions:
+                    while len(replay_buffer.local_buffer) < args.collect_transitions:
                         collected = distributed_collect(
                             sampler=theorems_sampler,
-                            target_transitions=collect_transitions,
-                            poll_interval=poll_interval,
+                            target_transitions=args.collect_transitions,
+                            poll_interval=args.poll_interval,
                             replay_buffer=replay_buffer,
                         )
-                        if collected < collect_transitions:
-                            log(f"Collection incomplete ({collected}/{collect_transitions}), retrying...", 
+                        if collected < args.collect_transitions:
+                            log(f"Collection incomplete ({collected}/{args.collect_transitions}), retrying...",
                                 component="Coordinator")
                     # Signal completion to other ranks via store.
                     active_barrier_master(f"collection_done_{step}")
                 else:
                     # Active waiting to not block the Python thread (which is needed for inference).
                     active_barrier_wait(f"collection_done_{step}")
-                
+
                 # Wait for provers to abort their MCTS searches and release Lean processes
                 time.sleep(3.0)
             else:
                 # Local mode: run actors locally
-                run_actor(collect_transitions, config, tactic_model, replay_buffer, theorems_sampler)
+                run_actor(
+                    args.collect_transitions, search_config, tactic_model,
+                    replay_buffer, theorems_sampler,
+                    lean_address=local_lean_server.address,
+                    lean_port=local_lean_server.port,
+                )
             
             model.train()
             timer.end("collect")
@@ -526,11 +499,10 @@ while True:
                     for context, tactic, value_target in replay_buffer.buffer:
                         f.write(json.dumps({"context": context, "tactic": tactic, "value_target": value_target}) + "\n")
 
-    if step % save_every == 0 and step > 0 and master_process:
-        model_config_kwargs = model.config.__dict__  # slightly naughty, abusing the simplicity of GPTConfig, TODO nicer
+    if step % args.save_every == 0 and step > 0 and master_process:
         checkpoint_meta = {
             "step": step,
-            "model_config": model_config_kwargs,
+            "model_config": asdict(model.config),
         }
         if minif2f_results:
             checkpoint_meta["minif2f_val"] = minif2f_results['success_rate']
@@ -564,7 +536,7 @@ while True:
         is_value_sample = (train_inputs == value_delim_tok).any(dim=1)  # (B,)
 
         # Create per-sample weights: value_weight for value samples, 1.0 for policy samples
-        sample_weights = torch.where(is_value_sample, value_weight, 1.0)  # (B,)
+        sample_weights = torch.where(is_value_sample, args.value_weight, 1.0)  # (B,)
 
         # Compute weighted loss: weight each token by its sample's weight
         token_mask = (train_targets >= 0)  # (B, T)
