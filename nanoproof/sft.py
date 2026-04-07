@@ -72,7 +72,7 @@ log_dir, model_dir = create_run_dirs("sft", args.run, args_dict=user_config)
 
 # wandb logging init
 use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-sft", name=args.run, config={**user_config, "log_dir": log_dir, "model_dir": model_dir}, save_code=True)
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-sft", name=args.run, dir=log_dir, config={**user_config, "log_dir": log_dir, "model_dir": model_dir}, save_code=True)
 
 # Load the model and tokenizer
 if args.resume_from is not None:

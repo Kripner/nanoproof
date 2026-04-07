@@ -72,7 +72,7 @@ log_dir, model_dir = create_run_dirs("midtrain", args.run, args_dict=user_config
 
 # wandb logging init
 use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-mid", name=args.run, config={**user_config, "log_dir": log_dir, "model_dir": model_dir})
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-mid", name=args.run, dir=log_dir, config={**user_config, "log_dir": log_dir, "model_dir": model_dir})
 
 # Load the model and tokenizer
 model, tokenizer, meta = load_model(args.model_path, device, phase="train", step=args.step)

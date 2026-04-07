@@ -164,7 +164,7 @@ if master_process:
 
 # wandb logging init
 use_dummy_wandb = run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-rl", name=run, config=user_config, save_code=True)
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-rl", name=run, dir=log_dir, config=user_config, save_code=True)
 
 # Create the tactic model
 # In distributed mode, we use BlockingTacticModel for inference servers (started later)
