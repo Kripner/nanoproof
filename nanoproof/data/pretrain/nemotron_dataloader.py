@@ -1,4 +1,11 @@
 # Source: https://github.com/karpathy/nanochat/blob/master/nanochat/dataloader.py
+"""
+BOS-aligned dataloader with Best-Fit Cropping over Nemotron parquet shards.
+
+Every row starts with BOS. Documents are packed using a best-fit algorithm
+yielding ~100% utilization (no padding) at the cost of cropping ~35% of tokens.
+Approximate resume is supported via a per-batch state_dict.
+"""
 
 from collections import deque
 
@@ -9,92 +16,6 @@ from nanoproof.common import get_dist_info
 from nanoproof.data.pretrain.nemotron import list_parquet_files
 from nanoproof.tokenizer import get_tokenizer
 
-def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device="cuda", resume_state_dict=None):
-    """
-    Stream pretraining text from parquet files, tokenize, yield training batches.
-
-    This implementation became a bit more complex because we wish to support approximate resume training.
-    Instead of turning this into a Class, we opt to return the state_dict with every batch,
-    and then the caller can pass in a state_dict to resume training from a desired point.
-    Note that this resumption is atm only *approximate* for simplicity.
-    We won't repeat the same documents but we might skip a few.
-    The state_dict that is returned can be later passed into this function via `resume_state_dict` to approximately resume.
-
-    Perfect state resumption is possible but would be a lot more bloated, probably not worth it atm.
-    """
-    assert split in ["train", "val"], "split must be 'train' or 'val'"
-
-    # infinite iterator over document batches (list of text strings)
-    ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
-    def document_batches():
-        parquet_paths = list_parquet_files()
-        assert len(parquet_paths) > 0, "No parquet files found."
-        parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
-        resume_pq_idx = resume_state_dict["pq_idx"] if resume_state_dict is not None else 0
-        resume_rg_idx = resume_state_dict["rg_idx"] if resume_state_dict is not None else None
-        pq_idx = resume_pq_idx # we kick off parquet files at the resume index (or by default just 0)
-        while True: # iterate infinitely (multi-epoch)
-            while pq_idx < len(parquet_paths): # iterate over all parquet files
-                filepath = parquet_paths[pq_idx]
-                pf = pq.ParquetFile(filepath)
-                # Start from resume point if resuming on same file, otherwise from DDP rank
-                # I know this state resumption is a little bit tricky and a little bit hacky... sigh.
-                if resume_rg_idx is not None:
-                    base_idx = resume_rg_idx // ddp_world_size # in units of ddp_world_size
-                    base_idx += 1 # advance by 1 so that we definitely don't repeat data after resuming
-                    rg_idx = base_idx * ddp_world_size + ddp_rank
-                    resume_rg_idx = None # set to None as we only want to do this a single time
-                else:
-                    rg_idx = ddp_rank
-                while rg_idx < pf.num_row_groups:
-                    rg = pf.read_row_group(rg_idx)
-                    batch = rg.column('text').to_pylist() # each batch is a parquet group, e.g. 1024 rows
-                    # the tokenizer encode might want to go in even smaller batches, e.g. 128 rows
-                    for i in range(0, len(batch), tokenizer_batch_size):
-                        yield batch[i:i+tokenizer_batch_size], (pq_idx, rg_idx)
-                    rg_idx += ddp_world_size # advance to the next row group (in DDP)
-                pq_idx += 1 # advance to the next parquet file
-            print("WARNING: Nemotron dataset restarted!")
-    batches = document_batches()
-
-    # Now emit batches of tokens.
-    needed_tokens = B * T + 1 # +1 is because we also need the target at the last token
-    # get the tokenizer and the bos token
-    tokenizer = get_tokenizer()
-    bos_token = tokenizer.get_bos_token_id()
-    assert bos_token is not None
-    # scratch buffer holds the tokens for one iteration
-    token_buffer = deque() # we stream tokens on the right and pop from the left
-    while True:
-        # Accumulate enough tokens for one iteration before yielding.
-        while len(token_buffer) < needed_tokens:
-            doc_batch, (pq_idx, rg_idx) = next(batches)
-            # token_lists = tokenizer.encode(doc_batch, prepend=bos_token, num_threads=tokenizer_threads)
-            token_lists = tokenizer.encode(doc_batch, prepend=bos_token)
-            for tokens in token_lists:
-                token_buffer.extend(tokens)
-        # Move tokens from the deque into the scratch buffer
-        tokens = [token_buffer.popleft() for _ in range(needed_tokens)]
-        # CUDA supports memory pinning for asynchronous transfers between CPU and GPU
-        use_cuda_optimizations = device == "cuda"
-        scratch = torch.tensor(tokens, dtype=torch.long, pin_memory=use_cuda_optimizations) # in PyTorch, long=int64
-        # Create the inputs/targets as 1D tensors
-        inputs_cpu = scratch[:-1]
-        targets_cpu = scratch[1:]
-        # Reshape to 2D and move to GPU async
-        inputs = inputs_cpu.view(B, T).to(device=device, non_blocking=use_cuda_optimizations)
-        targets = targets_cpu.view(B, T).to(device=device, non_blocking=use_cuda_optimizations)
-        state_dict = {"pq_idx": pq_idx, "rg_idx": rg_idx} # we need this in case we wish to approximately resume training
-        yield inputs, targets, state_dict
-
-def tokenizing_distributed_data_loader(*args, **kwargs):
-    # helper function that only emits the inputs/targets and not the state_dict
-    for inputs, targets, state_dict in tokenizing_distributed_data_loader_with_state(*args, **kwargs):
-        yield inputs, targets
-
-# =============================================================================
-# BOS-aligned Best-Fit Cropping dataloader
-# =============================================================================
 
 def _document_batches(split, resume_state_dict, tokenizer_batch_size):
     """
@@ -140,24 +61,23 @@ def _document_batches(split, resume_state_dict, tokenizer_batch_size):
         epoch += 1
 
 
-def tokenizing_distributed_data_loader_with_state_bos_bestfit(
+def iter_data_with_state(
     B, T, split,
     tokenizer_threads=4, tokenizer_batch_size=128,
     device="cuda", resume_state_dict=None,
-    buffer_size=1000
+    buffer_size=1000,
 ):
-    """
-    BOS-aligned dataloader with Best-Fit Cropping.
+    """BOS-aligned best-fit-cropping pretraining dataloader.
 
-    Every row starts with BOS. Documents packed using best-fit algorithm.
-    100% utilization (no padding), ~35% tokens cropped.
+    Yields ``(inputs, targets, state_dict)`` triples. The state_dict can be
+    threaded back via ``resume_state_dict`` to approximately resume training.
 
     Algorithm for each row:
     1. From buffered docs, pick the LARGEST doc that fits entirely
     2. Repeat until no doc fits
     3. When nothing fits, crop a doc to fill remaining space exactly
     """
-    assert split in ["train", "val"], "split must be 'train' or 'val'"
+    assert split in ("train", "valid"), f"Invalid split: {split!r}"
 
     row_capacity = T + 1
     batches = _document_batches(split, resume_state_dict, tokenizer_batch_size)
@@ -222,24 +142,26 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
         yield inputs, targets, state_dict
 
 
-def tokenizing_distributed_data_loader_bos_bestfit(*args, **kwargs):
+def iter_data(*args, **kwargs):
     """Helper that omits state_dict from yields."""
-    for inputs, targets, state_dict in tokenizing_distributed_data_loader_with_state_bos_bestfit(*args, **kwargs):
+    for inputs, targets, state_dict in iter_data_with_state(*args, **kwargs):
         yield inputs, targets
 
 
 if __name__ == "__main__":
-    B = 128
-    T = 1024
-    max_batches = 10
-    split = "train"
-    tokenizer_threads = 4
-    tokenizer_batch_size = 128
-    device = "cuda"
-    resume_state_dict = None
-    dataloader = tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads, tokenizer_batch_size, device, resume_state_dict)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Inspect the Nemotron BOS-bestfit dataloader")
+    parser.add_argument("--split", choices=["train", "valid"], default="train")
+    parser.add_argument("-B", type=int, default=128, help="batch size")
+    parser.add_argument("-T", type=int, default=1024, help="sequence length")
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--max-batches", type=int, default=10)
+    args = parser.parse_args()
+
+    dataloader = iter_data_with_state(args.B, args.T, args.split, device=args.device)
     for i, (inputs, targets, state_dict) in enumerate(dataloader):
-        if i >= max_batches:
+        if i >= args.max_batches:
             break
-        print(f"Batch {i}: {inputs.shape}, {targets.shape}", flush=True)
+        print(f"Batch {i}: inputs={tuple(inputs.shape)} targets={tuple(targets.shape)} state={state_dict}", flush=True)
     print("Done.")

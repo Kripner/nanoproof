@@ -280,12 +280,12 @@ exact Exists.intro x0 hx0
 # The tokenizer was trained on data from earlier shards, so it has seen this data
 nemotron_train_docs = next(parquets_iter_batched(split="train"))
 nemotron_train_text = "\n".join(nemotron_train_docs)
-nemotron_val_docs = next(parquets_iter_batched(split="val"))
+nemotron_val_docs = next(parquets_iter_batched(split="valid"))
 nemotron_val_text = "\n".join(nemotron_val_docs)
 
 leangithubraw_train_docs = next(iter_texts_batched(split="train"))
 leangithubraw_train_text = "\n".join(leangithubraw_train_docs)
-leangithubraw_val_docs = next(iter_texts_batched(split="val"))
+leangithubraw_val_docs = next(iter_texts_batched(split="valid"))
 leangithubraw_val_text = "\n".join(leangithubraw_val_docs)
 
 all_text = [

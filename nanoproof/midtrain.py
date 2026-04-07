@@ -106,7 +106,7 @@ for group in optimizer.param_groups:
 # Midtraining data mixture and DataLoader
 base_dir = get_base_dir()
 train_loader = iter_data(args.device_batch_size, args.max_seq_len, "train")
-build_val_loader = lambda: iter_data(args.device_batch_size, args.max_seq_len, "val")
+build_val_loader = lambda: iter_data(args.device_batch_size, args.max_seq_len, "valid")
 
 progress = 0 # will go from 0 to 1 over the course of the epoch
 

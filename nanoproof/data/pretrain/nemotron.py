@@ -51,10 +51,10 @@ def list_parquet_files(data_dir=None):
 def parquets_iter_batched(split, start=0, step=1):
     """
     Iterate through the dataset, in batches of underlying row_groups for efficiency.
-    - split can be "train" or "val". the last parquet file will be val.
+    - split can be "train" or "valid". the last parquet file will be valid.
     - start/step are useful for skipping rows in DDP. e.g. start=rank, step=world_size
     """
-    assert split in ["train", "val"], "split must be 'train' or 'val'"
+    assert split in ("train", "valid"), f"Invalid split: {split!r}"
     parquet_paths = list_parquet_files()
     parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
     for filepath in parquet_paths:

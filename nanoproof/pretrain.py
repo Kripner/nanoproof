@@ -26,7 +26,7 @@ import torch
 import torch.distributed as dist
 
 from nanoproof.model import Transformer, NetworkConfig, Linear
-from nanoproof.data.pretrain.nemotron_dataloader import tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
+from nanoproof.data.pretrain.nemotron_dataloader import iter_data as nemotron_iter_data, iter_data_with_state as nemotron_iter_data_with_state
 from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized, create_run_dirs, GLOBAL_CONFIG, get_lr_multiplier
 from nanoproof.tokenizer import get_tokenizer, get_token_bytes
 from nanoproof.checkpoints import save_checkpoint, load_checkpoint
@@ -272,8 +272,8 @@ scaler = torch.amp.GradScaler() if COMPUTE_DTYPE == torch.float16 else None
 # -----------------------------------------------------------------------------
 # Initialize DataLoaders
 dataloader_resume_state_dict = None if not resuming else meta_data["dataloader_state_dict"]
-train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(args.device_batch_size, args.max_seq_len, split="train", device=device, resume_state_dict=dataloader_resume_state_dict)
-build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(args.device_batch_size, args.max_seq_len, split="val", device=device)
+train_loader = nemotron_iter_data_with_state(args.device_batch_size, args.max_seq_len, split="train", device=device, resume_state_dict=dataloader_resume_state_dict)
+build_val_loader = lambda: nemotron_iter_data(args.device_batch_size, args.max_seq_len, split="valid", device=device)
 x, y, dataloader_state_dict = next(train_loader)
 
 # -----------------------------------------------------------------------------

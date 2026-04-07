@@ -22,7 +22,7 @@ HF_URL = "https://huggingface.co/datasets/ufal/leantree/resolve/main/leantree_ma
 
 
 def iter_data(split, eval_fraction=0.1, augmentations=None):
-    assert split in ["train", "val"]
+    assert split in ("train", "valid"), f"Invalid split: {split!r}"
     mathlib_file = os.path.join(DATA_DIR, "leantree_mathlib.jsonl")
     if not Path(mathlib_file).exists():
         raise Exception("leantree not downloaded, please run this script with `download` argument")
@@ -92,7 +92,7 @@ def print_stats():
     assert bos_token is not None
     eos_token = tokenizer.get_eos_token_id()
     assert eos_token is not None
-    for split in ["train", "val"]:
+    for split in ("train", "valid"):
         print(f"Loading {split=}...")
         dataset = list(iter_data(split=split))
         print(f"Calculating {split=}...")
@@ -148,7 +148,7 @@ def main():
     download_parser = subparsers.add_parser("download")
 
     show_parser = subparsers.add_parser("show")
-    show_parser.add_argument("--split", choices=["train", "val"], default="train")
+    show_parser.add_argument("--split", choices=["train", "valid"], default="train")
 
     stats_parser = subparsers.add_parser("stats")
 

@@ -237,7 +237,7 @@ def main():
 
     # Load Data
     print0("Loading dataset...")
-    split = "val"
+    split = "valid"
     dataset = list(iter_data(split=split))
     
     if len(dataset) == 0:

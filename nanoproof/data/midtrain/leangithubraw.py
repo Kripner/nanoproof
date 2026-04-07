@@ -270,16 +270,16 @@ def iter_data(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device
     Args:
         B: Batch size
         T: Sequence length (tokens per sample)
-        split: "train" or "val"
+        split: "train" or "valid"
         tokenizer_threads: Number of threads for tokenization (unused, kept for compatibility)
         tokenizer_batch_size: Batch size for tokenization
         device: Device to move tensors to ("cuda" or "cpu")
-    
+
     Yields:
         inputs: Tensor of shape (B, T) with input token IDs
         targets: Tensor of shape (B, T) with target token IDs
     """
-    assert split in ["train", "val"], "split must be 'train' or 'val'"
+    assert split in ("train", "valid"), f"Invalid split: {split!r}"
 
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
 
@@ -358,10 +358,10 @@ def iter_data(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device
 def iter_texts_batched(split, url_whitelist=None):
     """
     Iterate through the dataset, in batches of underlying row_groups for efficiency.
-    - split can be "train" or "val". the last parquet file will be val.
+    - split can be "train" or "valid". the last parquet file will be valid.
     - start/step are useful for skipping rows in DDP. e.g. start=rank, step=world_size
     """
-    assert split in ["train", "val"], "split must be 'train' or 'val'"
+    assert split in ("train", "valid"), f"Invalid split: {split!r}"
     parquet_path = os.path.join(DATA_DIR, "leangithubraw.parquet")
     if not os.path.exists(parquet_path):
         raise FileNotFoundError(f"Parquet file not found at {parquet_path}. Build it or download it first.")
@@ -449,7 +449,7 @@ def main():
     
     # Show
     show_parser = subparsers.add_parser("show", help="Show the first N batches from the dataset")
-    show_parser.add_argument("--split", default="train", choices=["train", "val"], help="Dataset split to show")
+    show_parser.add_argument("--split", default="train", choices=["train", "valid"], help="Dataset split to show")
     show_parser.add_argument("--B", type=int, default=4, help="Batch size")
     show_parser.add_argument("--T", type=int, default=512, help="Sequence length")
     show_parser.add_argument("--offset", type=int, default=0)
@@ -457,7 +457,7 @@ def main():
 
     # Show whole
     show_whole_parser = subparsers.add_parser("show_whole", help="Show the whole dataset")
-    show_whole_parser.add_argument("--split", default="train", choices=["train", "val"], help="Dataset split to show")
+    show_whole_parser.add_argument("--split", default="train", choices=["train", "valid"], help="Dataset split to show")
     show_whole_parser.add_argument("--B", type=int, default=32, help="Batch size")
     show_whole_parser.add_argument("--T", type=int, default=768, help="Sequence length")
 

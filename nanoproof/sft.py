@@ -111,7 +111,7 @@ augmentations = [
 ]
 train_ds = list(iter_data(split="train", augmentations=augmentations))
 random.Random(args.seed).shuffle(train_ds)
-val_ds = list(iter_data(split="val"))
+val_ds = list(iter_data(split="valid"))
 print0(f"Train rows count: {len(train_ds)} | Val rows count: {len(val_ds)}")
 
 train_loader = sft_data_generator(train_ds, batch_size=args.device_batch_size)

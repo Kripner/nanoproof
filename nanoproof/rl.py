@@ -186,7 +186,7 @@ mathlib_train = list(iter_data(
     augmentations=[shuffle_goals_and_hypotheses, random_rename] if args.augment_data else None,
 ))
 random.Random(rank_seed).shuffle(mathlib_train)
-mathlib_val = list(iter_data(split="val"))
+mathlib_val = list(iter_data(split="valid"))
 
 def augment(state_str, tactic_str):
     try:
@@ -312,8 +312,8 @@ while True:
             log(f"  Entropy - Tactic first: {tactic_results['first_token_entropy']:.4f} | Tactic all: {tactic_results['all_tokens_entropy']:.4f} | Critic: {critic_results['entropy']:.4f}", component="Eval")
 
         # Load eval theorems
-        minif2f_theorems = minif2f.list_theorems(split="Valid")
-        leanworkbook_theorems = leanworkbook.list_theorems(split="val")[:128]
+        minif2f_theorems = minif2f.list_theorems(split="valid")
+        leanworkbook_theorems = leanworkbook.list_theorems(split="valid")[:128]
 
         if distributed:
             # Distributed mode: use prover servers for evaluation (master only)

@@ -870,11 +870,10 @@ def main():
     else:
         # Normal mode: load full datasets
         if "minif2f" in datasets:
-            minif2f_split = "Valid" if args.split == "valid" else "Test"
-            dataset_theorems["minif2f"] = minif2f.list_theorems(split=minif2f_split)
+            dataset_theorems["minif2f"] = minif2f.list_theorems(split=args.split)
         if "leanworkbook" in datasets:
-            # leanworkbook only has "val" split (validated above that split != "test")
-            dataset_theorems["leanworkbook"] = leanworkbook.list_theorems(split="val")
+            # leanworkbook only has a "valid" split (validated above that split != "test")
+            dataset_theorems["leanworkbook"] = leanworkbook.list_theorems(split="valid")
 
         # Apply max_theorems limit
         if args.max_theorems:
