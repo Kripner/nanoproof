@@ -59,6 +59,7 @@ parser.add_argument("--eval-every", type=int, default=200, help="evaluate every 
 parser.add_argument("--eval-steps", type=int, default=200, help="number of eval steps")
 parser.add_argument("--sample-every", type=int, default=100, help="sample from model every N steps")
 parser.add_argument("--eval-metrics-max-problems", type=int, default=1024, help="max problems for eval metrics")
+parser.add_argument("--save-every-epoch", type=int, default=1, help="save a checkpoint every N epochs (final model is always saved)")
 # Loss weighting
 parser.add_argument("--value-weight", type=float, default=0.01, help="weight for value (critic) samples relative to policy samples")
 args = parser.parse_args()
@@ -252,7 +253,23 @@ hx0 : P x0
         model.train()
 
     if last_step:
-        if epoch < args.num_epochs - 1:
+        completed_epoch = epoch + 1  # 1-indexed count of fully completed epochs
+        is_final_epoch = epoch >= args.num_epochs - 1
+        # Save a checkpoint every N epochs; the final epoch is saved unconditionally below.
+        if master_process and not is_final_epoch and completed_epoch % args.save_every_epoch == 0:
+            save_checkpoint(
+                model_dir,
+                step,
+                model.state_dict(),
+                None,
+                {
+                    "step": step,
+                    "val_loss": val_loss,
+                    "model_config": asdict(orig_model.config),
+                },
+            )
+            print(f"Saved epoch {completed_epoch} checkpoint to {model_dir}")
+        if not is_final_epoch:
             print0(f"Epoch {epoch} done, starting next one.")
             epoch += 1
             train_loader = sft_data_generator(train_ds, batch_size=args.device_batch_size)
