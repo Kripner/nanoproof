@@ -161,8 +161,8 @@ while True:
             dist.all_reduce(val_loss, op=dist.ReduceOp.AVG) # average over ranks
         val_loss = val_loss.item()
 
-        tactic_results = eval_tactic_accuracy(model, tokenizer, build_val_loader(), max_steps=args.eval_steps)
-        critic_results = eval_critic_errors(model, tokenizer, build_val_loader(), max_steps=args.eval_steps)
+        tactic_results = eval_tactic_accuracy(model, tokenizer, build_val_loader(), eval_steps=args.eval_steps)
+        critic_results = eval_critic_errors(model, tokenizer, build_val_loader(), eval_steps=args.eval_steps)
 
         print0(f"Step {step:05d} | Validation loss: {val_loss:.6f} | Tactic full accuracy: {tactic_results['full_acc']:.4%} | Tactic first token accuracy: {tactic_results['first_token_acc']:.4%} | Critic argmax MSE: {critic_results['argmax_mse']:.4f} | Critic soft MSE: {critic_results['soft_mse']:.4f}")
         print0(f"  Entropy - Tactic first: {tactic_results['first_token_entropy']:.4f} | Tactic all: {tactic_results['all_tokens_entropy']:.4f} | Critic: {critic_results['entropy']:.4f}")

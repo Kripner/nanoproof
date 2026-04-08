@@ -1,8 +1,7 @@
+import argparse
+
 import torch
 import torch.distributed as dist
-from itertools import islice
-import sys
-import os
 
 
 from nanoproof.common import compute_init, autodetect_device_type, print0, is_ddp, get_dist_info, GLOBAL_CONFIG
@@ -34,14 +33,16 @@ def _compute_entropy(logits):
 
 
 @torch.inference_mode()
-def eval_critic_errors(model, tokenizer, leantree_batches, max_steps=None):
+def eval_critic_errors(model, tokenizer, leantree_batches, eval_steps=None):
     """Evaluate critic accuracy on value prediction.
-    
+
     Returns confusion matrix and MSE for value bin predictions.
-    Only processes samples where x contains the value_delim_tok.
-    
+    Only processes samples where x contains the value_delim_tok. Batches that
+    contain no value samples are skipped and do NOT count toward eval_steps;
+    `eval_steps` is the number of batches that actually contributed.
+
     In DDP mode, results are automatically reduced across all ranks.
-    
+
     Returns:
         y_true: list of actual bin values (1-64)
         y_pred: list of predicted bin values (1-64)
@@ -67,11 +68,15 @@ def eval_critic_errors(model, tokenizer, leantree_batches, max_steps=None):
     argmax_squared_error_sum = 0.0
     entropy_sum = 0.0
     
-    for x, y, _, _ in leantree_batches if max_steps is None else islice(leantree_batches, max_steps):
+    steps_done = 0
+    for x, y, _, _ in leantree_batches:
+        if eval_steps is not None and steps_done >= eval_steps:
+            break
         has_value = (x == value_delim_tok).any(dim=1)
         if not has_value.any():
             continue
         x, y = x[has_value], y[has_value]
+        steps_done += 1
         
         logits = model(x)  # (B, T, V)
         
@@ -141,11 +146,15 @@ def eval_critic_errors(model, tokenizer, leantree_batches, max_steps=None):
 
 
 @torch.inference_mode()
-def eval_tactic_accuracy(model, tokenizer, leantree_batches, max_steps=None):
+def eval_tactic_accuracy(model, tokenizer, leantree_batches, eval_steps=None):
     """Evaluate tactic prediction accuracy.
-    
+
+    Batches with no policy samples (i.e. all rows are value samples) are
+    skipped and do NOT count toward eval_steps; `eval_steps` is the number of
+    batches that actually contributed.
+
     In DDP mode, results are automatically reduced across all ranks.
-    
+
     Returns:
         full_acc: fraction of samples where all tokens are predicted correctly
         first_token_acc: fraction of samples where first token is predicted correctly
@@ -162,12 +171,16 @@ def eval_tactic_accuracy(model, tokenizer, leantree_batches, max_steps=None):
     value_delim_tok = tokenizer.encode_special("<|value|>")
     device = next(model.parameters()).device
     
-    for x, y, _, _ in leantree_batches if max_steps is None else islice(leantree_batches, max_steps):
+    steps_done = 0
+    for x, y, _, _ in leantree_batches:
+        if eval_steps is not None and steps_done >= eval_steps:
+            break
         # Skip samples where input contains value_delim_tok
         valid = ~(x == value_delim_tok).any(dim=1)
         x, y = x[valid], y[valid]
         if x.shape[0] == 0:
             continue
+        steps_done += 1
 
         logits = model(x) # (B, T, V)
         predictions = torch.argmax(logits, dim=-1) # (B, T)
@@ -224,53 +237,45 @@ def eval_tactic_accuracy(model, tokenizer, leantree_batches, max_steps=None):
 
 
 
-def main():
-    # Setup
+def _main():
+    parser = argparse.ArgumentParser(description="Evaluate a model's tactic and critic accuracy on the leantree validation set")
+    parser.add_argument("--model-path", type=str, required=True, help="path to model_NNNNNN.pt (relative to models/ or absolute)")
+    parser.add_argument("--split", type=str, default="valid", help="dataset split to evaluate on")
+    parser.add_argument("--batch-size", type=int, default=32, help="evaluation batch size")
+    parser.add_argument("--eval-steps", type=int, default=None, help="cap on number of contributing batches per eval (default: full split)")
+    args = parser.parse_args()
+
     device_type = autodetect_device_type()
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
-    
-    print0("Loading model...")
-    model, tokenizer, meta = load_model("sft/FIXME/model_005000.pt", device, phase="eval")
-    model.eval()
 
+    print0(f"Loading model from {args.model_path}...")
+    model, tokenizer, meta = load_model(args.model_path, device, phase="eval")
+    model.eval()
     print0(f"Model loaded. Config: {meta.get('model_config', 'N/A')}")
 
-    # Load Data
-    print0("Loading dataset...")
-    split = "valid"
-    dataset = list(iter_data(split=split))
-    
+    print0(f"Loading dataset (split={args.split})...")
+    dataset = list(iter_data(split=args.split))
     if len(dataset) == 0:
         print0("Dataset is empty!")
         return
+    print0(f"Dataset rows: {len(dataset)}")
 
-    batch_size = 32
-    
-    # Calculate steps
-    # We want to iterate through the dataset exactly once.
-    # sft_data_generator yields batches of size `batch_size`.
-    # It repeats the dataset indefinitely.
-    # We calculate how many batches correspond to one epoch.
-    # Each item in dataset produces 2 samples.
-    # DDP handles sharding.
-    
-    my_dataset_len = len(range(ddp_rank, len(dataset), ddp_world_size))
-    total_samples_local = my_dataset_len * 2
-    steps = total_samples_local // batch_size
-    
-    if steps == 0:
-        print0("Not enough data for one batch.")
-        return
+    build_loader = lambda: sft_data_generator(dataset, batch_size=args.batch_size, device=device)
 
-    print0(f"Evaluating on {steps} batches (approx {steps * batch_size} samples)...")
-    
-    data_gen = sft_data_generator(dataset, batch_size, device=device)
-    
-    results = eval_tactic_accuracy(model, tokenizer, data_gen, max_steps=steps)
-    
-    print0(f"Results for split '{split}':")
-    print0(f"Full Accuracy: {results['full_acc']:.4%}")
-    print0(f"First Token Accuracy: {results['first_token_acc']:.4%}")
+    tactic_results = eval_tactic_accuracy(model, tokenizer, build_loader(), eval_steps=args.eval_steps)
+    critic_results = eval_critic_errors(model, tokenizer, build_loader(), eval_steps=args.eval_steps)
+
+    print0(f"Results for split '{args.split}':")
+    print0(f"  Tactic samples:           {tactic_results['total_samples']}")
+    print0(f"  Tactic full accuracy:     {tactic_results['full_acc']:.4%}")
+    print0(f"  Tactic first-token acc:   {tactic_results['first_token_acc']:.4%}")
+    print0(f"  Tactic first-token entr:  {tactic_results['first_token_entropy']:.4f}")
+    print0(f"  Tactic all-tokens entr:   {tactic_results['all_tokens_entropy']:.4f}")
+    print0(f"  Critic samples:           {critic_results['total_samples']}")
+    print0(f"  Critic argmax MSE:        {critic_results['argmax_mse']:.4f}")
+    print0(f"  Critic soft MSE:          {critic_results['soft_mse']:.4f}")
+    print0(f"  Critic entropy:           {critic_results['entropy']:.4f}")
+
 
 if __name__ == "__main__":
-    main()
+    _main()
