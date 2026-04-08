@@ -8,10 +8,12 @@ Public interface:
 
 CLI: see ``python -m nanoproof.data.rl.deepseek_prover --help``.
 
-Note: rows in the source dataset contain a ``formal_statement`` that often
-includes a complete proof body. We disregard those proofs and keep only the
-statement portion (everything before the first ``:=``), then append
-``:= by sorry`` so the prover can attempt its own proof.
+Note on disregarding proofs: in this dataset, each row's ``formal_statement``
+field contains *only* the theorem header (always ending in ``:= by``); the
+actual proof tactics live in a separate ``formal_proof`` field that we never
+read. So "use only the statements" is automatically satisfied — we just take
+``formal_statement`` and append ``sorry`` so the prover can attempt its own
+proof.
 """
 
 import argparse
@@ -27,15 +29,21 @@ HF_URL = "https://huggingface.co/datasets/deepseek-ai/DeepSeek-Prover-V1/resolve
 
 
 def _statement_only(formal_statement: str) -> str | None:
-    """Strip any proof body from a DeepSeek formal_statement and return just
-    the statement, terminated with ``:= by sorry``. Returns ``None`` if the
-    input has no ``:=`` and therefore can't be parsed as a Lean declaration.
+    """Append a ``sorry`` placeholder to a DeepSeek formal_statement so it can
+    be fed to ``proof_from_sorry``. Returns ``None`` if the statement doesn't
+    end cleanly with ``:= by`` or ``:=``.
+
+    Conservative on purpose: we do NOT try to strip a proof body via partition
+    on ``:=``, because theorem headers can contain ``let x := ...`` bindings
+    and a naive split would truncate the statement. The current dataset never
+    has a proof body inside ``formal_statement`` anyway.
     """
     text = formal_statement.strip()
-    prefix, sep, _ = text.partition(":=")
-    if not sep or not prefix.strip():
-        return None
-    return prefix.rstrip() + " := by sorry"
+    if text.endswith(":= by"):
+        return text + " sorry"
+    if text.endswith(":="):
+        return text + " by sorry"
+    return None
 
 
 def download_dataset() -> None:

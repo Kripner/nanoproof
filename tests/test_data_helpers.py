@@ -56,32 +56,56 @@ def test_shuffle_train_valid_split_smaller_than_valid_size():
 from nanoproof.data.rl.deepseek_prover import _statement_only
 
 
-def test_statement_only_strips_tactic_proof():
-    s = "theorem foo (n : Nat) : n + 0 = n := by\n  simp"
+def test_statement_only_appends_sorry_after_by():
+    s = "theorem foo (n : Nat) : n + 0 = n := by"
     assert _statement_only(s) == "theorem foo (n : Nat) : n + 0 = n := by sorry"
 
 
-def test_statement_only_strips_term_proof():
-    s = "theorem foo : True := trivial"
+def test_statement_only_appends_by_sorry_after_assign():
+    s = "theorem foo : True :="
     assert _statement_only(s) == "theorem foo : True := by sorry"
 
 
-def test_statement_only_strips_multiline_tactic_proof():
-    s = "theorem foo : 1 + 1 = 2 := by\n  rfl\n  -- another tactic\n  sorry"
-    assert _statement_only(s) == "theorem foo : 1 + 1 = 2 := by sorry"
-
-
-def test_statement_only_strips_already_sorry():
-    s = "theorem foo : True := by sorry"
+def test_statement_only_strips_trailing_whitespace():
+    s = "theorem foo : True := by\n\n   "
     assert _statement_only(s) == "theorem foo : True := by sorry"
 
 
-def test_statement_only_returns_none_when_no_assignment():
-    # Statement with no `:=` is unparseable - return None and let caller skip
+def test_statement_only_returns_none_when_no_clean_ending():
+    # Anything not ending in `:=` or `:= by` is unparseable - return None
     assert _statement_only("theorem foo : True") is None
+    assert _statement_only("theorem foo : True := by trivial") is None
     assert _statement_only("") is None
 
 
-def test_statement_only_strips_whitespace_around_assignment():
-    s = "  theorem foo : True   :=   by trivial  "
-    assert _statement_only(s) == "theorem foo : True := by sorry"
+def test_statement_only_preserves_let_bindings_inside_statement():
+    """Regression test: a theorem header may contain `let x := ...` bindings
+    *inside* the statement body. We must not split on the first ``:=`` and
+    truncate the let-binding away. The whole header (including let bindings)
+    must be preserved up to the trailing ``:= by``.
+    """
+    s = (
+        "theorem thm_0 :\n"
+        "  let h := (3 : ℝ) / 2;\n"
+        "  let n := 5;\n"
+        "  h^n ≤ 0.5 → false := by"
+    )
+    expected = (
+        "theorem thm_0 :\n"
+        "  let h := (3 : ℝ) / 2;\n"
+        "  let n := 5;\n"
+        "  h^n ≤ 0.5 → false := by sorry"
+    )
+    assert _statement_only(s) == expected
+
+
+def test_statement_only_preserves_multiple_let_bindings():
+    s = (
+        "theorem thm_2 (PQ PR : ℝ) (h₀ : PQ = 4) :\n"
+        "  let PL := PR / 2;\n"
+        "  let RM := PQ / 2;\n"
+        "  let QR := PQ;\n"
+        "  QR = 9 := by"
+    )
+    expected = s + " sorry"
+    assert _statement_only(s) == expected
