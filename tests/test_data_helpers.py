@@ -1,8 +1,67 @@
 """
-Tests for nanoproof.data helpers. Run with:
+Tests for nanoproof.data and checkpoint helpers. Run with:
 
     python -m pytest tests/test_data_helpers.py -v
 """
+
+import os
+
+# -----------------------------------------------------------------------------
+# parse_checkpoint_path
+
+from nanoproof.checkpoints import parse_checkpoint_path
+from nanoproof.common import get_base_dir
+
+
+def test_parse_checkpoint_path_absolute():
+    p = "/abs/path/to/pretrain/run/model_005000.pt"
+    d, s = parse_checkpoint_path(p)
+    assert d == "/abs/path/to/pretrain/run"
+    assert s == 5000
+
+
+def test_parse_checkpoint_path_relative():
+    d, s = parse_checkpoint_path("pretrain/run/model_000123.pt")
+    assert d == os.path.join(get_base_dir(), "models", "pretrain", "run")
+    assert s == 123
+
+
+def test_parse_checkpoint_path_zero_step():
+    _, s = parse_checkpoint_path("pretrain/run/model_000000.pt")
+    assert s == 0
+
+
+def test_parse_checkpoint_path_high_step():
+    _, s = parse_checkpoint_path("pretrain/run/model_999999.pt")
+    assert s == 999999
+
+
+def test_parse_checkpoint_path_rejects_directory():
+    try:
+        parse_checkpoint_path("pretrain/run")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Expected ValueError for directory path")
+
+
+def test_parse_checkpoint_path_rejects_non_model_file():
+    try:
+        parse_checkpoint_path("pretrain/run/meta_005000.json")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Expected ValueError for non-model file")
+
+
+def test_parse_checkpoint_path_rejects_non_numeric_step():
+    try:
+        parse_checkpoint_path("pretrain/run/model_abcdef.pt")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Expected ValueError for non-numeric step")
+
 
 # -----------------------------------------------------------------------------
 # shuffle_train_valid_split

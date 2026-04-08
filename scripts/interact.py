@@ -9,8 +9,7 @@ MODE = "raw_engine"  # raw_engine | tactic_model
 generate = None
 predict_value = None
 
-model_path = "sft/FIXME"  # model path (relative to models/ or absolute)
-step = None  # None = latest
+model_path = "sft/FIXME/model_005000.pt"  # path to model_NNNNNN.pt (relative to models/ or absolute)
 
 if MODE == "raw_engine":
     device_type = "" # cuda|cpu|mps (empty => autodetect)
@@ -18,7 +17,7 @@ if MODE == "raw_engine":
     device_type = autodetect_device_type() if device_type == "" else device_type
     device = torch.device(device_type)
 
-    model, tokenizer, meta = load_model(model_path, device, phase="eval", step=step)
+    model, tokenizer, meta = load_model(model_path, device, phase="eval")
     engine = Engine(model, tokenizer)
     value_token_ids = tokenizer.get_value_token_ids()
     value_bins = tokenizer.get_value_bins()
@@ -44,7 +43,7 @@ if MODE == "raw_engine":
     predict_value = predict_value_
 
 elif MODE == "tactic_model":
-    tactic_model = TacticModel.create(model_path=model_path, step=step)
+    tactic_model = TacticModel.create(model_path=model_path)
     _cached_value = None  # Cache value from tactic generation
 
     def generate_(inp_) -> list[str]:

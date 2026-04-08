@@ -2,8 +2,6 @@
 Utilities for saving and loading model/optim/state checkpoints.
 """
 import os
-import re
-import glob
 import json
 import logging
 from dataclasses import fields
@@ -20,6 +18,7 @@ logger = logging.getLogger(__name__)
 def log0(message):
     if int(os.environ.get('RANK', 0)) == 0:
         logger.info(message)
+
 
 def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data, rank=0):
     if rank == 0:
@@ -38,6 +37,40 @@ def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data,
         optimizer_path = os.path.join(checkpoint_dir, f"optim_{step:06d}_rank{rank:d}.pt")
         torch.save(optimizer_data, optimizer_path)
         logger.info(f"Saved optimizer state to: {optimizer_path}")
+
+
+# -----------------------------------------------------------------------------
+# Checkpoint path parsing
+#
+# Throughout the codebase a "model path" is a path to a specific
+# ``model_NNNNNN.pt`` file. The path may be absolute, or relative to
+# ``$NANOPROOF_HOME/models/``. We never resolve "latest in directory" magic
+# anywhere — every load explicitly names the checkpoint file it wants.
+
+def parse_checkpoint_path(model_path: str) -> tuple[str, int]:
+    """Resolve a checkpoint file path and parse the step from its filename.
+
+    ``model_path`` is either absolute or relative to ``$NANOPROOF_HOME/models/``.
+    It must point to a ``model_NNNNNN.pt`` file (the file does not need to
+    exist at this point — only the filename is parsed).
+
+    Returns ``(checkpoint_dir, step)``.
+    """
+    full = model_path if os.path.isabs(model_path) else os.path.join(get_base_dir(), "models", model_path)
+    basename = os.path.basename(full)
+    if not basename.startswith("model_") or not basename.endswith(".pt"):
+        raise ValueError(
+            f"Expected a path to a 'model_NNNNNN.pt' file, got: {model_path!r}"
+        )
+    step_str = basename.removeprefix("model_").removesuffix(".pt")
+    try:
+        step = int(step_str)
+    except ValueError as e:
+        raise ValueError(
+            f"Could not parse step from checkpoint filename {basename!r}: {e}"
+        )
+    return os.path.dirname(full), step
+
 
 def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False, rank=0):
     # Load the model state
@@ -98,60 +131,14 @@ def build_model(checkpoint_dir, step, device, phase):
     return model, tokenizer, meta_data
 
 
-def find_last_step(checkpoint_dir):
-    # Look into checkpoint_dir and find model_<step>.pt with the highest step
-    checkpoint_files = glob.glob(os.path.join(checkpoint_dir, "model_*.pt"))
-    if not checkpoint_files:
-        raise FileNotFoundError(f"No checkpoints found in {checkpoint_dir}")
-    last_step = None
-    for f in checkpoint_files:
-        step = os.path.basename(f).split("_")[-1].split(".")[0]
-        try:
-            step = int(step)
-            last_step = step if last_step is None else max(last_step, step)
-        except ValueError:
-            pass
-    if last_step is None:
-        raise FileNotFoundError(f"No checkpoints found in {checkpoint_dir}")
-    return last_step
+def load_model(model_path: str, device, phase: str):
+    """Load a model from a checkpoint .pt file path.
 
-# -----------------------------------------------------------------------------
-# Checkpoint path resolution
+    ``model_path`` is either absolute or relative to ``$NANOPROOF_HOME/models/``,
+    and must end in ``model_NNNNNN.pt``. Example:
 
-
-def resolve_model_dir(model_path: str) -> str:
-    """Resolve a model path to an absolute checkpoint directory.
-
-    If *model_path* is absolute, it is returned as-is.
-    Otherwise it is resolved relative to ``{base_dir}/models/``,
-    e.g. ``"pretrain/14-45-26_06-04-26_run"`` →
-    ``~/.nanoproof/models/pretrain/14-45-26_06-04-26_run``.
+        load_model("pretrain/10-49-50_07-04-26_baseline/model_005000.pt", device, "train")
     """
-    if os.path.isabs(model_path):
-        return model_path
-    return os.path.join(get_base_dir(), "models", model_path)
-
-
-def resolve_step(checkpoint_dir: str, step: int | None) -> int:
-    """Resolve step to the latest if not specified."""
-    if step is None:
-        return find_last_step(checkpoint_dir)
-    return step
-
-
-# -----------------------------------------------------------------------------
-# Model loading convenience functions
-
-
-def load_model(model_path: str, device, phase: str, step: int | None = None):
-    """Load a model from a checkpoint directory.
-
-    *model_path* is resolved via :func:`resolve_model_dir`:
-    absolute paths are used as-is; relative paths (e.g.
-    ``"pretrain/14-45-26_06-04-26_run"``) are resolved under
-    ``{NANOPROOF_HOME}/models/``.
-    """
-    checkpoint_dir = resolve_model_dir(model_path)
-    step = resolve_step(checkpoint_dir, step)
-    log0(f"Loading model from {checkpoint_dir} with step {step}")
+    checkpoint_dir, step = parse_checkpoint_path(model_path)
+    log0(f"Loading model from {checkpoint_dir} (step {step})")
     return build_model(checkpoint_dir, step, device, phase)

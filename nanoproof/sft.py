@@ -36,9 +36,8 @@ parser = argparse.ArgumentParser(description="Finetune a base model to be a prov
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
 parser.add_argument("--seed", type=int, default=0, help="random seed")
 # Model source
-parser.add_argument("--model-path", type=str, required=True, help="model path to load from (relative to models/ or absolute)")
-parser.add_argument("--step", type=int, default=None, help="step to load the model from (default: latest)")
-parser.add_argument("--resume-from", type=str, default=None, help="model path to resume SFT from (overrides --model-path)")
+parser.add_argument("--model-path", type=str, required=True, help="path to model_NNNNNN.pt to load from (relative to models/ or absolute)")
+parser.add_argument("--resume-from", type=str, default=None, help="path to model_NNNNNN.pt to resume SFT from (overrides --model-path)")
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 parser.add_argument("--dtype", type=str, default="bfloat16", help="data type for training")
@@ -86,7 +85,7 @@ if args.resume_from is not None:
     print0(f"Resuming from SFT checkpoint at step {start_step}")
 else:
     # Start fresh from base/mid checkpoint
-    model, tokenizer, meta = load_model(args.model_path, device, phase="train", step=args.step)
+    model, tokenizer, meta = load_model(args.model_path, device, phase="train")
     start_step = 0
 orig_model = model # original, uncompiled model
 # model = torch.compile(model, dynamic=True) # doesn't work super well because of variable lengths of inputs

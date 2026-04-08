@@ -230,7 +230,7 @@ def main():
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
     
     print0("Loading model...")
-    model, tokenizer, meta = load_model("sft/FIXME", device, phase="eval")
+    model, tokenizer, meta = load_model("sft/FIXME/model_005000.pt", device, phase="eval")
     model.eval()
 
     print0(f"Model loaded. Config: {meta.get('model_config', 'N/A')}")

@@ -66,8 +66,7 @@ parser.add_argument("--scalar-lr", type=float, default=0.5, help="learning rate 
 parser.add_argument("--warmup-ratio", type=float, default=0.005, help="ratio of iterations for LR warmup")
 parser.add_argument("--warmdown-ratio", type=float, default=0.65, help="ratio of iterations for LR warmdown")
 parser.add_argument("--final-lr-frac", type=float, default=0.05, help="final LR as fraction of initial LR")
-parser.add_argument("--resume-from", type=str, default=None, help="model path to resume from (relative to models/ or absolute)")
-parser.add_argument("--resume-from-step", type=int, default=-1, help="resume training from this step (-1 = latest)")
+parser.add_argument("--resume-from", type=str, default=None, help="path to model_NNNNNN.pt to resume from (relative to models/ or absolute)")
 # Evaluation
 parser.add_argument("--eval-every", type=int, default=250, help="evaluate val bpb every N steps (-1 = disable)")
 parser.add_argument("--eval-tokens", type=int, default=80*524288, help="number of tokens to evaluate val loss on")
@@ -122,13 +121,12 @@ print0(f"Model config:\n{json.dumps(model_config_kwargs, indent=2)}")
 model.to_empty(device=device)
 model.init_weights()
 
-# If resuming, overwrite model parameters from the specified checkpoint directory
+# If resuming, overwrite model parameters from the specified checkpoint file
 resuming = args.resume_from is not None
 resume_step = -1
 if resuming:
-    from nanoproof.checkpoints import resolve_model_dir, resolve_step
-    resume_checkpoint_dir = resolve_model_dir(args.resume_from)
-    resume_step = resolve_step(resume_checkpoint_dir, resume_step if resume_step != -1 else None)
+    from nanoproof.checkpoints import parse_checkpoint_path
+    resume_checkpoint_dir, resume_step = parse_checkpoint_path(args.resume_from)
     print0(f"Resuming optimization from step {resume_step} (from {resume_checkpoint_dir})")
     model_data, optimizer_data, meta_data = load_checkpoint(resume_checkpoint_dir, resume_step, device, load_optimizer=True, rank=ddp_rank)
     model.load_state_dict(model_data, strict=True, assign=True)

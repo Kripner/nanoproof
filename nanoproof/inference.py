@@ -169,11 +169,11 @@ class TacticModel:
         pass
 
     @classmethod
-    def create(cls, num_samples: int = 6, model_path: str | None = None, step: int | None = None) -> Self:
+    def create(cls, num_samples: int = 6, model_path: str | None = None) -> Self:
         assert model_path is not None, "model_path is required in TacticModel.create"
         device = torch.device("cuda")
 
-        model, tokenizer, _ = load_model(model_path, device, phase="eval", step=step)
+        model, tokenizer, _ = load_model(model_path, device, phase="eval")
         engine = Engine(model, tokenizer)
         return cls(model, tokenizer, engine, num_samples=num_samples)
 
@@ -562,7 +562,7 @@ def main():
     parser.add_argument("--num-samples", type=int, default=6, help="Tactics to sample per state")
     parser.add_argument("--batch-timeout", type=float, default=0.1, help="Timeout for batching (seconds)")
     parser.add_argument("--max-batch-tokens", type=int, default=32000, help="Max total tokens per batch (controls memory)")
-    parser.add_argument("--model-path", required=True, help="Model path (relative to models/ or absolute)")
+    parser.add_argument("--model-path", required=True, help="path to model_NNNNNN.pt to load (relative to models/ or absolute)")
     args = parser.parse_args()
 
     print(f"[Inference] Loading model...")

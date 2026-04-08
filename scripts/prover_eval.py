@@ -20,7 +20,7 @@ from nanoproof.data.bench import minif2f
 from nanoproof.data.rl import leanworkbook
 from nanoproof.search import run_mcts, SearchConfig, Game, Node, prune_redundant_nodes, verify_node, compute_value_target
 from nanoproof.inference import TacticModel, BlockingTacticModel
-from nanoproof.checkpoints import load_model, resolve_model_dir, resolve_step
+from nanoproof.checkpoints import load_model, parse_checkpoint_path
 from nanoproof.cli import log
 
 # TODO: during verification, maybe set 'set_option maxHeartbeats 0\nset_option maxRecDepth 100000'
@@ -566,7 +566,6 @@ def load_existing_eval_results(jsonl_path: str) -> tuple[list[dict], list[dict]]
 def load_model_for_eval(
     device: torch.device,
     model_path: str,
-    step: Optional[int] = None,
     seed: int = 0,
 ) -> tuple[TacticModel, CheckpointInfo]:
     """
@@ -574,8 +573,7 @@ def load_model_for_eval(
 
     Args:
         device: Device to load the model on
-        model_path: Model path (relative to models/ or absolute)
-        step: Checkpoint step (optional, defaults to latest)
+        model_path: Path to a ``model_NNNNNN.pt`` file (relative to models/ or absolute)
         seed: Random seed for tactic generation (default: 0)
 
     Returns:
@@ -583,14 +581,13 @@ def load_model_for_eval(
     """
     from nanoproof.engine import Engine
 
-    checkpoint_dir = resolve_model_dir(model_path)
-    resolved_step = resolve_step(checkpoint_dir, step)
-    print0(f"Loading checkpoint: {checkpoint_dir}, step={resolved_step}")
-    model, tokenizer, meta_data = load_model(model_path, device, phase="eval", step=resolved_step)
+    checkpoint_dir, step = parse_checkpoint_path(model_path)
+    print0(f"Loading checkpoint: {checkpoint_dir}, step={step}")
+    model, tokenizer, meta_data = load_model(model_path, device, phase="eval")
 
     engine = Engine(model, tokenizer)
     tactic_model = TacticModel(model, tokenizer, engine, num_samples=6, seed=seed)
-    checkpoint_info = CheckpointInfo(checkpoint_dir=checkpoint_dir, step=resolved_step, seed=seed)
+    checkpoint_info = CheckpointInfo(checkpoint_dir=checkpoint_dir, step=step, seed=seed)
 
     return tactic_model, checkpoint_info
 
@@ -708,15 +705,13 @@ def run_distributed_eval_on_dataset(
 
 def get_checkpoint_info_early(
     model_path: str,
-    step: Optional[int],
     seed: int = 0,
 ) -> CheckpointInfo:
     """
     Get checkpoint info without loading the model (for early existence checks).
     """
-    checkpoint_dir = resolve_model_dir(model_path)
-    resolved_step = resolve_step(checkpoint_dir, step)
-    return CheckpointInfo(checkpoint_dir=checkpoint_dir, step=resolved_step, seed=seed)
+    checkpoint_dir, step = parse_checkpoint_path(model_path)
+    return CheckpointInfo(checkpoint_dir=checkpoint_dir, step=step, seed=seed)
 
 
 def main():
@@ -724,8 +719,7 @@ def main():
     
     # Model loading options
     model_group = parser.add_argument_group("Model selection")
-    model_group.add_argument("--model-path", type=str, required=True, help="Model path (relative to models/ or absolute, e.g., 'sft/14-45-26_06-04-26_run')")
-    model_group.add_argument("--step", type=int, default=None, help="Checkpoint step (default: latest)")
+    model_group.add_argument("--model-path", type=str, required=True, help="path to model_NNNNNN.pt to evaluate (relative to models/ or absolute, e.g., 'sft/14-45-26_06-04-26_run/model_005000.pt')")
     
     # Evaluation options
     eval_group = parser.add_argument_group("Evaluation settings")
@@ -789,7 +783,6 @@ def main():
     # Get checkpoint info early to check for existing results before loading model
     checkpoint_info = get_checkpoint_info_early(
         model_path=args.model_path,
-        step=args.step,
         seed=args.seed,
     )
     
@@ -854,7 +847,6 @@ def main():
     tactic_model, checkpoint_info = load_model_for_eval(
         device=device,
         model_path=args.model_path,
-        step=args.step,
         seed=args.seed,
     )
     

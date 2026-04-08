@@ -49,8 +49,7 @@ from nanoproof.data.sft.leantree_dataloader import sft_data_generator
 parser = argparse.ArgumentParser(description="RL training for nanoproof")
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb)")
 parser.add_argument("--seed", type=int, default=0)
-parser.add_argument("--model-path", type=str, required=True, help="model path to load from (relative to models/ or absolute)")
-parser.add_argument("--model-step", type=int, default=None, help="step to load from (default: latest)")
+parser.add_argument("--model-path", type=str, required=True, help="path to model_NNNNNN.pt to load from (relative to models/ or absolute)")
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 parser.add_argument("--device-batch-size", type=int, default=8)
 parser.add_argument("--infra-file", type=str, default="infra-ms.toml", help="path to infra.toml (empty = local mode)")
@@ -139,7 +138,7 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-r
 # In distributed mode, we use BlockingTacticModel for inference servers (started later)
 # In local mode, we use BlockingTacticModel for parallel actors
 log0(f"Distributed mode: {distributed}", component="Config")
-inner_tactic_model = TacticModel.create(num_samples=args.num_sampled_tactics, model_path=args.model_path, step=args.model_step)
+inner_tactic_model = TacticModel.create(num_samples=args.num_sampled_tactics, model_path=args.model_path)
 if distributed:
     # In distributed mode, we don't need BlockingTacticModel here -
     # inference servers are started later with their own BlockingTacticModel
