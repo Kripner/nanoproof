@@ -14,7 +14,7 @@ import random
 import argparse
 from dataclasses import asdict
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 import wandb
 import torch

@@ -12,7 +12,7 @@ python -m nanoproof.pretrain --depth=4 --max-seq-len=512 --device-batch-size=1 -
 """
 
 import os
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 import gc
 import json
 import time

@@ -15,7 +15,7 @@ import os
 import time
 import argparse
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 import wandb
 import torch
 import torch.distributed as dist
