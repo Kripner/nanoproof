@@ -59,7 +59,7 @@ parser.add_argument("--eval-every", type=int, default=200, help="evaluate every 
 parser.add_argument("--eval-steps", type=int, default=200, help="number of eval steps")
 parser.add_argument("--sample-every", type=int, default=100, help="sample from model every N steps")
 parser.add_argument("--eval-metrics-max-problems", type=int, default=1024, help="max problems for eval metrics")
-parser.add_argument("--save-every-epoch", type=int, default=1, help="save a checkpoint every N epochs (final model is always saved)")
+parser.add_argument("--save-every-epoch", type=int, default=1, help="save a checkpoint every N epochs (-1 disables intermediate saves; final model is always saved)")
 # Loss weighting
 parser.add_argument("--value-weight", type=float, default=0.01, help="weight for value (critic) samples relative to policy samples")
 args = parser.parse_args()
@@ -256,7 +256,7 @@ hx0 : P x0
         completed_epoch = epoch + 1  # 1-indexed count of fully completed epochs
         is_final_epoch = epoch >= args.num_epochs - 1
         # Save a checkpoint every N epochs; the final epoch is saved unconditionally below.
-        if master_process and not is_final_epoch and completed_epoch % args.save_every_epoch == 0:
+        if master_process and not is_final_epoch and args.save_every_epoch > 0 and completed_epoch % args.save_every_epoch == 0:
             save_checkpoint(
                 model_dir,
                 step,
