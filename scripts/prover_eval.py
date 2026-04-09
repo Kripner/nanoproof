@@ -469,7 +469,11 @@ def _write_eval_results_jsonl(jsonl_path: str, results: dict, prepend_entries: l
                         (used by --continue to preserve successful entries from previous run)
     """
     detailed_results = results.get("detailed_results", [])
-    
+
+    if not detailed_results and not prepend_entries:
+        log(f"Skipping write of empty eval results to {jsonl_path}", component="Eval")
+        return
+
     with open(jsonl_path, "w") as f:
         # Write prepended entries first (already in dict format)
         if prepend_entries:
@@ -716,30 +720,22 @@ def get_checkpoint_info_early(
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate a prover model on theorem proving benchmarks")
-    
-    # Model loading options
-    model_group = parser.add_argument_group("Model selection")
-    model_group.add_argument("--model-path", type=str, required=True, help="path to model_NNNNNN.pt to evaluate (relative to models/ or absolute, e.g., 'sft/14-45-26_06-04-26_run/model_005000.pt')")
-    
-    # Evaluation options
-    eval_group = parser.add_argument_group("Evaluation settings")
-    eval_group.add_argument("--datasets", type=str, default="minif2f", help="Comma-separated list of datasets to evaluate (example: minif2f,leanworkbook)")
-    eval_group.add_argument("--split", type=str, default="valid", choices=["valid", "test"], help="Dataset split to evaluate (default: valid)")
-    eval_group.add_argument("--max-theorems", type=int, default=None, help="Max theorems to evaluate per dataset")
-    eval_group.add_argument("--num-actors", type=int, default=4, help="Number of parallel actors for local mode (default: 4)")
-    eval_group.add_argument("--num-simulations", type=int, default=512, help="Number of MCTS simulations per theorem (default: 50)")
-    eval_group.add_argument("--seed", type=int, default=0, help="Random seed for tactic generation (default: 0)")
-    
-    # Distributed mode
-    dist_group = parser.add_argument_group("Distributed mode")
-    dist_group.add_argument("--infra-file", type=str, default="", help="Path to infra.toml for distributed mode (empty = local mode)")
-    dist_group.add_argument("--lean-server", type=str, default="10.10.25.31:8000", help="Lean server host:port for local mode (ignored when --infra-file is set)")
-    dist_group.add_argument("--no-progress-timeout", type=float, default=6000.0, help="Timeout in seconds if no progress is made (default: 600)")
-    
-    # Output options
-    output_group = parser.add_argument_group("Output")
-    output_group.add_argument("--force", action="store_true", help="Overwrite existing eval results")
-    output_group.add_argument("--continue", dest="continue_eval", action="store_true", help="Load existing results and retry only theorems that failed with errors")
+
+    parser.add_argument("--model-path", type=str, required=True, help="path to model_NNNNNN.pt to evaluate (relative to models/ or absolute, e.g., 'sft/14-45-26_06-04-26_run/model_005000.pt')")
+    parser.add_argument("--datasets", type=str, default="minif2f", help="Comma-separated list of datasets to evaluate (example: minif2f,leanworkbook)")
+    parser.add_argument("--split", type=str, default="valid", choices=["valid", "test"], help="Dataset split to evaluate (default: valid)")
+    parser.add_argument("--max-theorems", type=int, default=None, help="Max theorems to evaluate per dataset")
+    parser.add_argument("--num-actors", type=int, default=4, help="Number of parallel actors for local mode (default: 4)")
+    parser.add_argument("--num-simulations", type=int, default=512, help="Number of MCTS simulations per theorem (default: 50)")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed for tactic generation (default: 0)")
+    parser.add_argument("--no-progress-timeout", type=float, default=6000.0, help="Timeout in seconds if no progress is made (default: 600)")
+    parser.add_argument("--force", action="store_true", help="Overwrite existing eval results")
+    parser.add_argument("--continue", dest="continue_eval", action="store_true", help="Load existing results and retry only theorems that failed with errors")
+
+    # Exactly one of --infra-file (distributed mode) or --lean-server (local mode) must be given.
+    mode_group = parser.add_mutually_exclusive_group(required=True)
+    mode_group.add_argument("--infra-file", type=str, default=None, help="Path to infra.toml for distributed prover mode")
+    mode_group.add_argument("--lean-server", type=str, default=None, help="Lean server host:port for local mode (e.g., '10.10.25.31:8000')")
     
     args = parser.parse_args()
     
@@ -765,7 +761,7 @@ def main():
     split_suffix = "-test" if args.split == "test" else ""
     
     # Check distributed prover mode (using external prover servers)
-    distributed = bool(args.infra_file)
+    distributed = args.infra_file is not None
     if distributed:
         if not os.path.exists(args.infra_file):
             print0(f"Error: Infrastructure file {args.infra_file} does not exist")
@@ -796,7 +792,11 @@ def main():
         for dataset_name in datasets:
             eval_path = checkpoint_info.get_eval_path(dataset_name + split_suffix)
             if os.path.exists(eval_path):
-                existing_results.append((dataset_name, eval_path))
+                if os.path.getsize(eval_path) == 0:
+                    # Leftover from a previous crashed run — silently ignore.
+                    os.remove(eval_path)
+                else:
+                    existing_results.append((dataset_name, eval_path))
         
         if args.continue_eval:
             # --continue mode: require existing results
