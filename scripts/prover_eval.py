@@ -121,6 +121,7 @@ def evaluate_theorem(
     init_branch = init_branch.value
     game = Game(theorem, num_simulations=config.num_simulations)
     game.root = Node(
+        parent=None,
         action=None,
         prior=None,
         state=[init_branch],
@@ -137,7 +138,8 @@ def evaluate_theorem(
     
     if is_solved:
         verify_node(game.root)
-        
+
+        game.unsimplified_root = game.root.clone()
         unsimplified_proof_tree = game.unsimplified_root.serialize()
         prune_redundant_nodes(game.root)
         compute_value_target(game.root)
