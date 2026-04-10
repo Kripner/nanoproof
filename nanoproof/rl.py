@@ -47,44 +47,52 @@ from nanoproof.data.sft.leantree_dataloader import sft_data_generator
 # -----------------------------------------------------------------------------
 # RL Hyperparameters
 parser = argparse.ArgumentParser(description="RL training for nanoproof")
+
+# General
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb)")
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--model-path", type=str, required=True, help="path to model_NNNNNN.pt to load from (relative to models/ or absolute)")
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
-parser.add_argument("--device-batch-size", type=int, default=8)
+parser.add_argument("--resume-from", type=str, default="")
+
+# Infrastructure
 parser.add_argument("--infra-file", type=str, default="infra-ms.toml", help="path to infra.toml (empty = local mode)")
+parser.add_argument("--lean-server", type=str, default="10.10.25.31:8000")
 parser.add_argument("--inference-server-port", type=int, default=5000)
 parser.add_argument("--poll-interval", type=float, default=3.0)
-parser.add_argument("--lean-server", type=str, default="10.10.25.31:8000")
-parser.add_argument("--fraction-sft", type=float, default=0.2)
-parser.add_argument("--collect-every", type=int, default=1)
-parser.add_argument("--collect-transitions", type=int, default=100)
+
+# Search / collection
 parser.add_argument("--num-actors", type=int, default=32)
 parser.add_argument("--num-sampled-tactics", type=int, default=6)
 parser.add_argument("--num-simulations-collect", type=int, default=50)
 parser.add_argument("--num-simulations-eval", type=int, default=50)
+parser.add_argument("--collect-every", type=int, default=1)
+parser.add_argument("--collect-transitions", type=int, default=100)
+parser.add_argument("--replay-buffer-window-size", type=int, default=60_000_000)
 parser.add_argument("--batch-timeout", type=float, default=0.2)
 parser.add_argument("--max-batch-tokens", type=int, default=8000)
+
+# Training
+parser.add_argument("--device-batch-size", type=int, default=8)
 parser.add_argument("--target-examples-per-step", type=int, default=512)
+parser.add_argument("--fraction-sft", type=float, default=0.2)
+parser.add_argument("--augment-data", type=bool, default=True)
+parser.add_argument("--value-weight", type=float, default=0.01)
+
+# Optimizer
 parser.add_argument("--unembedding-lr", type=float, default=0.004)
 parser.add_argument("--embedding-lr", type=float, default=0.2)
 parser.add_argument("--matrix-lr", type=float, default=0.02)
 parser.add_argument("--weight-decay", type=float, default=0.0)
 parser.add_argument("--init-lr-frac", type=float, default=0.02)
-parser.add_argument("--augment-data", type=bool, default=True)
-parser.add_argument("--value-weight", type=float, default=0.01)
+
+# Evaluation / checkpointing
 parser.add_argument("--eval-every", type=int, default=100)
 parser.add_argument("--eval-start", type=int, default=0)
 parser.add_argument("--save-every", type=int, default=500)
-parser.add_argument("--resume-from", type=str, default="")
-parser.add_argument("--replay-buffer-window-size", type=int, default=60_000_000)
 args = parser.parse_args()
 user_config = vars(args).copy()
 
-# -----------------------------------------------------------------------------
-# Distributed mode configuration
-# If --infra-file is provided, load the infrastructure config and enable distributed mode
-# Otherwise, use local mode with --lean-server.
 
 distributed = bool(args.infra_file)
 infra_config: InfraConfig | None = None
