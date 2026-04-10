@@ -41,6 +41,7 @@ from nanoproof.replay_buffer import (
     prune_redundant_nodes,
 )
 from nanoproof.search import Game, Node, SearchConfig, run_mcts, verify_node
+from nanoproof.inference import BlockingTacticModel, InferenceBalancer, TacticModel, start_inference_server
 
 
 # -----------------------------------------------------------------------------
@@ -542,8 +543,6 @@ class Prover:
             "solved": solved,
             "total": total,
             "errors": errors,
-            "timed_out": False,
-            "invalid": False,
             "detailed_results": results,
         }
 
@@ -555,3 +554,53 @@ class Prover:
 
     def shutdown(self):
         self.tactic_model.shutdown()
+
+
+# -----------------------------------------------------------------------------
+# build_prover: shared setup for rl.py and prover_eval.py
+# -----------------------------------------------------------------------------
+
+def build_prover(
+    tactic_model: BlockingTacticModel,
+    lean_server_addrs: list[str],
+    num_simulations_collect: int,
+    num_simulations_eval: int,
+    inference_server_port: int,
+) -> "Prover":
+    """Build the Prover + InferenceBalancer for the master rank.
+
+    On worker ranks, starts an inference server (daemon thread) and returns None.
+    On the master rank, builds an InferenceBalancer across all GPUs and a Prover
+    with one actor per available Lean process.
+
+    Must be called by ALL DDP ranks (workers start their inference server here).
+    """
+    from nanoproof.common import get_dist_info
+    ddp, rank, _, world_size = get_dist_info()
+    master = rank == 0
+
+    # Worker ranks: start inference server
+    if not master:
+        port = inference_server_port + 1 + rank
+        start_inference_server(tactic_model, port)
+
+    # Query lean servers and build assignments
+    lean_server_info = query_lean_servers(lean_server_addrs)
+    lean_assignments = assign_lean_servers(lean_server_info)
+
+    prover = None
+    if master:
+        remote_endpoints = [
+            f"127.0.0.1:{inference_server_port + 1 + r}"
+            for r in range(1, world_size)
+        ]
+        balancer = InferenceBalancer(tactic_model, remote_endpoints)
+        config = SearchConfig(num_simulations=num_simulations_collect)
+        prover = Prover(
+            config=config,
+            tactic_model=balancer,
+            lean_servers=lean_assignments,
+            num_simulations_eval=num_simulations_eval,
+        )
+
+    return prover

@@ -131,6 +131,78 @@ def build_model(checkpoint_dir, step, device, phase):
     return model, tokenizer, meta_data
 
 
+# -----------------------------------------------------------------------------
+# Eval result persistence
+# -----------------------------------------------------------------------------
+
+from dataclasses import dataclass
+
+@dataclass
+class CheckpointInfo:
+    """Information about a loaded checkpoint, used for saving eval results."""
+    checkpoint_dir: str
+    step: int
+    seed: int = 0
+
+    def get_eval_path(self, dataset_name: str) -> str:
+        seed_suffix = f"-{self.seed}" if self.seed != 0 else ""
+        return os.path.join(self.checkpoint_dir, f"eval_{self.step:06d}_{dataset_name}{seed_suffix}.jsonl")
+
+
+def write_eval_results_jsonl(jsonl_path: str, results: dict, prepend_entries: list[dict] = None):
+    """Write evaluation results to a JSONL file."""
+    detailed_results = results.get("detailed_results", [])
+
+    if not detailed_results and not prepend_entries:
+        logger.info(f"Skipping write of empty eval results to {jsonl_path}")
+        return
+
+    with open(jsonl_path, "w") as f:
+        if prepend_entries:
+            for entry in prepend_entries:
+                f.write(json.dumps(entry) + "\n")
+
+        for item in detailed_results:
+            entry = {
+                "theorem": item["theorem"],
+                "proof": item["proof_tree"],
+                "unsimplified_proof": item.get("unsimplified_proof_tree"),
+                "linearized_proof": item.get("linearized_proof"),
+                "num_iterations": item["num_iterations"],
+                "error": item.get("error"),
+            }
+            f.write(json.dumps(entry) + "\n")
+
+    total_count = len(detailed_results) + (len(prepend_entries) if prepend_entries else 0)
+    logger.info(f"Saved {total_count} eval results to {jsonl_path}")
+
+
+def save_eval_results(checkpoint_info: CheckpointInfo, dataset_name: str, results: dict, prepend_entries: list[dict] = None):
+    """Save evaluation results alongside the checkpoint."""
+    jsonl_path = checkpoint_info.get_eval_path(dataset_name)
+    write_eval_results_jsonl(jsonl_path, results, prepend_entries=prepend_entries)
+
+
+def save_eval_results_to_run_dir(output_dir: str, step: int, dataset_name: str, results: dict):
+    """Save evaluation results in the RL run's eval directory."""
+    eval_dir = os.path.join(output_dir, "evals", str(step))
+    os.makedirs(eval_dir, exist_ok=True)
+    jsonl_path = os.path.join(eval_dir, f"{dataset_name}.jsonl")
+    write_eval_results_jsonl(jsonl_path, results)
+
+
+def load_existing_eval_results(jsonl_path: str) -> tuple[list[dict], list[dict]]:
+    """Load existing results. Returns (successful_entries, error_entries)."""
+    successful, errors = [], []
+    with open(jsonl_path, "r") as f:
+        for line in f:
+            entry = json.loads(line.strip())
+            (errors if entry.get("error") is not None else successful).append(entry)
+    return successful, errors
+
+
+# -----------------------------------------------------------------------------
+
 def load_model(model_path: str, device, phase: str):
     """Load a model from a checkpoint .pt file path.
 

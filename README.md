@@ -75,7 +75,46 @@ python tests/test_cli.py
 
 ## Prerequisites
 
-Before running RL, you need LeanTree server(s) running (provides proof verification). Example run:
+Before running RL, you need LeanTree server(s) running (provides proof verification).
+
+### Lean Project Setup
+
+The LeanTree server requires a Lean project with dependencies built. For MiniF2F evaluation,
+you need both mathlib and `formal_conjectures` (which contains the MiniF2F formalizations).
+
+Create the project using leantree's API:
+
+```python
+from leantree import LeanProject
+LeanProject.create("my_project", lean_version="v4.27.0", libraries=["mathlib"])
+```
+
+Then add `formal_conjectures` to `my_project/lakefile.toml`:
+
+```toml
+[[require]]
+name = "formal_conjectures"
+scope = "google-deepmind"
+git = "https://github.com/google-deepmind/formal-conjectures"
+rev = "89c6801f9f05cf63105d66843ed70b1e4ceb0c69"
+```
+
+Then add an import in the root module (e.g. `my_project/MyProject.lean`) so that `lake build`
+actually builds the dependency:
+
+```lean
+import FormalConjectures
+```
+
+Finally, run `lake update && lake build` in the project directory. The `lake update` step
+fetches dependencies and downloads the mathlib cache (pre-built `.olean` files).
+
+Note: the `formal_conjectures` revision must be compatible with your Lean version. The rev above
+works with Lean v4.27.0.
+
+### Starting the LeanTree Server
+
+For Mathlib-only (e.g. training data extraction):
 
 ```bash
 leanserver --project-path /path/to/leantree_project/ \
@@ -84,12 +123,17 @@ leanserver --project-path /path/to/leantree_project/ \
     --max-processes 32 \
     --address=0.0.0.0 \
     --port=8000
+```
+
+For MiniF2F evaluation (requires `formal_conjectures`):
+
+```bash
 leanserver --project-path /path/to/leantree_project/ \
     --repl-exe /path/to/leantree/lean-repl/.lake/build/bin/repl \
     --imports Mathlib FormalConjectures.ForMathlib.Analysis.SpecialFunctions.NthRoot FormalConjectures.Util.Answer \
     --max-processes 32 \
     --address=0.0.0.0 \
-    --port=8000
+    --port=8000 \
     --warmup
 ```
 

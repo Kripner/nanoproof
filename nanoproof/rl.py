@@ -15,20 +15,19 @@ import torch.distributed as dist
 import leantree.augmentations
 from leantree.core.lean import LeanGoal
 
-from nanoproof.common import compute_init, compute_cleanup, get_base_dir, DummyWandb, autodetect_device_type, SimpleTimer, flush, create_run_dirs
-from nanoproof.checkpoints import load_model, save_checkpoint
+from nanoproof.common import compute_init, compute_cleanup, get_base_dir, DummyWandb, autodetect_device_type, SimpleTimer, flush, create_run_dirs, active_barrier_master, active_barrier_wait
+from nanoproof.checkpoints import load_model, save_checkpoint, save_eval_results_to_run_dir
 from nanoproof.engine import Engine
 from nanoproof.search import SearchConfig
 from nanoproof.data.sft.leantree import leantree_transitions
 from nanoproof.data.sft.leantree_dataloader import rl_data_generator
 from nanoproof.replay_buffer import ReplayBuffer
-from nanoproof.prover import TheoremsSampler, Prover, query_lean_servers, assign_lean_servers
-from nanoproof.inference import TacticModel, BlockingTacticModel, InferenceBalancer, start_inference_server
+from nanoproof.prover import TheoremsSampler, Prover, build_prover
+from nanoproof.inference import TacticModel, BlockingTacticModel
 from nanoproof.optim import optimizer_to_cpu, optimizer_to_gpu
 from nanoproof.data.bench import minif2f
 from nanoproof.data.rl import leanworkbook
 from nanoproof.cli import create_monitor, configure_logging, log, log0, set_ddp_info
-from scripts.prover_eval import save_eval_results_to_run_dir
 from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
 from nanoproof.data.sft.leantree_dataloader import sft_data_generator
 
@@ -138,21 +137,21 @@ log0(f"=> Setting grad accum steps: {grad_accum_steps}", component="Config")
 
 rank_seed = args.seed + ddp_rank
 
-search_config = SearchConfig(
-    num_simulations=args.num_simulations_collect,
-)
 replay_buffer = ReplayBuffer(window_size=args.replay_buffer_window_size, seed=rank_seed)
 theorems_sampler = TheoremsSampler(seed=rank_seed, datasets=args.datasets)
 
-# Query Lean servers for available processes and build per-actor assignments
+# Build prover (also starts inference servers on worker ranks)
 lean_server_addrs = [s.strip() for s in args.lean_servers.split(",")]
-lean_server_info = query_lean_servers(lean_server_addrs)
-lean_assignments = assign_lean_servers(lean_server_info)
-total_lean_procs = len(lean_assignments)
-log0(f"Lean servers: {lean_server_addrs} → {total_lean_procs} total processes", component="Config")
+prover = build_prover(
+    tactic_model=tactic_model,
+    lean_server_addrs=lean_server_addrs,
+    num_simulations_collect=args.num_simulations_collect,
+    num_simulations_eval=args.num_simulations_eval,
+    inference_server_port=args.inference_server_port,
+)
 
-# Create the RL monitor
-rl_monitor = create_monitor(num_actors=total_lean_procs, enabled=master_process)
+# Create the RL monitor (master only)
+rl_monitor = create_monitor(num_actors=0, enabled=master_process)
 rl_monitor.set_output_dir(output_dir)
 rl_monitor.set_lean_servers(lean_server_addrs)
 
@@ -220,33 +219,8 @@ optimizer = model.setup_optimizer(
 for group in optimizer.param_groups:
     group["lr"] = group["lr"] * args.init_lr_frac
 
-# Offload optimizer state to CPU (frees GPU memory for inference)
-optimizer_to_cpu(optimizer)
-
-
-# -----------------------------------------------------------------------------
-# Set up inference + prover (rank 0 = master, ranks 1+ = inference workers)
-# -----------------------------------------------------------------------------
-
-# Worker ranks: start inference server so rank 0's actors can use their GPU
-if not master_process:
-    inference_port = args.inference_server_port + 1 + ddp_rank
-    start_inference_server(tactic_model, inference_port)
-
-# Master rank: build InferenceBalancer (local + remote GPUs) and Prover
-prover: Prover | None = None
-if master_process:
-    remote_endpoints = [
-        f"127.0.0.1:{args.inference_server_port + 1 + r}"
-        for r in range(1, ddp_world_size)
-    ]
-    balancer = InferenceBalancer(tactic_model, remote_endpoints)
-    prover = Prover(
-        config=search_config,
-        tactic_model=balancer,
-        lean_servers=lean_assignments,
-        num_simulations_eval=args.num_simulations_eval,
-    )
+# Note: optimizer state is lazy-initialized by PyTorch on the first step().
+# optimizer_to_cpu is called after the first step to offload it.
 
 # Wait for all ranks to be ready
 if ddp:
@@ -284,7 +258,8 @@ while True:
             log(f"Step {step:05d} | Tactic full acc: {tactic_results['full_acc']:.4%} | Tactic first acc: {tactic_results['first_token_acc']:.4%} | Critic argmax MSE: {critic_results['argmax_mse']:.4f} | Critic soft MSE: {critic_results['soft_mse']:.4f}", component="Eval")
             log(f"  Entropy - Tactic first: {tactic_results['first_token_entropy']:.4f} | Tactic all: {tactic_results['all_tokens_entropy']:.4f} | Critic: {critic_results['entropy']:.4f}", component="Eval")
 
-        # Prover evaluation (rank 0 only — worker ranks serve inference)
+        # Prover evaluation + collection (rank 0 only).
+        # Worker ranks poll via active_barrier so their inference servers stay responsive.
         if master_process:
             minif2f_theorems = minif2f.list_theorems(split="valid")
             leanworkbook_theorems = leanworkbook.list_theorems(split="valid")[:128]
@@ -300,17 +275,8 @@ while True:
                                    leanworkbook_results['solved'], leanworkbook_results['total'],
                                    leanworkbook_results['errors'])
 
-            # Log results
             minif2f_status = f"minif2f: {minif2f_results['success_rate']:.4%} ({minif2f_results['solved']}/{minif2f_results['total']}, errors={minif2f_results['errors']})"
-            if minif2f_results.get('timed_out'):
-                minif2f_status += " [TIMED OUT]"
-            if minif2f_results.get('invalid'):
-                minif2f_status += " [INVALID]"
             leanworkbook_status = f"leanworkbook: {leanworkbook_results['success_rate']:.4%} ({leanworkbook_results['solved']}/{leanworkbook_results['total']}, errors={leanworkbook_results['errors']})"
-            if leanworkbook_results.get('timed_out'):
-                leanworkbook_status += " [TIMED OUT]"
-            if leanworkbook_results.get('invalid'):
-                leanworkbook_status += " [INVALID]"
             log(f"Step {step:05d} | {minif2f_status} | {leanworkbook_status}", component="Eval")
 
             wandb_data = {
@@ -322,11 +288,13 @@ while True:
                 "val_critic_argmax_mse": critic_results["argmax_mse"],
                 "val_critic_soft_mse": critic_results["soft_mse"],
                 "val_critic_entropy": critic_results["entropy"],
+                "minif2f_val": minif2f_results['success_rate'],
+                "leanworkbook_val": leanworkbook_results['success_rate'],
             }
-            if not minif2f_results.get('timed_out') and not minif2f_results.get('invalid'):
-                wandb_data["minif2f_val"] = minif2f_results['success_rate']
-            if not leanworkbook_results.get('timed_out') and not leanworkbook_results.get('invalid'):
-                wandb_data["leanworkbook_val"] = leanworkbook_results['success_rate']
+            if minif2f_results['errors'] > 0:
+                wandb_data["minif2f_errors"] = minif2f_results['errors']
+            if leanworkbook_results['errors'] > 0:
+                wandb_data["leanworkbook_errors"] = leanworkbook_results['errors']
             wandb_run.log(wandb_data)
 
             save_eval_results_to_run_dir(output_dir, step, "minif2f", minif2f_results)
@@ -358,7 +326,6 @@ while True:
             # Collect proofs (rank 0 only — worker ranks serve inference)
             timer.start("collect")
             model.eval()
-            rl_monitor.start_collection(target_samples=args.collect_transitions, num_actors=total_lean_procs)
             rl_monitor.set_step(step)
 
             if master_process:

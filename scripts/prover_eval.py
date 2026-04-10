@@ -1,9 +1,7 @@
 """
 Standalone prover evaluation.
 
-Loads a checkpoint, queries Lean servers for available processes, runs MCTS
-evaluation on one or more theorem-proving benchmarks using the same ``Prover``
-class as the RL training loop, and saves results next to the checkpoint.
+Uses the same Prover + InferenceBalancer as the RL training loop.
 
 Usage:
     python scripts/prover_eval.py \\
@@ -14,97 +12,26 @@ Usage:
 
 import argparse
 import atexit
-import json
 import os
 import sys
-from dataclasses import dataclass
 
 import torch
+import torch.distributed as dist
 
-from nanoproof.checkpoints import load_model, parse_checkpoint_path
-from nanoproof.cli import log
-from nanoproof.common import autodetect_device_type, compute_cleanup, compute_init, print0
+from nanoproof.checkpoints import (
+    CheckpointInfo,
+    load_existing_eval_results,
+    parse_checkpoint_path,
+    save_eval_results,
+)
+from nanoproof.common import active_barrier_master, active_barrier_wait, autodetect_device_type, compute_cleanup, compute_init, print0
 from nanoproof.data.bench import minif2f
 from nanoproof.data.rl import leanworkbook
-from nanoproof.engine import Engine
-from nanoproof.inference import BlockingTacticModel, InferenceBalancer, TacticModel, start_inference_server
-from nanoproof.prover import Prover, assign_lean_servers, query_lean_servers
-from nanoproof.search import SearchConfig
+from nanoproof.inference import BlockingTacticModel, TacticModel
+from nanoproof.prover import build_prover
 
 # TODO: during verification, maybe set 'set_option maxHeartbeats 0\nset_option maxRecDepth 100000'
 
-
-@dataclass
-class CheckpointInfo:
-    """Information about the loaded checkpoint, used for saving eval results."""
-    checkpoint_dir: str
-    step: int
-    seed: int = 0
-
-    def get_eval_path(self, dataset_name: str) -> str:
-        seed_suffix = f"-{self.seed}" if self.seed != 0 else ""
-        return os.path.join(self.checkpoint_dir, f"eval_{self.step:06d}_{dataset_name}{seed_suffix}.jsonl")
-
-
-# -----------------------------------------------------------------------------
-# Result persistence
-# -----------------------------------------------------------------------------
-
-def _write_eval_results_jsonl(jsonl_path: str, results: dict, prepend_entries: list[dict] = None):
-    """Write evaluation results to a JSONL file."""
-    detailed_results = results.get("detailed_results", [])
-
-    if not detailed_results and not prepend_entries:
-        log(f"Skipping write of empty eval results to {jsonl_path}", component="Eval")
-        return
-
-    with open(jsonl_path, "w") as f:
-        if prepend_entries:
-            for entry in prepend_entries:
-                f.write(json.dumps(entry) + "\n")
-
-        for item in detailed_results:
-            entry = {
-                "theorem": item["theorem"],
-                "proof": item["proof_tree"],
-                "unsimplified_proof": item.get("unsimplified_proof_tree"),
-                "linearized_proof": item.get("linearized_proof"),
-                "num_iterations": item["num_iterations"],
-                "error": item.get("error"),
-            }
-            f.write(json.dumps(entry) + "\n")
-
-    total_count = len(detailed_results) + (len(prepend_entries) if prepend_entries else 0)
-    log(f"Saved {total_count} eval results to {jsonl_path}", component="Eval")
-
-
-def save_eval_results(checkpoint_info: CheckpointInfo, dataset_name: str, results: dict, prepend_entries: list[dict] = None):
-    """Save evaluation results alongside the checkpoint."""
-    jsonl_path = checkpoint_info.get_eval_path(dataset_name)
-    _write_eval_results_jsonl(jsonl_path, results, prepend_entries=prepend_entries)
-
-
-def save_eval_results_to_run_dir(output_dir: str, step: int, dataset_name: str, results: dict):
-    """Save evaluation results in the RL run's eval directory."""
-    eval_dir = os.path.join(output_dir, "evals", str(step))
-    os.makedirs(eval_dir, exist_ok=True)
-    jsonl_path = os.path.join(eval_dir, f"{dataset_name}.jsonl")
-    _write_eval_results_jsonl(jsonl_path, results)
-
-
-def load_existing_eval_results(jsonl_path: str) -> tuple[list[dict], list[dict]]:
-    """Load existing results. Returns (successful_entries, error_entries)."""
-    successful, errors = [], []
-    with open(jsonl_path, "r") as f:
-        for line in f:
-            entry = json.loads(line.strip())
-            (errors if entry.get("error") is not None else successful).append(entry)
-    return successful, errors
-
-
-# -----------------------------------------------------------------------------
-# Result printing
-# -----------------------------------------------------------------------------
 
 def print_results(results, name):
     print0("-" * 80)
@@ -130,10 +57,6 @@ def print_results(results, name):
 
     print0("-" * 80)
 
-
-# -----------------------------------------------------------------------------
-# Main
-# -----------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate a prover model on theorem proving benchmarks")
@@ -169,12 +92,11 @@ def main():
 
     # Init compute
     device_type = autodetect_device_type()
-    ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+    ddp, ddp_rank, _, _, device = compute_init(device_type)
     master_process = ddp_rank == 0
 
     # Check for existing results early (before loading model)
-    checkpoint_dir, step = parse_checkpoint_path(args.model_path)
-    checkpoint_info = CheckpointInfo(checkpoint_dir=checkpoint_dir, step=step, seed=args.seed)
+    checkpoint_info = CheckpointInfo(*parse_checkpoint_path(args.model_path), seed=args.seed)
 
     should_exit = False
     continue_data = {}
@@ -209,49 +131,29 @@ def main():
 
     if ddp:
         exit_tensor = torch.tensor([1 if should_exit else 0], device=device)
-        torch.distributed.broadcast(exit_tensor, src=0)
+        dist.broadcast(exit_tensor, src=0)
         should_exit = exit_tensor.item() == 1
 
     if should_exit:
         compute_cleanup()
         sys.exit(1)
 
-    # Load model
-    print0(f"Loading checkpoint: {checkpoint_dir}, step={step}")
-    model, tokenizer, _ = load_model(args.model_path, device, phase="eval")
-    engine = Engine(model, tokenizer)
-    inner_tactic_model = TacticModel(model, tokenizer, engine, num_samples=6, seed=args.seed)
+    # Load model + build prover (same as rl.py)
+    print0(f"Loading checkpoint: {checkpoint_info.checkpoint_dir}, step={checkpoint_info.step}")
+    inner_tactic_model = TacticModel.create(num_samples=6, model_path=args.model_path)
     tactic_model = BlockingTacticModel(inner_model=inner_tactic_model, timeout_seconds=0.2, max_batch_tokens=8000)
 
-    # Query Lean servers
     lean_server_addrs = [s.strip() for s in args.lean_servers.split(",")]
-    lean_server_info = query_lean_servers(lean_server_addrs)
-    lean_assignments = assign_lean_servers(lean_server_info)
-    total_lean_procs = len(lean_assignments)
-    print0(f"Lean servers: {lean_server_addrs} → {total_lean_procs} processes")
-
-    # Build inference balancer + prover (same pattern as rl.py)
-    if not master_process:
-        inference_port = args.inference_server_port + 1 + ddp_rank
-        start_inference_server(tactic_model, inference_port)
-
-    prover: Prover | None = None
-    if master_process:
-        remote_endpoints = [
-            f"127.0.0.1:{args.inference_server_port + 1 + r}"
-            for r in range(1, ddp_world_size)
-        ]
-        balancer = InferenceBalancer(tactic_model, remote_endpoints)
-        config = SearchConfig(num_simulations=args.num_simulations)
-        prover = Prover(
-            config=config,
-            tactic_model=balancer,
-            lean_servers=lean_assignments,
-            num_simulations_eval=args.num_simulations,
-        )
+    prover = build_prover(
+        tactic_model=tactic_model,
+        lean_server_addrs=lean_server_addrs,
+        num_simulations_collect=args.num_simulations,
+        num_simulations_eval=args.num_simulations,
+        inference_server_port=args.inference_server_port,
+    )
 
     if ddp:
-        torch.distributed.barrier()
+        dist.barrier()
 
     atexit.register(lambda: prover.shutdown() if prover else None)
 
@@ -272,18 +174,21 @@ def main():
 
     print0(f"Evaluating with {args.num_simulations} MCTS simulations")
 
-    # Run evaluation
+    # Evaluate (rank 0 only; worker ranks serve inference via their daemon threads)
     all_results = {}
-    for dataset_name, theorems in dataset_theorems.items():
-        print0(f"\nEvaluating on {len(theorems)} theorems from {dataset_name}")
-
-        if master_process:
+    if master_process:
+        for dataset_name, theorems in dataset_theorems.items():
+            print0(f"\nEvaluating on {len(theorems)} theorems from {dataset_name}")
             results = prover.evaluate(theorems, dataset_name=dataset_name)
             all_results[dataset_name] = results
             print_results(results, dataset_name)
 
             prepend = continue_data.get(dataset_name, (None, None))[0] if args.continue_eval else None
             save_eval_results(checkpoint_info, dataset_name + split_suffix, results, prepend_entries=prepend)
+
+        active_barrier_master("prover_eval_done")
+    else:
+        active_barrier_wait("prover_eval_done")
 
     compute_cleanup()
     return all_results
