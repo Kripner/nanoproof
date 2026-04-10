@@ -1,20 +1,15 @@
 """
-Inference - provides tactic models and batched inference for prover servers.
+Inference - tactic models and batched inference for proof search.
 
 This module contains:
 - TacticModel: Core tactic generation model wrapping the Transformer
 - BlockingTacticModel: Thread-safe wrapper that batches LLM calls from multiple threads
-- RemoteTacticModel: Client that calls a remote inference server (for CPU-only nodes)
+- RemoteTacticModel: Client that calls a remote inference server (for multi-GPU load balancing)
+- InferenceBalancer: Routes inference across one local + N remote backends
 - start_inference_server: Starts a Flask inference server for a BlockingTacticModel
 
-The inference server (Flask) runs on GPU nodes and handles tactic generation requests
-from multiple prover servers. It batches requests for efficient GPU utilization.
-
-For multi-GPU setups, use DDP mode which runs separate inference servers per GPU
-with the coordinator (rl_server.py) handling load balancing.
-
 Usage:
-    python -m nanoproof.inference --port 5000
+    python -m nanoproof.inference --model-path sft/.../model_005000.pt
 """
 
 import argparse
@@ -381,20 +376,16 @@ class BlockingTacticModel:
 
 
 # -----------------------------------------------------------------------------
-# Remote Tactic Model (for CPU-only prover nodes)
+# Remote Tactic Model (for multi-GPU inference via localhost HTTP)
 # -----------------------------------------------------------------------------
-
-class RLServerDisconnectedError(Exception):
-    """Raised when the RL server appears to be permanently disconnected."""
-    pass
-
 
 class RemoteTacticModel:
     """
-    Tactic model that calls a remote inference server for tactic generation and value prediction.
+    Tactic model that calls a remote inference server.
 
-    This is used by prover servers running on CPU-only nodes.
-    The inference server handles batching and GPU inference.
+    Used by InferenceBalancer to route requests to non-local GPU ranks.
+    Each rank runs a BlockingTacticModel behind a Flask server; this client
+    talks to it over localhost HTTP.
     """
 
     def __init__(self, server_address: str, timeout: float = 60.0, max_pool_size: int = 50):
@@ -410,16 +401,13 @@ class RemoteTacticModel:
         self._session.mount('http://', adapter)
         self._session.mount('https://', adapter)
         self._consecutive_failures = 0
-        self._max_failures = 10  # After this many failures, raise exception
+        self._max_failures = 10
         self._last_error_log_time = 0
-        self._error_log_interval = 5.0  # Only log errors every N seconds
+        self._error_log_interval = 5.0
         self._lock = threading.Lock()
 
     def sample_tactic(self, state) -> ValueOrError[TacticAndValue]:
-        """Sample tactics and predict value for a single state.
-
-        Returns (tactics, value) tuple on success.
-        """
+        """Sample tactics and predict value for a single state."""
         assert len(state) == 1, \
             f"expected single branch in state, got {len(state)}"
         state_str = str(state[0].state).strip()
@@ -431,10 +419,7 @@ class RemoteTacticModel:
         return results[0]
 
     def sample_tactic_from_str_batch(self, state_strs: list[str]) -> list[ValueOrError[TacticAndValue]]:
-        """Sample tactics and predict values for multiple state strings.
-
-        Returns list of (tactics, value) tuples.
-        """
+        """Sample tactics and predict values for multiple state strings."""
         if not state_strs:
             return []
 
@@ -473,15 +458,13 @@ class RemoteTacticModel:
             self._consecutive_failures += 1
             failures = self._consecutive_failures
 
-            # Rate-limit error logging
             now = time.time()
             if now - self._last_error_log_time >= self._error_log_interval:
                 print(f"[RemoteTacticModel] {message} (failures: {failures}/{self._max_failures})")
                 self._last_error_log_time = now
 
-            # If too many failures, signal that server is down
             if failures >= self._max_failures:
-                raise RLServerDisconnectedError(
+                raise ConnectionError(
                     f"Inference server appears disconnected after {failures} consecutive failures"
                 )
 
@@ -499,11 +482,73 @@ class RemoteTacticModel:
 
 
 # -----------------------------------------------------------------------------
-# Flask Server
+# Inference Balancer (load-balances across multiple GPUs)
+# -----------------------------------------------------------------------------
+
+class InferenceBalancer:
+    """Load-balances inference across multiple GPUs.
+
+    One backend is the local BlockingTacticModel (rank 0, in-process).
+    Other backends are remote inference servers on localhost (ranks 1+),
+    accessed via RemoteTacticModel. Requests are routed round-robin.
+    """
+
+    def __init__(self, local_model: BlockingTacticModel, remote_endpoints: list[str] = None):
+        """
+        Args:
+            local_model: The in-process BlockingTacticModel (rank 0's GPU).
+            remote_endpoints: List of "host:port" strings for other ranks' inference servers.
+                              Empty list or None means single-GPU mode (only local model).
+        """
+        self._local = local_model
+        self._remotes = [RemoteTacticModel(ep) for ep in (remote_endpoints or [])]
+        self._backends = [self._local] + self._remotes
+        self._next_idx = 0
+        self._lock = threading.Lock()
+
+    @property
+    def network(self):
+        return self._local.network
+
+    def _next_backend(self):
+        with self._lock:
+            idx = self._next_idx
+            self._next_idx = (self._next_idx + 1) % len(self._backends)
+        return self._backends[idx]
+
+    def sample_tactic(self, state: State) -> ValueOrError[TacticAndValue]:
+        return self._next_backend().sample_tactic(state)
+
+    def sample_tactic_from_str(self, state_str: str) -> ValueOrError[TacticAndValue]:
+        return self._next_backend().sample_tactic_from_str(state_str)
+
+    def sample_tactic_from_str_batch(self, state_strs: list[str]) -> list[ValueOrError[TacticAndValue]]:
+        return self._next_backend().sample_tactic_from_str_batch(state_strs)
+
+    def pause(self):
+        """Pause all backends (local + remote). Remote backends are no-ops
+        since their underlying BlockingTacticModels are paused by the
+        worker rank's training loop."""
+        for backend in self._backends:
+            backend.pause()
+
+    def resume(self):
+        """Resume all backends."""
+        for backend in self._backends:
+            backend.resume()
+
+    def shutdown(self):
+        """Shutdown all backends."""
+        for backend in self._backends:
+            backend.shutdown()
+
+
+# -----------------------------------------------------------------------------
+# Flask Server (used by worker ranks for multi-GPU inference)
 # -----------------------------------------------------------------------------
 
 def create_blocking_model_app(model: BlockingTacticModel):
-    """Create Flask app for a single BlockingTacticModel (used in DDP mode, one per rank)."""
+    """Create Flask app for a single BlockingTacticModel (one per GPU rank)."""
     app = Flask(__name__)
 
     # Disable Flask request logging to reduce spam
@@ -539,9 +584,9 @@ def create_blocking_model_app(model: BlockingTacticModel):
 
 def start_inference_server(model: BlockingTacticModel, port: int, host: str = "0.0.0.0"):
     """
-    Start inference server for a single BlockingTacticModel in a background thread.
+    Start inference server for a BlockingTacticModel in a background thread.
 
-    Used in DDP mode where each rank runs one inference server on its GPU.
+    Used by worker DDP ranks to expose their GPU for inference by rank 0's actors.
     Returns the background thread.
     """
     app = create_blocking_model_app(model)
@@ -559,45 +604,49 @@ def start_inference_server(model: BlockingTacticModel, port: int, host: str = "0
 
 
 # -----------------------------------------------------------------------------
-# Main (standalone inference server)
+# Interactive testing (python -m nanoproof.inference)
 # -----------------------------------------------------------------------------
 
-def main():
+def _main():
     """
-    Standalone inference server using a single BlockingTacticModel.
-
-    For multi-GPU setups, use DDP mode in rl.py which runs separate
-    inference servers per GPU with a coordinator for load balancing.
+    Interactive tactic model: loads a model and lets you type tactic states
+    to see generated tactics and value predictions.
     """
-    parser = argparse.ArgumentParser(description="Inference Server")
-    parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
-    parser.add_argument("--port", type=int, default=5000, help="Port to bind to")
+    parser = argparse.ArgumentParser(description="Interactive tactic model")
+    parser.add_argument("--model-path", required=True, help="path to model_NNNNNN.pt (relative to models/ or absolute)")
     parser.add_argument("--num-samples", type=int, default=6, help="Tactics to sample per state")
-    parser.add_argument("--batch-timeout", type=float, default=0.1, help="Timeout for batching (seconds)")
-    parser.add_argument("--max-batch-tokens", type=int, default=32000, help="Max total tokens per batch (controls memory)")
-    parser.add_argument("--model-path", required=True, help="path to model_NNNNNN.pt to load (relative to models/ or absolute)")
     args = parser.parse_args()
 
-    print(f"[Inference] Loading model...")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, tokenizer, _ = load_model(args.model_path, device, phase="eval")
-    engine = Engine(model, tokenizer)
-    tactic_model = TacticModel(model, tokenizer, engine, num_samples=args.num_samples)
-    blocking_model = BlockingTacticModel(
-        tactic_model,
-        timeout_seconds=args.batch_timeout,
-        max_batch_tokens=args.max_batch_tokens
-    )
+    print(f"Loading model from {args.model_path}...")
+    tactic_model = TacticModel.create(num_samples=args.num_samples, model_path=args.model_path)
+    print(f"Model loaded. Device: {tactic_model.network.get_device()}")
+    print()
 
-    app = create_blocking_model_app(blocking_model)
+    def get_input() -> str:
+        lines = []
+        print("Type a tactic state, followed by an empty line:")
+        line = input()
+        while line.strip() or not lines:
+            lines.append(line.rstrip())
+            line = input()
+        return "\n".join(lines)
 
-    print(f"[Inference] Server starting on {args.host}:{args.port}")
-    print(f"[Inference] Device: {device}")
-    print(f"[Inference] Samples per state: {args.num_samples}")
-    print(f"[Inference] Timeout: {args.batch_timeout}s, max tokens: {args.max_batch_tokens}")
+    inp = get_input()
+    while inp.strip() not in ["q", "quit", "exit"]:
+        print("Generating tactics...")
+        result = tactic_model.sample_tactic_from_str(inp.strip())
+        if result.is_success():
+            tactics, value = result.value
+            for i, tactic in enumerate(tactics):
+                print(f"  [{i+1}] {tactic}")
+            print(f"  Value: {value:.2f}")
+        else:
+            print(f"  Error: {result.error}")
+        print()
+        inp = get_input()
 
-    app.run(host=args.host, port=args.port, threaded=True)
+    print("Done.")
 
 
 if __name__ == "__main__":
-    main()
+    _main()

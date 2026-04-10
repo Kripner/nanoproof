@@ -217,29 +217,6 @@ def get_and_clear_tactics_buffer() -> list[dict]:
 # -----------------------------------------------------------------------------
 
 @dataclass
-class ProverThreadStatus:
-    """Status of a single prover thread."""
-    id: int
-    state: Literal["idle", "running", "blocked", "error"] = "idle"
-    games_played: int = 0
-    games_solved: int = 0
-    last_update: float = field(default_factory=time.time)
-
-
-@dataclass
-class ProverServerStatus:
-    """Status of a prover server."""
-    address: str
-    num_threads: int = 0
-    threads: list[ProverThreadStatus] = field(default_factory=list)
-    connected: bool = True
-    games_played: int = 0
-    games_solved: int = 0
-    transitions_collected: int = 0
-    last_poll: float = field(default_factory=time.time)
-
-
-@dataclass
 class LocalActorStatus:
     """Status of a local actor thread."""
     id: int
@@ -437,10 +414,7 @@ class WebMonitor:
         # Current evaluation progress
         self.eval_progress = EvalProgress()
 
-        # Prover servers
-        self.prover_servers: dict[str, ProverServerStatus] = {}
-
-        # Local actors (for non-distributed mode)
+        # Local actors
         self.local_actors: dict[int, LocalActorStatus] = {}
 
         # GPU status
@@ -879,22 +853,6 @@ class WebMonitor:
                 </div>
             `;
             
-            // Prover servers
-            if (Object.keys(s.prover_servers).length > 0) {
-                html += '<div class="card"><h3>Prover Servers</h3><div class="prover-grid">';
-                for (const [addr, server] of Object.entries(s.prover_servers)) {
-                    html += `<div class="prover-server">
-                        <div><strong>${addr}</strong></div>
-                        <div>${server.games_solved}/${server.games_played} solved</div>
-                        <div class="thread-grid">`;
-                    for (const t of server.threads) {
-                        html += `<div class="thread thread-${t.state}" title="Thread ${t.id}: ${t.state}"></div>`;
-                    }
-                    html += '</div></div>';
-                }
-                html += '</div></div>';
-            }
-            
             // GPUs
             if (s.gpus.length > 0) {
                 html += '<div class="card"><h3>GPUs</h3>';
@@ -985,21 +943,6 @@ class WebMonitor:
                     for e in self.eval_history
                 ],
                 "eval_progress": self.eval_progress.to_dict(),
-                "prover_servers": {
-                    addr: {
-                        "address": s.address,
-                        "num_threads": s.num_threads,
-                        "threads": [
-                            {"id": t.id, "state": t.state, "games_played": t.games_played, "games_solved": t.games_solved}
-                            for t in s.threads
-                        ],
-                        "connected": s.connected,
-                        "games_played": s.games_played,
-                        "games_solved": s.games_solved,
-                        "transitions_collected": s.transitions_collected,
-                    }
-                    for addr, s in self.prover_servers.items()
-                },
                 "local_actors": {
                     str(actor_id): {
                         "id": a.id,
@@ -1167,34 +1110,7 @@ class WebMonitor:
 
     # --- Prover server updates ---
 
-    def update_prover_server(self, address: str, games_played: int = 0, games_solved: int = 0,
-                             transitions: int = 0, num_threads: int = 0, thread_states: list[str] | None = None):
-        """Update status of a prover server."""
-        with self._lock:
-            if address not in self.prover_servers:
-                self.prover_servers[address] = ProverServerStatus(address=address)
-            
-            server = self.prover_servers[address]
-            server.games_played = games_played
-            server.games_solved = games_solved
-            server.transitions_collected = transitions
-            server.num_threads = num_threads
-            server.last_poll = time.time()
-            server.connected = True
-            
-            if thread_states:
-                server.threads = [
-                    ProverThreadStatus(id=i, state=state)
-                    for i, state in enumerate(thread_states)
-                ]
-
-    def remove_prover_server(self, address: str):
-        """Remove a prover server from the monitor."""
-        with self._lock:
-            if address in self.prover_servers:
-                del self.prover_servers[address]
-
-    # --- Local actor updates (for non-distributed mode) ---
+    # --- Local actor updates ---
 
     def update_local_actor(self, actor_id: int, state: str = "running", 
                            games_played: int | None = None, games_solved: int | None = None,

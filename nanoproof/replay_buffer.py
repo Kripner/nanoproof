@@ -48,19 +48,25 @@ class ReplayBuffer:
             self.local_buffer.extend(transitions)
 
     def synchronize(self):
-        """Synchronize local buffers across all DDP ranks."""
-        ddp, _, _, world_size = get_dist_info()
-        if ddp:
-            gathered_buffers = [None for _ in range(world_size)]
-            dist.all_gather_object(gathered_buffers, self.local_buffer)
-            for buffer in gathered_buffers:
-                self.buffer.extend(buffer)
-        else:
-            self.buffer.extend(self.local_buffer)
+        """Merge local_buffer into buffer and broadcast to all DDP ranks.
 
+        Only rank 0 collects transitions (into local_buffer). This method
+        moves them into the shared buffer and broadcasts the result so all
+        ranks can sample from it during training.
+        """
+        ddp, _, _, _ = get_dist_info()
+
+        # Move local_buffer → buffer (only rank 0 has data, others are empty)
+        self.buffer.extend(self.local_buffer)
         self.local_buffer = []
         if len(self.buffer) > self.window_size:
             self.buffer = self.buffer[-self.window_size:]
+
+        # Broadcast from rank 0 so all ranks have the same buffer
+        if ddp:
+            buffer_list = [self.buffer]
+            dist.broadcast_object_list(buffer_list, src=0)
+            self.buffer = buffer_list[0]
 
     def sample_transition(self) -> tuple[str, str, float]:
         return self.rng.choice(self.buffer)

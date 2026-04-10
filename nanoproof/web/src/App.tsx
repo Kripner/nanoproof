@@ -142,8 +142,7 @@ function App() {
           
           <div className="card">
             <div className="card-title">Provers</div>
-            <ProverGrid 
-              servers={state.prover_servers} 
+            <ProverGrid
               localActors={state.local_actors}
               onActorClick={handleActorClick}
             />

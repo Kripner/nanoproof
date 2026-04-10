@@ -1,20 +1,3 @@
-export interface ThreadStatus {
-  id: number;
-  state: 'idle' | 'running' | 'blocked' | 'error';
-  games_played: number;
-  games_solved: number;
-}
-
-export interface ProverServer {
-  address: string;
-  num_threads: number;
-  threads: ThreadStatus[];
-  connected: boolean;
-  games_played: number;
-  games_solved: number;
-  transitions_collected: number;
-}
-
 export interface GPU {
   id: number;
   name: string;
@@ -83,7 +66,6 @@ export interface MonitorState {
   training: TrainingStats;
   eval_history: EvalResult[];
   eval_progress: EvalProgress;
-  prover_servers: Record<string, ProverServer>;
   local_actors: Record<string, LocalActor>;
   gpus: GPU[];
   lean_server: LeanServerStatus;

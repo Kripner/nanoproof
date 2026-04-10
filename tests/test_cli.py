@@ -21,41 +21,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from nanoproof.cli import create_monitor, log
 
 
-def simulate_prover_server(monitor, address: str, num_threads: int = 4):
-    """Simulate a prover server with multiple threads."""
-    games_played = 0
-    games_solved = 0
-    transitions = 0
-    
+def simulate_local_actors(monitor, num_actors: int = 16):
+    """Simulate local actor threads."""
     while True:
-        # Simulate some activity
-        games_played += random.randint(0, 3)
-        if random.random() < 0.3:
-            games_solved += 1
-            transitions += random.randint(1, 5)
-        
-        # Random thread states
-        states = []
-        for i in range(num_threads):
+        for i in range(num_actors):
             r = random.random()
             if r < 0.6:
-                states.append("running")
+                state = "running"
             elif r < 0.8:
-                states.append("blocked")
-            elif r < 0.95:
-                states.append("idle")
+                state = "idle"
             else:
-                states.append("error")
-        
-        monitor.update_prover_server(
-            address=address,
-            games_played=games_played,
-            games_solved=games_solved,
-            transitions=transitions,
-            num_threads=num_threads,
-            thread_states=states,
-        )
-        
+                state = "error"
+            monitor.update_local_actor(i, state=state)
         time.sleep(0.5 + random.random())
 
 
@@ -192,17 +169,14 @@ def main():
     
     print("Press Ctrl+C to stop.\n")
     
-    # Start background simulators for prover servers
-    prover_threads = []
-    for i, addr in enumerate(["10.10.25.50:5001", "10.10.25.51:5001", "10.10.25.52:5001"]):
-        t = threading.Thread(
-            target=simulate_prover_server,
-            args=(monitor, addr, 8),
-            daemon=True
-        )
-        t.start()
-        prover_threads.append(t)
-        log(f"Started simulated prover server: {addr}", component="Test")
+    # Start background simulator for local actors
+    actor_thread = threading.Thread(
+        target=simulate_local_actors,
+        args=(monitor, 16),
+        daemon=True
+    )
+    actor_thread.start()
+    log("Started local actor simulator", component="Test")
     
     # Start GPU simulator
     gpu_thread = threading.Thread(

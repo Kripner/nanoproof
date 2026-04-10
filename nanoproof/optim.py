@@ -374,3 +374,37 @@ class DistMuonAdamW(torch.optim.Optimizer):
             else:
                 raise ValueError(f"Unknown optimizer kind: {group['kind']}")
         self._finish_gathers(gather_list)
+
+
+# -----------------------------------------------------------------------------
+# Optimizer state CPU ↔ GPU offloading
+# -----------------------------------------------------------------------------
+
+def optimizer_to_cpu(optimizer: torch.optim.Optimizer):
+    """Move all optimizer state tensors to CPU.
+
+    Call after optimizer.step() to free GPU memory for inference.
+    """
+    for group in optimizer.param_groups:
+        for p in group["params"]:
+            state = optimizer.state.get(p)
+            if state is None:
+                continue
+            for key, val in state.items():
+                if isinstance(val, torch.Tensor) and val.is_cuda:
+                    state[key] = val.to("cpu", non_blocking=True)
+
+
+def optimizer_to_gpu(optimizer: torch.optim.Optimizer, device: torch.device):
+    """Move all optimizer state tensors back to GPU.
+
+    Call before the training step so optimizer.step() can access its state.
+    """
+    for group in optimizer.param_groups:
+        for p in group["params"]:
+            state = optimizer.state.get(p)
+            if state is None:
+                continue
+            for key, val in state.items():
+                if isinstance(val, torch.Tensor) and not val.is_cuda:
+                    state[key] = val.to(device, non_blocking=True)
