@@ -65,7 +65,7 @@ def parquets_iter_batched(split, start=0, step=1):
             texts = rg.column('text').to_pylist()
             yield texts
 
-def process_file(filepath):
+def _rechunk_parquet(filepath):
     """
     Loads a parquet file, changes group size to 1024, drops all columns except 'text',
     and overwrites the file.
@@ -95,7 +95,7 @@ def process_file(filepath):
             except:
                 pass
 
-def download_single_file(index):
+def _download_single_file(index):
     """ Downloads a single file index, with some backoff """
 
     # Construct the local filepath for this file and skip if it already exists
@@ -134,7 +134,7 @@ def download_single_file(index):
             # Move temp file to final location
             os.rename(temp_path, filepath)
             # Process the file immediately after download
-            process_file(filepath)
+            _rechunk_parquet(filepath)
             print(f"Successfully downloaded and processed {filename}")
             return True
 
@@ -180,7 +180,7 @@ if __name__ == "__main__":
         print()
         with Pool(processes=args.num_workers) as pool:
             results = list(tqdm(
-                pool.imap(download_single_file, ids_to_download),
+                pool.imap(_download_single_file, ids_to_download),
                 total=len(ids_to_download),
                 desc="Downloading shards"
             ))
@@ -192,5 +192,5 @@ if __name__ == "__main__":
         parquet_paths = list_parquet_files()
         print(f"Found {len(parquet_paths)} parquet files to process in {DATA_DIR}...")
         for filepath in tqdm(parquet_paths, desc="Processing files"):
-            process_file(filepath)
+            _rechunk_parquet(filepath)
         print("Done processing all files.")

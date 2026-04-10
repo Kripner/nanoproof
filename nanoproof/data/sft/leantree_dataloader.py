@@ -17,7 +17,7 @@ from itertools import islice
 
 from nanoproof.common import get_dist_info, GLOBAL_CONFIG
 from nanoproof.tokenizer import get_tokenizer, value_to_token_ids
-from nanoproof.data.sft.leantree import iter_data
+from nanoproof.data.sft.leantree import leantree_transitions
 
 
 def rl_data_generator(generator, batch_size, device="cuda"):
@@ -123,7 +123,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     print("Loading dataset...")
-    dataset = list(iter_data(split=args.split))
+    dataset = list(leantree_transitions(split=args.split))
     tokenizer = get_tokenizer()
     for inputs, targets, approx_progress, last_step in islice(
         sft_data_generator(dataset, batch_size=args.batch_size, device="cpu"), args.num_batches

@@ -24,7 +24,7 @@ import leantree.augmentations
 from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, autodetect_device_type, create_run_dirs, get_lr_multiplier
 from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
-from nanoproof.data.sft.leantree import iter_data
+from nanoproof.data.sft.leantree import leantree_transitions
 from nanoproof.data.sft.leantree_dataloader import sft_data_generator
 from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
 
@@ -109,9 +109,9 @@ augmentations = [
     leantree.augmentations.ShuffleGoalsAndHypotheses(seed=args.seed),
     leantree.augmentations.RandomRename(seed=args.seed),
 ]
-train_ds = list(iter_data(split="train", augmentations=augmentations))
+train_ds = list(leantree_transitions(split="train", augmentations=augmentations))
 random.Random(args.seed).shuffle(train_ds)
-val_ds = list(iter_data(split="valid"))
+val_ds = list(leantree_transitions(split="valid"))
 print0(f"Train rows count: {len(train_ds)} | Val rows count: {len(val_ds)}")
 
 train_loader = sft_data_generator(train_ds, batch_size=args.device_batch_size)

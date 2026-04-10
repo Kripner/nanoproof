@@ -6,7 +6,7 @@ import torch.distributed as dist
 
 from nanoproof.common import compute_init, autodetect_device_type, print0, is_ddp, get_dist_info, GLOBAL_CONFIG
 from nanoproof.checkpoints import load_model
-from nanoproof.data.sft.leantree import iter_data
+from nanoproof.data.sft.leantree import leantree_transitions
 from nanoproof.data.sft.leantree_dataloader import sft_data_generator
 
 
@@ -254,7 +254,7 @@ def _main():
     print0(f"Model loaded. Config: {meta.get('model_config', 'N/A')}")
 
     print0(f"Loading dataset (split={args.split})...")
-    dataset = list(iter_data(split=args.split))
+    dataset = list(leantree_transitions(split=args.split))
     if len(dataset) == 0:
         print0("Dataset is empty!")
         return

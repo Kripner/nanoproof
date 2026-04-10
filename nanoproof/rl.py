@@ -15,21 +15,21 @@ import torch.distributed as dist
 import leantree.augmentations
 from leantree.core.lean import LeanGoal
 
-from nanoproof.common import compute_init, compute_cleanup, get_base_dir, DummyWandb, autodetect_device_type, SimpleTimer, flush, active_barrier_master, active_barrier_wait, create_run_dirs
+from nanoproof.common import compute_init, compute_cleanup, get_base_dir, DummyWandb, autodetect_device_type, SimpleTimer, flush, create_run_dirs
 from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
 from nanoproof.search import SearchConfig
-from nanoproof.data.sft.leantree import iter_data
+from nanoproof.data.sft.leantree import leantree_transitions
 from nanoproof.data.sft.leantree_dataloader import rl_data_generator
-from nanoproof.experience_collection import ReplayBuffer, TheoremsSampler, run_actor
-from nanoproof.inference import TacticModel, BlockingTacticModel
+from nanoproof.replay_buffer import ReplayBuffer
+from nanoproof.prover import TheoremsSampler, LocalProver, DistributedProver, Prover
+from nanoproof.inference import TacticModel, BlockingTacticModel, start_inference_server
 from nanoproof.data.bench import minif2f
 from nanoproof.data.rl import leanworkbook
 from nanoproof.cli import create_monitor, configure_logging, log, log0, set_ddp_info
-from nanoproof.rl_server import distributed_collect, distributed_eval, start_coordinator, shutdown_coordinator
-from nanoproof.inference import start_inference_server
+from nanoproof.rl_server import start_coordinator
 from nanoproof.infra import load_infra_config, InfraConfig, parse_lean_server
-from scripts.prover_eval import eval_success_rate, save_eval_results_to_run_dir
+from scripts.prover_eval import save_eval_results_to_run_dir
 from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
 from nanoproof.data.sft.leantree_dataloader import sft_data_generator
 
@@ -77,6 +77,7 @@ parser.add_argument("--eval-every", type=int, default=100)
 parser.add_argument("--eval-start", type=int, default=0)
 parser.add_argument("--save-every", type=int, default=500)
 parser.add_argument("--resume-from", type=str, default="")
+parser.add_argument("--replay-buffer-window-size", type=int, default=60_000_000)
 args = parser.parse_args()
 user_config = vars(args).copy()
 
@@ -134,23 +135,16 @@ if master_process:
 use_dummy_wandb = args.run == "dummy" or not master_process
 wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-rl", name=args.run, dir=log_dir, config=user_config, save_code=True)
 
-# Create the tactic model
-# In distributed mode, we use BlockingTacticModel for inference servers (started later)
-# In local mode, we use BlockingTacticModel for parallel actors
 log0(f"Distributed mode: {distributed}", component="Config")
+# Create the policy/critic model.
 inner_tactic_model = TacticModel.create(num_samples=args.num_sampled_tactics, model_path=args.model_path)
-if distributed:
-    # In distributed mode, we don't need BlockingTacticModel here -
-    # inference servers are started later with their own BlockingTacticModel
-    tactic_model = None
-    model = inner_tactic_model.network
-else:
-    tactic_model = BlockingTacticModel(
-        inner_model=inner_tactic_model,
-        timeout_seconds=args.batch_timeout,
-        max_batch_tokens=args.max_batch_tokens,
-    )
-    model = tactic_model.network
+# BlockingTacticModel blocks asynchronous requests to create batches for inference.
+tactic_model = BlockingTacticModel(
+    inner_model=inner_tactic_model,
+    timeout_seconds=args.batch_timeout,
+    max_batch_tokens=args.max_batch_tokens,
+)
+model = tactic_model.network
 
 # -----------------------------------------------------------------------------
 # DataLoader
@@ -169,23 +163,25 @@ search_config = SearchConfig(
     num_actors=args.num_actors,
     num_simulations=args.num_simulations_collect,
 )
-replay_buffer = ReplayBuffer(seed=rank_seed)
+replay_buffer = ReplayBuffer(window_size=args.replay_buffer_window_size, seed=rank_seed)
 theorems_sampler = TheoremsSampler(seed=rank_seed)
 
-# Create the RL monitor (only show on master process)
+# Create the RL monitor (enabled only on master process - no-op for others)
 rl_monitor = create_monitor(num_actors=args.num_actors, enabled=master_process)
 rl_monitor.set_output_dir(output_dir)
 rl_monitor.set_lean_servers(lean_servers)
 
+# Augmentations. Run directly on LeanTree Mathlib theorems where we have the structure. Collected transitions
+# have to be parsed first (the augment method).
 shuffle_goals_and_hypotheses = leantree.augmentations.ShuffleGoalsAndHypotheses(seed=args.seed)
 random_rename = leantree.augmentations.RandomRename(seed=args.seed)
 
-mathlib_train = list(iter_data(
+mathlib_train = list(leantree_transitions(
     split="train",
     augmentations=[shuffle_goals_and_hypotheses, random_rename] if args.augment_data else None,
 ))
 random.Random(rank_seed).shuffle(mathlib_train)
-mathlib_val = list(iter_data(split="valid"))
+mathlib_val = list(leantree_transitions(split="valid"))
 
 def augment(state_str, tactic_str):
     try:
@@ -201,6 +197,8 @@ def augment(state_str, tactic_str):
     tactic_str = tactic
 
     return state_str, tactic_str
+
+# We train on the collected transitions, with some portion of LeanTree Mathlib transitions mixed in.
 
 def train_generator():
     rng = random.Random(rank_seed)
@@ -244,17 +242,13 @@ for group in optimizer.param_groups:
 # Training loop
 # -----------------------------------------------------------------------------
 
-# Start inference servers in distributed mode (each rank runs one)
+# Construct the Prover. In distributed mode, also bring up the rank-local
+# inference server and (on master) the coordinator before constructing it.
+prover: Prover
 if distributed:
-    # Create BlockingTacticModel for the inference server
-    inference_model = BlockingTacticModel(
-        inner_model=inner_tactic_model,
-        timeout_seconds=args.batch_timeout,
-        max_batch_tokens=args.max_batch_tokens,
-    )
     # Each rank starts an inference server on its own port
     inference_port = args.inference_server_port + 1 + ddp_rank  # ports 5001, 5002, ...
-    inference_server_thread = start_inference_server(inference_model, inference_port)
+    inference_server_thread = start_inference_server(tactic_model, inference_port)
 
     # Sync to ensure all inference servers are up before coordinator starts
     if ddp:
@@ -266,10 +260,23 @@ if distributed:
         coordinator_thread, inference_router = start_coordinator(
             args.inference_server_port, inference_endpoints, startup_timeout=30.0
         )
-    
+
     # Sync again so all ranks wait for coordinator
     if ddp:
         dist.barrier()
+
+    prover = DistributedProver(
+        inference_model=tactic_model,
+        poll_interval=args.poll_interval,
+    )
+else:
+    prover = LocalProver(
+        config=search_config,
+        tactic_model=tactic_model,
+        lean_address=local_lean_server.address,
+        lean_port=local_lean_server.port,
+        num_simulations_eval=args.num_simulations_eval,
+    )
 
 # Go!
 step = 0
@@ -280,14 +287,7 @@ leanworkbook_results = None
 def cleanup():
     """Cleanup function to ensure resources are released on shutdown."""
     log0("Shutting down...", component="Main")
-    # In distributed mode, shutdown coordinator first to stop provers from retrying
-    if distributed and master_process:
-        shutdown_coordinator()
-    # Shutdown the batched tactic model to unblock any waiting threads
-    if tactic_model is not None:
-        tactic_model.shutdown()
-    if distributed:
-        inference_model.shutdown()
+    prover.shutdown()
     log0("Shutdown complete", component="Main")
 
 atexit.register(cleanup)
@@ -303,8 +303,8 @@ while True:
         # Policy evaluation (tactic accuracy and critic errors on mathlib val)
         eval_steps = 200
         build_val_loader = lambda: sft_data_generator(mathlib_val, batch_size=args.device_batch_size)
-        tactic_results = eval_tactic_accuracy(model, inner_tactic_model.tokenizer, build_val_loader(), max_steps=eval_steps)
-        critic_results = eval_critic_errors(model, inner_tactic_model.tokenizer, build_val_loader(), max_steps=eval_steps)
+        tactic_results = eval_tactic_accuracy(model, inner_tactic_model.tokenizer, build_val_loader(), eval_steps=eval_steps)
+        critic_results = eval_critic_errors(model, inner_tactic_model.tokenizer, build_val_loader(), eval_steps=eval_steps)
         
         if master_process:
             log(f"Step {step:05d} | Tactic full acc: {tactic_results['full_acc']:.4%} | Tactic first acc: {tactic_results['first_token_acc']:.4%} | Critic argmax MSE: {critic_results['argmax_mse']:.4f} | Critic soft MSE: {critic_results['soft_mse']:.4f}", component="Eval")
@@ -314,104 +314,34 @@ while True:
         minif2f_theorems = minif2f.list_theorems(split="valid")
         leanworkbook_theorems = leanworkbook.list_theorems(split="valid")[:128]
 
-        if distributed:
-            # Distributed mode: use prover servers for evaluation (master only)
-            if master_process:
-                log(f"Evaluating on {len(minif2f_theorems)} theorems from MiniF2F (distributed)", component="Eval")
-                minif2f_results = distributed_eval(minif2f_theorems, dataset_name="MiniF2F")
-                rl_monitor.record_eval(step, "MiniF2F", minif2f_results['success_rate'],
-                                       minif2f_results['solved'], minif2f_results['total'], minif2f_results['errors'])
+        log(f"Evaluating on {len(minif2f_theorems)} theorems from MiniF2F", component="Eval")
+        minif2f_results = prover.evaluate(minif2f_theorems, dataset_name="MiniF2F")
+        log(f"Evaluating on {len(leanworkbook_theorems)} theorems from LeanWorkBook", component="Eval")
+        leanworkbook_results = prover.evaluate(leanworkbook_theorems, dataset_name="LeanWorkBook")
 
-                log(f"Evaluating on {len(leanworkbook_theorems)} theorems from LeanWorkBook (distributed)", component="Eval")
-                leanworkbook_results = distributed_eval(leanworkbook_theorems, dataset_name="LeanWorkBook")
-                rl_monitor.record_eval(step, "LeanWorkBook", leanworkbook_results['success_rate'],
-                                       leanworkbook_results['solved'], leanworkbook_results['total'],
-                                       leanworkbook_results['errors'])
-
-                # Log results (with timeout/invalid warning if applicable)
-                minif2f_status = f"minif2f: {minif2f_results['success_rate']:.4%} ({minif2f_results['solved']}/{minif2f_results['total']}, errors={minif2f_results['errors']})"
-                if minif2f_results.get('timed_out'):
-                    minif2f_status += " [TIMED OUT]"
-                if minif2f_results.get('invalid'):
-                    minif2f_status += " [INVALID]"
-                leanworkbook_status = f"leanworkbook: {leanworkbook_results['success_rate']:.4%} ({leanworkbook_results['solved']}/{leanworkbook_results['total']}, errors={leanworkbook_results['errors']})"
-                if leanworkbook_results.get('timed_out'):
-                    leanworkbook_status += " [TIMED OUT]"
-                if leanworkbook_results.get('invalid'):
-                    leanworkbook_status += " [INVALID]"
-                log(f"Step {step:05d} | {minif2f_status} | {leanworkbook_status}", component="Eval")
-                
-                # Only log scores to wandb if eval completed (not timed out or invalid)
-                wandb_data = {
-                    "step": step,
-                    # Policy evaluation metrics
-                    "val_full_acc": tactic_results["full_acc"],
-                    "val_first_token_acc": tactic_results["first_token_acc"],
-                    "val_first_token_entropy": tactic_results["first_token_entropy"],
-                    "val_all_tokens_entropy": tactic_results["all_tokens_entropy"],
-                    "val_critic_argmax_mse": critic_results["argmax_mse"],
-                    "val_critic_soft_mse": critic_results["soft_mse"],
-                    "val_critic_entropy": critic_results["entropy"],
-                }
-                if not minif2f_results.get('timed_out') and not minif2f_results.get('invalid'):
-                    wandb_data["minif2f_val"] = minif2f_results['success_rate']
-                else:
-                    if minif2f_results.get('timed_out'):
-                        wandb_data["minif2f_timed_out"] = True
-                    if minif2f_results.get('invalid'):
-                        wandb_data["minif2f_invalid"] = True
-                if not leanworkbook_results.get('timed_out') and not leanworkbook_results.get('invalid'):
-                    wandb_data["leanworkbook_val"] = leanworkbook_results['success_rate']
-                else:
-                    if leanworkbook_results.get('timed_out'):
-                        wandb_data["leanworkbook_timed_out"] = True
-                    if leanworkbook_results.get('invalid'):
-                        wandb_data["leanworkbook_invalid"] = True
-                wandb_run.log(wandb_data)
-                
-                # Save detailed evaluation results
-                save_eval_results_to_run_dir(output_dir, step, "minif2f", minif2f_results)
-                save_eval_results_to_run_dir(output_dir, step, "leanworkbook", leanworkbook_results)
-                
-                active_barrier_master(f"eval_done_{step}")
-            else:
-                active_barrier_wait(f"eval_done_{step}")
-        else:
-            # Local mode: use local model
-            class MonitorProgress:
-                def __init__(self, dataset_name: str):
-                    self.dataset_name = dataset_name
-                
-                def on_start(self, dataset: str, total: int):
-                    rl_monitor.start_eval(self.dataset_name, total)
-                
-                def on_update(self, current: int, solved: int, errors: int):
-                    rl_monitor.update_eval_progress(current, solved, errors)
-
-            log(f"Evaluating on {len(minif2f_theorems)} theorems from MiniF2F", component="Eval")
-            minif2f_results = eval_success_rate(
-                inner_tactic_model, local_lean_server.address, local_lean_server.port,
-                minif2f_theorems, progress=MonitorProgress("MiniF2F"),
-                num_actors=args.num_actors, num_simulations=args.num_simulations_eval,
-            )
+        if master_process:
             rl_monitor.record_eval(step, "MiniF2F", minif2f_results['success_rate'],
                                    minif2f_results['solved'], minif2f_results['total'], minif2f_results['errors'])
-
-            log(f"Evaluating on {len(leanworkbook_theorems)} theorems from LeanWorkBook", component="Eval")
-            leanworkbook_results = eval_success_rate(
-                inner_tactic_model, local_lean_server.address, local_lean_server.port,
-                leanworkbook_theorems, progress=MonitorProgress("LeanWorkBook"),
-                num_actors=args.num_actors, num_simulations=args.num_simulations_eval,
-            )
             rl_monitor.record_eval(step, "LeanWorkBook", leanworkbook_results['success_rate'],
                                    leanworkbook_results['solved'], leanworkbook_results['total'],
                                    leanworkbook_results['errors'])
 
-            log(f"Step {step:05d} | minif2f: {minif2f_results['success_rate']:.4%} ({minif2f_results['solved']}/{minif2f_results['total']}, errors={minif2f_results['errors']}) | leanworkbook: {leanworkbook_results['success_rate']:.4%} ({leanworkbook_results['solved']}/{leanworkbook_results['total']}, errors={leanworkbook_results['errors']})", component="Eval")
-            wandb_run.log({
+            # Log results (with timeout/invalid warning if applicable)
+            minif2f_status = f"minif2f: {minif2f_results['success_rate']:.4%} ({minif2f_results['solved']}/{minif2f_results['total']}, errors={minif2f_results['errors']})"
+            if minif2f_results.get('timed_out'):
+                minif2f_status += " [TIMED OUT]"
+            if minif2f_results.get('invalid'):
+                minif2f_status += " [INVALID]"
+            leanworkbook_status = f"leanworkbook: {leanworkbook_results['success_rate']:.4%} ({leanworkbook_results['solved']}/{leanworkbook_results['total']}, errors={leanworkbook_results['errors']})"
+            if leanworkbook_results.get('timed_out'):
+                leanworkbook_status += " [TIMED OUT]"
+            if leanworkbook_results.get('invalid'):
+                leanworkbook_status += " [INVALID]"
+            log(f"Step {step:05d} | {minif2f_status} | {leanworkbook_status}", component="Eval")
+
+            # Only log scores to wandb if eval completed (not timed out or invalid)
+            wandb_data = {
                 "step": step,
-                "minif2f_val": minif2f_results['success_rate'],
-                "leanworkbook_val": leanworkbook_results['success_rate'],
                 # Policy evaluation metrics
                 "val_full_acc": tactic_results["full_acc"],
                 "val_first_token_acc": tactic_results["first_token_acc"],
@@ -420,8 +350,23 @@ while True:
                 "val_critic_argmax_mse": critic_results["argmax_mse"],
                 "val_critic_soft_mse": critic_results["soft_mse"],
                 "val_critic_entropy": critic_results["entropy"],
-            })
-            
+            }
+            if not minif2f_results.get('timed_out') and not minif2f_results.get('invalid'):
+                wandb_data["minif2f_val"] = minif2f_results['success_rate']
+            else:
+                if minif2f_results.get('timed_out'):
+                    wandb_data["minif2f_timed_out"] = True
+                if minif2f_results.get('invalid'):
+                    wandb_data["minif2f_invalid"] = True
+            if not leanworkbook_results.get('timed_out') and not leanworkbook_results.get('invalid'):
+                wandb_data["leanworkbook_val"] = leanworkbook_results['success_rate']
+            else:
+                if leanworkbook_results.get('timed_out'):
+                    wandb_data["leanworkbook_timed_out"] = True
+                if leanworkbook_results.get('invalid'):
+                    wandb_data["leanworkbook_invalid"] = True
+            wandb_run.log(wandb_data)
+
             # Save detailed evaluation results
             save_eval_results_to_run_dir(output_dir, step, "minif2f", minif2f_results)
             save_eval_results_to_run_dir(output_dir, step, "leanworkbook", leanworkbook_results)
@@ -457,37 +402,8 @@ while True:
             rl_monitor.start_collection(target_samples=args.collect_transitions, num_actors=args.num_actors)
             rl_monitor.set_step(step)
 
-            if distributed:
-                if master_process:
-                    # Distributed mode: coordinate remote provers (only master does this)
-                    # Retry until we have enough transitions
-                    while len(replay_buffer.local_buffer) < args.collect_transitions:
-                        collected = distributed_collect(
-                            sampler=theorems_sampler,
-                            target_transitions=args.collect_transitions,
-                            poll_interval=args.poll_interval,
-                            replay_buffer=replay_buffer,
-                        )
-                        if collected < args.collect_transitions:
-                            log(f"Collection incomplete ({collected}/{args.collect_transitions}), retrying...",
-                                component="Coordinator")
-                    # Signal completion to other ranks via store.
-                    active_barrier_master(f"collection_done_{step}")
-                else:
-                    # Active waiting to not block the Python thread (which is needed for inference).
-                    active_barrier_wait(f"collection_done_{step}")
+            prover.collect(theorems_sampler, args.collect_transitions, replay_buffer)
 
-                # Wait for provers to abort their MCTS searches and release Lean processes
-                time.sleep(3.0)
-            else:
-                # Local mode: run actors locally
-                run_actor(
-                    args.collect_transitions, search_config, tactic_model,
-                    replay_buffer, theorems_sampler,
-                    lean_address=local_lean_server.address,
-                    lean_port=local_lean_server.port,
-                )
-            
             model.train()
             timer.end("collect")
             flush()  # Free memory from collection before training
@@ -519,10 +435,13 @@ while True:
     timer.start("train")
     rl_monitor.set_phase("training")
     
-    # Pause inference server during training to prevent concurrent model access
-    if distributed:
-        inference_model.pause()
-    
+    # Pause inference during training to prevent concurrent model access.
+    # No-op for the LocalProver wrapper around BlockingTacticModel because
+    # actors are already stopped at this point; meaningful in distributed mode
+    # where the inference server is still serving remote provers.
+    prover.pause()
+
+
     # evaluate the gradient
     num_tokens = torch.tensor(0, device=device)  # the number of "active" tokens of supervision seen
     for micro_step in range(grad_accum_steps):
@@ -554,12 +473,11 @@ while True:
     optimizer.step()
     model.zero_grad(set_to_none=True)
     
-    # Resume inference server after training
-    if distributed:
-        # Clear CUDA cache before resuming inference (frees training memory)
-        flush()
-        inference_model.resume()
-    
+    # Resume inference after training. Clear CUDA cache first to free training memory.
+    flush()
+    prover.resume()
+
+
     timer.end("train")
 
     # logging

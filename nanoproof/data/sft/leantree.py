@@ -21,7 +21,7 @@ DATA_DIR = os.path.join(base_dir, "data", "leantree")
 HF_URL = "https://huggingface.co/datasets/ufal/leantree/resolve/main/leantree_mathlib.jsonl"
 
 
-def iter_data(split, eval_fraction=0.1, augmentations=None):
+def leantree_transitions(split, eval_fraction=0.1, augmentations=None):
     assert split in ("train", "valid"), f"Invalid split: {split!r}"
     mathlib_file = os.path.join(DATA_DIR, "leantree_mathlib.jsonl")
     if not Path(mathlib_file).exists():
@@ -86,7 +86,7 @@ def download_dataset():
                 os.remove(path)
         raise
 
-def print_stats():
+def __print_stats():
     tokenizer = get_tokenizer()
     bos_token = tokenizer.get_bos_token_id()
     assert bos_token is not None
@@ -158,13 +158,13 @@ def main():
         os.makedirs(DATA_DIR, exist_ok=True)
         download_dataset()
     elif args.action == "show":
-        for state, tactic in islice(iter_data(split=args.split), 10):
+        for state, tactic in islice(leantree_transitions(split=args.split), 10):
             print(state)
             print("\n->\n")
             print(tactic)
             print("\n-----------------\n")
     elif args.action == "stats":
-        print_stats()
+        _print_stats()
     else:
         raise f"Unknown action {args.action}"
 

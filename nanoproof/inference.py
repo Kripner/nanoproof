@@ -168,6 +168,14 @@ class TacticModel:
         """No-op for non-batched model. Exists for API compatibility with BlockingTacticModel."""
         pass
 
+    def pause(self):
+        """No-op, exists for API compatibility with BlockingTacticModel."""
+        pass
+
+    def resume(self):
+        """No-op, exists for API compatibility with BlockingTacticModel."""
+        pass
+
     @classmethod
     def create(cls, num_samples: int = 6, model_path: str | None = None) -> Self:
         assert model_path is not None, "model_path is required in TacticModel.create"
@@ -482,6 +490,14 @@ class RemoteTacticModel:
 
     def shutdown(self):
         """No-op, exists for API compatibility."""
+        pass
+
+    def pause(self):
+        """No-op, exists for API compatibility with BlockingTacticModel."""
+        pass
+
+    def resume(self):
+        """No-op, exists for API compatibility with BlockingTacticModel."""
         pass
 
 

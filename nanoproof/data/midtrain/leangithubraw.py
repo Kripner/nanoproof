@@ -33,7 +33,7 @@ URLS_FILE = os.path.join(os.path.dirname(__file__), "leangithub_urls.txt")
 BASE_DIR = get_base_dir()
 DATA_DIR = os.path.join(BASE_DIR, "data", "leangithubraw")
 
-def build_dataset():
+def _build_dataset():
     """
     Builds the dataset by cloning repos listed in leangithub_urls.txt and reading .lean files.
     """
@@ -155,7 +155,7 @@ def build_dataset():
     pq.write_table(combined_table, combined_output_file, row_group_size=1024)
     print(f"Dataset saved to: {combined_output_file}")
 
-def publish_dataset(repo_id):
+def _publish_dataset(repo_id):
     """Uploads the dataset to Hugging Face Hub."""
     data_dir = DATA_DIR
         
@@ -199,13 +199,13 @@ def download_dataset(repo_id):
     except Exception as e:
         print(f"Error downloading dataset: {e}")
 
-def show_dataset(split="train", B=4, T=512, offset=0, num_batches=10):
+def _show_dataset(split="train", B=4, T=512, offset=0, num_batches=10):
     """Show the first N batches from the dataset."""
     print(f"Loading dataset (split={split})...")
     tokenizer = get_tokenizer()
     
     try:
-        dataloader = iter_data(B=B, T=T, split=split, device="cpu")
+        dataloader = leangithubraw_batches(B=B, T=T, split=split, device="cpu")
         for batch_idx, batch in enumerate(islice(dataloader, offset, offset + num_batches)):
             if len(batch) == 4:
                 inputs, targets, approx_progress, last_step = batch
@@ -239,10 +239,10 @@ def show_dataset(split="train", B=4, T=512, offset=0, num_batches=10):
         print(f"Error showing dataset: {e}")
         raise
 
-def show_whole_dataset(split="train", B=32, T=768):
+def _show_whole_dataset(split="train", B=32, T=768):
     print(f"Iterating through dataset (split={split}, B={B}, T={T})...")
     
-    dataloader = iter_data(B=B, T=T, split=split)
+    dataloader = leangithubraw_batches(B=B, T=T, split=split)
     batch_count = 0
     first_last_step = None
     
@@ -263,7 +263,7 @@ def show_whole_dataset(split="train", B=32, T=768):
             break
     
 
-def iter_data(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device="cuda"):
+def leangithubraw_batches(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device="cuda"):
     """
     Create batches for unsupervised training from the leangithubraw parquet file.
     
@@ -390,7 +390,7 @@ def iter_texts_batched(split, url_whitelist=None):
         
         yield texts
 
-def dataset_stats():
+def _dataset_stats():
     parquet_path = os.path.join(DATA_DIR, "leangithubraw.parquet")
     if not os.path.exists(parquet_path):
         print(f"Dataset not found at {parquet_path}. Build or download it first.")
@@ -467,17 +467,17 @@ def main():
     args = parser.parse_args()
     
     if args.action == "build":
-        build_dataset()
+        _build_dataset()
     elif args.action == "publish":
-        publish_dataset(args.repo_id)
+        _publish_dataset(args.repo_id)
     elif args.action == "download":
         download_dataset(args.repo_id)
     elif args.action == "show":
-        show_dataset(split=args.split, B=args.B, T=args.T, offset=args.offset, num_batches=args.num_batches)
+        _show_dataset(split=args.split, B=args.B, T=args.T, offset=args.offset, num_batches=args.num_batches)
     elif args.action == "show_whole":
-        show_whole_dataset(split=args.split, B=args.B, T=args.T)
+        _show_whole_dataset(split=args.split, B=args.B, T=args.T)
     elif args.action == "stats":
-        dataset_stats()
+        _dataset_stats()
 
 if __name__ == "__main__":
     main()

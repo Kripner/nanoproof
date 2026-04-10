@@ -25,7 +25,7 @@ from nanoproof.tokenizer import get_token_bytes
 from nanoproof.checkpoints import save_checkpoint
 from nanoproof.loss_eval import evaluate_bpb
 from nanoproof.checkpoints import load_model
-from nanoproof.data.midtrain.leangithubraw import iter_data
+from nanoproof.data.midtrain.leangithubraw import leangithubraw_batches
 
 # -----------------------------------------------------------------------------
 # CLI arguments
@@ -104,8 +104,8 @@ for group in optimizer.param_groups:
 
 # Midtraining data mixture and DataLoader
 base_dir = get_base_dir()
-train_loader = iter_data(args.device_batch_size, args.max_seq_len, "train")
-build_val_loader = lambda: iter_data(args.device_batch_size, args.max_seq_len, "valid")
+train_loader = leangithubraw_batches(args.device_batch_size, args.max_seq_len, "train")
+build_val_loader = lambda: leangithubraw_batches(args.device_batch_size, args.max_seq_len, "valid")
 
 progress = 0 # will go from 0 to 1 over the course of the epoch
 

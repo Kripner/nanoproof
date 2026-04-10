@@ -61,7 +61,7 @@ def _document_batches(split, resume_state_dict, tokenizer_batch_size):
         epoch += 1
 
 
-def iter_data_with_state(
+def nemotron_batches_with_state(
     B, T, split,
     tokenizer_threads=4, tokenizer_batch_size=128,
     device="cuda", resume_state_dict=None,
@@ -142,9 +142,9 @@ def iter_data_with_state(
         yield inputs, targets, state_dict
 
 
-def iter_data(*args, **kwargs):
+def nemotron_batches(*args, **kwargs):
     """Helper that omits state_dict from yields."""
-    for inputs, targets, state_dict in iter_data_with_state(*args, **kwargs):
+    for inputs, targets, state_dict in nemotron_batches_with_state(*args, **kwargs):
         yield inputs, targets
 
 
@@ -159,7 +159,7 @@ if __name__ == "__main__":
     parser.add_argument("--max-batches", type=int, default=10)
     args = parser.parse_args()
 
-    dataloader = iter_data_with_state(args.B, args.T, args.split, device=args.device)
+    dataloader = nemotron_batches_with_state(args.B, args.T, args.split, device=args.device)
     for i, (inputs, targets, state_dict) in enumerate(dataloader):
         if i >= args.max_batches:
             break
