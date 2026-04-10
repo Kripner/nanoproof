@@ -411,8 +411,8 @@ def run_mcts(config: SearchConfig, game: Game, model: "TacticModel | BlockingTac
             break
     
     game.num_iterations = num_iterations
-    if not root.is_solved:
-        print(f"GIVING UP after {num_iterations} iterations")
+    # if not root.is_solved:
+    #     print(f"GIVING UP after {num_iterations} iterations")
     return num_iterations
 
 
@@ -564,5 +564,3 @@ def backprop_value_towards_min(node):
         if not child.is_solved and child.visit_count > 0:
             value = min(value, child.value())
     return value
-
-

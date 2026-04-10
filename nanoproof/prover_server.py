@@ -98,7 +98,6 @@ def main():
     parser.add_argument("--lean-server", default=None, help="Lean server address (host:port) (ignored if --infra-file is set)")
     parser.add_argument("--num-actors", type=int, default=4, help="Number of parallel actors")
     parser.add_argument("--num-simulations", type=int, default=50, help="MCTS simulations per game")
-    parser.add_argument("--num-sampled-tactics", type=int, default=6, help="Tactics to sample per state")
     parser.add_argument("--my-address", default=None, help="Address to register (auto-detected if not set)")
     args = parser.parse_args()
 

@@ -177,11 +177,8 @@ class TacticModel:
         pass
 
     @classmethod
-    def create(cls, num_samples: int = 6, model_path: str | None = None) -> Self:
-        assert model_path is not None, "model_path is required in TacticModel.create"
-        device = torch.device("cuda")
-
-        model, tokenizer, _ = load_model(model_path, device, phase="eval")
+    def create(cls, num_samples: int, model_path: str) -> Self:
+        model, tokenizer, _ = load_model(model_path, torch.device("cuda"), phase="eval")
         engine = Engine(model, tokenizer)
         return cls(model, tokenizer, engine, num_samples=num_samples)
 

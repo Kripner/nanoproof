@@ -290,7 +290,6 @@ else:
         num_simulations_eval=args.num_simulations_eval,
     )
 
-# Go!
 step = 0
 minif2f_results = None
 leanworkbook_results = None
