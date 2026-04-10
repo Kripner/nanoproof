@@ -63,6 +63,9 @@ parser.add_argument("--inference-server-port", type=int, default=5000)
 parser.add_argument("--poll-interval", type=float, default=3.0)
 
 # Search / collection
+ALL_DATASETS = ["leanworkbook", "deepseek_prover", "numinamath"]
+parser.add_argument("--datasets", nargs="+", default=ALL_DATASETS, choices=ALL_DATASETS,
+                    help="which theorem datasets to sample from (default: all three)")
 parser.add_argument("--num-actors", type=int, default=32)
 parser.add_argument("--num-sampled-tactics", type=int, default=6)
 parser.add_argument("--num-simulations-collect", type=int, default=50)
@@ -173,7 +176,7 @@ search_config = SearchConfig(
     num_simulations=args.num_simulations_collect,
 )
 replay_buffer = ReplayBuffer(window_size=args.replay_buffer_window_size, seed=rank_seed)
-theorems_sampler = TheoremsSampler(seed=rank_seed)
+theorems_sampler = TheoremsSampler(seed=rank_seed, datasets=args.datasets)
 
 # Create the RL monitor (enabled only on master process - no-op for others)
 rl_monitor = create_monitor(num_actors=args.num_actors, enabled=master_process)

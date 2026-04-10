@@ -77,13 +77,17 @@ class TheoremsSampler:
     in distributed mode when provers concurrently request theorems.
     """
 
-    def __init__(self, seed: int | None = 0):
-        # Load theorems from all datasets
-        self.datasets = {
-            "leanworkbook": leanworkbook.list_theorems(split="train"),
-            "deepseek_prover": deepseek_prover.list_theorems(split="train"),
-            "numinamath": numinamath.list_theorems(split="train"),
-        }
+    ALL_DATASETS = {
+        "leanworkbook": lambda: leanworkbook.list_theorems(split="train"),
+        "deepseek_prover": lambda: deepseek_prover.list_theorems(split="train"),
+        "numinamath": lambda: numinamath.list_theorems(split="train"),
+    }
+
+    def __init__(self, seed: int | None = 0, datasets: list[str] | None = None):
+        if datasets is None:
+            datasets = list(self.ALL_DATASETS.keys())
+        # Load theorems from selected datasets
+        self.datasets = {name: self.ALL_DATASETS[name]() for name in datasets}
         self.dataset_names = list(self.datasets.keys())
         self.rng = random.Random(seed)
         self._lock = threading.Lock()
