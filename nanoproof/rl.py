@@ -55,9 +55,10 @@ parser.add_argument("--model-path", type=str, required=True, help="path to model
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 parser.add_argument("--resume-from", type=str, default="")
 
-# Infrastructure
-parser.add_argument("--infra-file", type=str, default="infra-ms.toml", help="path to infra.toml (empty = local mode)")
-parser.add_argument("--lean-server", type=str, default="10.10.25.31:8000")
+# Infrastructure — exactly one of --infra-file or --lean-server must be given
+mode_group = parser.add_mutually_exclusive_group(required=True)
+mode_group.add_argument("--infra-file", type=str, default=None, help="path to infra.toml for distributed prover mode")
+mode_group.add_argument("--lean-server", type=str, default=None, help="Lean server host:port for local mode (e.g., '10.10.25.33:8000')")
 parser.add_argument("--inference-server-port", type=int, default=5000)
 parser.add_argument("--poll-interval", type=float, default=3.0)
 

@@ -35,7 +35,6 @@ class ReplayBuffer:
 
     def add_transitions(self, transitions: list[tuple[str, str, float]]):
         with self._lock:
-            received_count = len(transitions)
             transitions = [
                 (context.strip(), tactic.strip(), value_target)
                 for context, tactic, value_target in transitions
