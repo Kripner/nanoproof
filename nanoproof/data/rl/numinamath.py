@@ -11,6 +11,7 @@ CLI: see ``python -m nanoproof.data.rl.numinamath --help``.
 
 import argparse
 import os
+import re
 
 import pyarrow.parquet as pq
 
@@ -24,7 +25,8 @@ HF_URL = "https://huggingface.co/datasets/AI-MO/NuminaMath-LEAN/resolve/main/dat
 
 def _process_statement(statement: str) -> str | None:
     """Strip leading directive lines and append a `sorry` placeholder.
-    Returns None if the statement doesn't end with `:=` or `:= by`.
+    Returns None if the statement doesn't end with `:=`, `:= by`, or
+    `:=` followed by whitespace and ``by``.
     """
     statement = statement.strip()
 
@@ -32,9 +34,9 @@ def _process_statement(statement: str) -> str | None:
     lines = statement.split("\n")
     while lines and (lines[0].startswith("import ") or lines[0].startswith("set_option ") or lines[0].startswith("#check ")):
         lines.pop(0)
-    statement = "\n".join(lines)
+    statement = "\n".join(lines).rstrip()
 
-    if statement.endswith(":= by"):
+    if re.search(r":=\s+by\s*$", statement):
         return statement + " sorry"
     if statement.endswith(":="):
         return statement + " by sorry"
