@@ -16,6 +16,7 @@ Usage:
 import argparse
 import logging
 import threading
+import uuid
 import time
 from dataclasses import dataclass
 from typing import Self
@@ -518,7 +519,7 @@ class InferenceBalancer:
 # Flask Server (one per GPU rank for multi-GPU inference)
 # -----------------------------------------------------------------------------
 
-def create_blocking_model_app(model: BlockingTacticModel):
+def create_blocking_model_app(model: BlockingTacticModel, server_id: str = ""):
     """Create Flask app for a single BlockingTacticModel (one per GPU rank)."""
     app = Flask(__name__)
 
@@ -528,7 +529,7 @@ def create_blocking_model_app(model: BlockingTacticModel):
 
     @app.route("/health", methods=["GET"])
     def health():
-        return jsonify({"status": "ok"})
+        return jsonify({"status": "ok", "server_id": server_id})
 
     @app.route("/generate", methods=["POST"])
     def generate():
@@ -559,7 +560,8 @@ def start_inference_server(model: BlockingTacticModel, port: int, host: str = "0
     Used by all DDP ranks to expose their GPU for inference via HTTP.
     Returns the background thread.
     """
-    app = create_blocking_model_app(model)
+    server_id = uuid.uuid4().hex
+    app = create_blocking_model_app(model, server_id=server_id)
 
     def run_server():
         log_flask = logging.getLogger('werkzeug')
@@ -568,6 +570,20 @@ def start_inference_server(model: BlockingTacticModel, port: int, host: str = "0
 
     thread = threading.Thread(target=run_server, daemon=True)
     thread.start()
+
+    # Verify *our* server started, not a stale process on the same port.
+    for _ in range(50):
+        time.sleep(0.1)
+        try:
+            resp = http_requests.get(f"http://127.0.0.1:{port}/health", timeout=1)
+            if resp.ok and resp.json().get("server_id") == server_id:
+                break
+        except http_requests.ConnectionError:
+            continue
+    else:
+        raise RuntimeError(f"Inference server failed to start on port {port}. "
+                           f"Port may be in use - kill the old process or use a different --inference-server-port.")
+
     log0(f"Inference server started on port {port}", component="InferenceServer")
     return thread
 
