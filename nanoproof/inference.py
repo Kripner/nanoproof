@@ -368,17 +368,18 @@ class BlockingTacticModel:
             max_items = len(self._pending)
         batch = self._pending[:max(1, max_items)]
 
-        # Further limit by prompt tokens: the KV cache memory scales with
-        # N_rows * (prompt_len + gen_tokens), so we cap total estimated tokens
-        # to prevent OOM on batches with long prompts. The GEN_OVERHEAD accounts
-        # for the 64 decode tokens per item in the KV cache.
+        # Further limit by prompt tokens: the KV cache is allocated as
+        # N_rows * max_prompt_len, so one long prompt inflates memory for ALL
+        # rows. We track count * running_max to match the actual allocation.
         if self.max_batch_prompt_tokens is not None and len(batch) > 1:
             GEN_OVERHEAD = 64
-            total_tokens = 0
+            max_est = 0
             cut = len(batch)
             for i, (state_str, _, _) in enumerate(batch):
-                total_tokens += max(1, int(len(state_str) / self.CHARS_PER_TOKEN)) + GEN_OVERHEAD
-                if total_tokens > self.max_batch_prompt_tokens:
+                est = max(1, int(len(state_str) / self.CHARS_PER_TOKEN)) + GEN_OVERHEAD
+                max_est = max(max_est, est)
+                effective = (i + 1) * max_est
+                if effective > self.max_batch_prompt_tokens:
                     cut = max(1, i)
                     break
             batch = batch[:cut]
