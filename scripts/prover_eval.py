@@ -150,7 +150,7 @@ def main():
     if ddp:
         dist.barrier()
 
-    atexit.register(lambda: prover.shutdown() if prover else None)
+    atexit.register(lambda: tactic_model.shutdown())
 
     # Load theorems
     dataset_theorems = {}

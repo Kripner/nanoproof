@@ -5,7 +5,7 @@ This module contains:
 - TacticModel: Core tactic generation model wrapping the Transformer
 - BlockingTacticModel: Thread-safe wrapper that batches LLM calls from multiple threads
 - RemoteTacticModel: Client that calls a remote inference server (for multi-GPU load balancing)
-- InferenceBalancer: Routes inference across one local + N remote backends
+- InferenceBalancer: Routes inference across N remote backends via round-robin
 - start_inference_server: Starts a Flask inference server for a BlockingTacticModel
 
 Usage:
@@ -486,29 +486,21 @@ class RemoteTacticModel:
 # -----------------------------------------------------------------------------
 
 class InferenceBalancer:
-    """Load-balances inference across multiple GPUs.
+    """Load-balances inference across multiple GPU backends via HTTP.
 
-    One backend is the local BlockingTacticModel (rank 0, in-process).
-    Other backends are remote inference servers on localhost (ranks 1+),
-    accessed via RemoteTacticModel. Requests are routed round-robin.
+    All backends are remote inference servers accessed via RemoteTacticModel.
+    Requests are routed round-robin. Lifecycle management (pause/resume/shutdown)
+    is handled by each rank's local BlockingTacticModel directly, not by the balancer.
     """
 
-    def __init__(self, local_model: BlockingTacticModel, remote_endpoints: list[str] = None):
+    def __init__(self, endpoints: list[str]):
         """
         Args:
-            local_model: The in-process BlockingTacticModel (rank 0's GPU).
-            remote_endpoints: List of "host:port" strings for other ranks' inference servers.
-                              Empty list or None means single-GPU mode (only local model).
+            endpoints: List of "host:port" strings for inference servers (one per GPU rank).
         """
-        self._local = local_model
-        self._remotes = [RemoteTacticModel(ep) for ep in (remote_endpoints or [])]
-        self._backends = [self._local] + self._remotes
+        self._backends = [RemoteTacticModel(ep) for ep in endpoints]
         self._next_idx = 0
         self._lock = threading.Lock()
-
-    @property
-    def network(self):
-        return self._local.network
 
     def _next_backend(self):
         with self._lock:
@@ -525,26 +517,9 @@ class InferenceBalancer:
     def sample_tactic_from_str_batch(self, state_strs: list[str]) -> list[ValueOrError[TacticAndValue]]:
         return self._next_backend().sample_tactic_from_str_batch(state_strs)
 
-    def pause(self):
-        """Pause all backends (local + remote). Remote backends are no-ops
-        since their underlying BlockingTacticModels are paused by the
-        worker rank's training loop."""
-        for backend in self._backends:
-            backend.pause()
-
-    def resume(self):
-        """Resume all backends."""
-        for backend in self._backends:
-            backend.resume()
-
-    def shutdown(self):
-        """Shutdown all backends."""
-        for backend in self._backends:
-            backend.shutdown()
-
 
 # -----------------------------------------------------------------------------
-# Flask Server (used by worker ranks for multi-GPU inference)
+# Flask Server (one per GPU rank for multi-GPU inference)
 # -----------------------------------------------------------------------------
 
 def create_blocking_model_app(model: BlockingTacticModel):
@@ -585,7 +560,7 @@ def start_inference_server(model: BlockingTacticModel, port: int, host: str = "0
     """
     Start inference server for a BlockingTacticModel in a background thread.
 
-    Used by worker DDP ranks to expose their GPU for inference by rank 0's actors.
+    Used by all DDP ranks to expose their GPU for inference via HTTP.
     Returns the background thread.
     """
     app = create_blocking_model_app(model)

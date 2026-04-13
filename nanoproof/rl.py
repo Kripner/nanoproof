@@ -225,8 +225,7 @@ leanworkbook_results = None
 def cleanup():
     """Cleanup function to ensure resources are released on shutdown."""
     log0("Shutting down...", component="Main")
-    if prover is not None:
-        prover.shutdown()
+    tactic_model.shutdown()
     log0("Shutdown complete", component="Main")
 
 atexit.register(cleanup)
@@ -357,8 +356,7 @@ while True:
     rl_monitor.set_phase("training")
 
     # Pause inference during training to prevent concurrent model access.
-    if master_process and prover is not None:
-        prover.pause()
+    tactic_model.pause()
 
     # Move optimizer state to GPU for training
     optimizer_to_gpu(optimizer, device)
@@ -390,8 +388,7 @@ while True:
     # Offload optimizer state back to CPU, resume inference
     optimizer_to_cpu(optimizer)
     flush()
-    if master_process and prover is not None:
-        prover.resume()
+    tactic_model.resume()
 
     timer.end("train")
 

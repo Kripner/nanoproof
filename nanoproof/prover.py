@@ -7,7 +7,7 @@ Components:
   actor thread gets a dedicated ``LeanClient`` connection (1:1 mapping).
 - ``Prover``: high-level API used by the training loop. Manages a
   ``ProverWorker`` for both collection and evaluation.
-- ``setup_distributed_inference``: starts inference servers on DDP worker
+- ``setup_distributed_inference``: starts inference servers on ALL DDP
   ranks and builds an ``InferenceBalancer`` on the master rank.
 """
 
@@ -142,7 +142,7 @@ class ProverWorker:
     def __init__(
         self,
         config: SearchConfig,
-        tactic_model,  # TacticModel | BlockingTacticModel | InferenceBalancer
+        tactic_model: InferenceBalancer,
         lean_servers: list[tuple[str, int]],
         get_theorem: Callable[[], Optional[tuple[str, str]]],
         on_result: Callable[[str, str, Optional[Game], Optional[str]], None],
@@ -366,7 +366,7 @@ class Prover:
 
     def __init__(
         self,
-        tactic_model,  # TacticModel | BlockingTacticModel | InferenceBalancer
+        tactic_model: InferenceBalancer,
         lean_server_addrs: list[str],
     ):
         self.tactic_model = tactic_model
@@ -545,15 +545,6 @@ class Prover:
             "detailed_results": results,
         }
 
-    def pause(self):
-        self.tactic_model.pause()
-
-    def resume(self):
-        self.tactic_model.resume()
-
-    def shutdown(self):
-        self.tactic_model.shutdown()
-
 
 # -----------------------------------------------------------------------------
 # Distributed inference setup
@@ -565,22 +556,25 @@ def setup_distributed_inference(
 ) -> InferenceBalancer | None:
     """Set up distributed inference across DDP ranks.
 
-    Workers start inference servers (daemon threads). Master builds an
-    InferenceBalancer that load-balances across all GPUs (local in-process
-    for rank 0, HTTP for ranks 1+).
+    Every rank starts a Flask inference server for its BlockingTacticModel.
+    Master builds an InferenceBalancer that load-balances across all GPUs
+    via HTTP. Lifecycle (pause/resume/shutdown) is managed by each rank's
+    local BlockingTacticModel directly, not by the balancer.
 
     Returns the balancer on master, None on workers.
     Must be called by ALL DDP ranks.
     """
     ddp, rank, _, world_size = get_dist_info()
 
+    # Every rank (including rank 0) starts a Flask inference server
+    port = inference_server_port + rank
+    start_inference_server(tactic_model, port)
+
     if rank != 0:
-        port = inference_server_port + 1 + rank
-        start_inference_server(tactic_model, port)
         return None
 
-    remote_endpoints = [
-        f"127.0.0.1:{inference_server_port + 1 + r}"
-        for r in range(1, world_size)
+    all_endpoints = [
+        f"127.0.0.1:{inference_server_port + r}"
+        for r in range(world_size)
     ]
-    return InferenceBalancer(tactic_model, remote_endpoints)
+    return InferenceBalancer(all_endpoints)
