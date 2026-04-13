@@ -15,6 +15,8 @@ import atexit
 import os
 import sys
 
+from tqdm import tqdm
+
 import torch
 import torch.distributed as dist
 
@@ -180,7 +182,22 @@ def main():
     if master_process:
         for dataset_name, theorems in dataset_theorems.items():
             print0(f"\nEvaluating on {len(theorems)} theorems from {dataset_name}")
-            results = prover.evaluate(theorems, dataset_name=dataset_name, num_simulations=args.num_simulations)
+            total = len(theorems)
+            bar_started = tqdm(total=total, desc="started", position=0)
+            bar_finished = tqdm(total=total, desc="finished", position=1)
+
+            def progress_callback(started, finished, solved, errors):
+                bar_started.n = started
+                bar_started.set_postfix_str(f"{started}/{total}")
+                bar_started.refresh()
+                bar_finished.n = finished
+                bar_finished.set_postfix_str(f"solved={solved} err={errors}")
+                bar_finished.refresh()
+
+            results = prover.evaluate(theorems, dataset_name=dataset_name, num_simulations=args.num_simulations,
+                                      progress_callback=progress_callback)
+            bar_started.close()
+            bar_finished.close()
             all_results[dataset_name] = results
             print_results(results, dataset_name, args.num_simulations)
 

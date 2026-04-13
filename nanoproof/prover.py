@@ -250,8 +250,14 @@ class ProverWorker:
         return len(replay_buffer.local_buffer)
 
     @torch.no_grad()
-    def evaluate(self, theorems: list[str], dataset_name: str, num_simulations: int) -> dict:
-        """Evaluate theorems using MCTS. Returns metrics dict."""
+    def evaluate(self, theorems: list[str], dataset_name: str, num_simulations: int,
+                 progress_callback: Callable[[int, int, int, int], None] | None = None) -> dict:
+        """Evaluate theorems using MCTS. Returns metrics dict.
+
+        *progress_callback*, if given, is called as
+        ``progress_callback(started, finished, solved, errors)`` whenever a
+        theorem is picked up or completed.
+        """
         monitor = get_monitor()
 
         if monitor:
@@ -267,7 +273,14 @@ class ProverWorker:
                 tid = f"eval_{index[0]}"
                 theorem = theorems[index[0]]
                 index[0] += 1
-                return (tid, theorem)
+                started = index[0]
+            if progress_callback:
+                with results_lock:
+                    finished = len(results)
+                    solved = sum(1 for r in results if r["is_solved"])
+                    errors = sum(1 for r in results if r["error"])
+                progress_callback(started, finished, solved, errors)
+            return (tid, theorem)
 
         results: list[dict] = []
         results_lock = threading.Lock()
@@ -297,11 +310,17 @@ class ProverWorker:
                     "num_iterations": num_iterations,
                 })
 
+                n = len(results)
+                solved = sum(1 for r in results if r["is_solved"])
+                errors = sum(1 for r in results if r["error"])
+
                 if monitor:
-                    n = len(results)
-                    solved = sum(1 for r in results if r["is_solved"])
-                    errors = sum(1 for r in results if r["error"])
                     monitor.update_eval_progress(current=n, solved=solved, errors=errors)
+
+                if progress_callback:
+                    with index_lock:
+                        started = index[0]
+                    progress_callback(started, n, solved, errors)
 
         def done_check():
             with results_lock:
