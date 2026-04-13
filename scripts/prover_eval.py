@@ -144,12 +144,9 @@ def main():
     inner_tactic_model = TacticModel.create(num_samples=6, model_path=args.model_path)
     tactic_model = BlockingTacticModel(inner_model=inner_tactic_model, timeout_seconds=0.2, max_batch_tokens=8000)
 
-    from nanoproof.lean import parse_lean_server_addrs, query_lean_servers, assign_lean_servers
-    lean_server_addrs = parse_lean_server_addrs(args.lean_servers)
     balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
     if balancer:
-        lean_servers = assign_lean_servers(query_lean_servers(lean_server_addrs))
-        prover = ProverWorker(balancer, lean_servers)
+        prover = ProverWorker(balancer, args.lean_servers)
     else:
         prover = None
 

@@ -138,19 +138,16 @@ replay_buffer = ReplayBuffer(window_size=args.replay_buffer_window_size, seed=ra
 theorems_sampler = TheoremsSampler(seed=rank_seed, datasets=args.datasets)
 
 # Set up distributed inference (starts servers on worker ranks, builds balancer on master)
-from nanoproof.lean import parse_lean_server_addrs, query_lean_servers, assign_lean_servers
-lean_server_addrs = parse_lean_server_addrs(args.lean_servers)
 balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
 if balancer:
-    lean_servers = assign_lean_servers(query_lean_servers(lean_server_addrs))
-    prover = ProverWorker(balancer, lean_servers)
+    prover = ProverWorker(balancer, args.lean_servers)
 else:
     prover = None
 
 # Create the RL monitor (master only)
 rl_monitor = create_monitor(num_actors=0, enabled=master_process)
 rl_monitor.set_output_dir(output_dir)
-rl_monitor.set_lean_servers(lean_server_addrs)
+rl_monitor.set_lean_servers(args.lean_servers)
 
 # Augmentations
 shuffle_goals_and_hypotheses = leantree.augmentations.ShuffleGoalsAndHypotheses(seed=args.seed)

@@ -35,6 +35,9 @@ from nanoproof.replay_buffer import (
 from nanoproof.search import Game, Node, SearchConfig, run_mcts, verify_node
 from nanoproof.inference import InferenceBalancer
 
+import json as json_mod
+from urllib.request import urlopen
+
 
 # -----------------------------------------------------------------------------
 # Theorem sampler
@@ -160,12 +163,30 @@ class ProverWorker:
     def __init__(
         self,
         tactic_model: InferenceBalancer,
-        lean_servers: list[tuple[str, int]],
-        num_actors: int | None = None,
+        lean_addrs: list[str],
     ):
         self.tactic_model = tactic_model
-        self.lean_servers = lean_servers
-        self.num_actors = num_actors if num_actors is not None else len(lean_servers)
+        self.lean_servers = self._query_lean_servers(lean_addrs)
+        self.num_actors = len(self.lean_servers)
+
+    @staticmethod
+    def _query_lean_servers(raw_addrs: list[str]) -> list[tuple[str, int]]:
+        """Query each Lean server for capacity; return a flat (host, port) list with one entry per process."""
+        servers = []
+        for addr in raw_addrs:
+            host, port_str = addr.split(":") if ":" in addr else (addr, "8000")
+            port = int(port_str)
+            try:
+                with urlopen(f"http://{host}:{port}/status", timeout=10) as resp:
+                    status = json_mod.loads(resp.read())
+                max_procs = status.get("max_processes", 0)
+            except Exception as e:
+                raise ConnectionError(f"Could not reach Lean server {addr}: {e}") from e
+            if max_procs == 0:
+                raise ConnectionError(f"Lean server {addr} reports 0 available processes")
+            log(f"Lean server {host}:{port}: {max_procs} processes", component="LeanPool")
+            servers.extend([(host, port)] * max_procs)
+        return servers
 
     @torch.no_grad()
     def collect(
