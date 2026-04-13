@@ -15,7 +15,7 @@ from nanoproof.replay_buffer import prune_redundant_nodes, compute_value_target
 
 MINIF2F_IMPORTS = """
 import Mathlib
-import FormalConjectures.ForMathlib.Analysis.SpecialFunctions.NthRoot
+import FormalConjecturesForMathlib.Analysis.SpecialFunctions.NthRoot
 import FormalConjectures.Util.Answer
 """
 

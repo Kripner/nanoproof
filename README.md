@@ -130,7 +130,7 @@ For MiniF2F evaluation (requires `formal_conjectures`):
 ```bash
 leanserver --project-path /path/to/leantree_project/ \
     --repl-exe /path/to/leantree/lean-repl/.lake/build/bin/repl \
-    --imports Mathlib FormalConjectures.ForMathlib.Analysis.SpecialFunctions.NthRoot FormalConjectures.Util.Answer \
+    --imports Mathlib FormalConjecturesForMathlib.Analysis.SpecialFunctions.NthRoot FormalConjectures.Util.Answer \
     --max-processes 32 \
     --address=0.0.0.0 \
     --port=8000 \
