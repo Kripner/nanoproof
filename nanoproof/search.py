@@ -16,14 +16,14 @@ from nanoproof.inference import TacticModel, BlockingTacticModel
 class SearchConfig:
     num_simulations: int
 
-    # MCTS hyperparameters (defaults — rarely tuned)
+    # MCTS hyperparameters (defaults - rarely tuned)
     pb_c_base: int = 3200
-    pb_c_init: float = 0.01
-    value_discount: float = 0.98
+    pb_c_init: float = 0.001
+    value_discount: float = 0.99
     prior_temperature: float = 200
     no_legal_actions_value: float = -40.0
-    ps_c: float = 0.03
-    ps_alpha: float = 0.8
+    ps_c: float = 0.01
+    ps_alpha: float = 0.6
 
 
 Action = str | int
