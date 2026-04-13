@@ -52,11 +52,11 @@ class TacticModel:
     The main API is `sample_tactic` which returns both tactics AND value for a state,
     since these are always needed together during MCTS.
     """
-    network: "Transformer"
-    tokenizer: "HuggingFaceTokenizer"
-    engine: "Engine"
-    num_samples: int = 6
-    seed: int = 0
+    network: Transformer
+    tokenizer: HuggingFaceTokenizer
+    engine: Engine
+    num_samples: int
+    seed: int
 
     def __post_init__(self):
         self.rng = torch.Generator(device=self.network.get_device())
@@ -81,7 +81,8 @@ class TacticModel:
         device = self.network.get_device()
         assert device.type == "cuda"
 
-        # Maximum prompt length: leave room for generated tokens (64) within rotary cache
+        # RoPE tables are allocated for sequence_len * 10; keep prompts under * 9
+        # to leave headroom for the 64 generated tokens.
         max_prompt_len = self.network.config.sequence_len * 9
 
         # Prepare tokenized prompts for tactic generation
@@ -173,10 +174,10 @@ class TacticModel:
         pass
 
     @classmethod
-    def create(cls, num_samples: int, model_path: str) -> Self:
+    def create(cls, num_samples: int, model_path: str, seed: int = 0) -> Self:
         model, tokenizer, _ = load_model(model_path, torch.device("cuda"), phase="eval")
         engine = Engine(model, tokenizer)
-        return cls(model, tokenizer, engine, num_samples=num_samples)
+        return cls(model, tokenizer, engine, num_samples=num_samples, seed=seed)
 
 
 class BlockingTacticModel:
@@ -304,15 +305,9 @@ class BlockingTacticModel:
             if not self._batch_in_progress and self._should_process():
                 self._process_batch_locked()
 
-        # Wait for all results
+        # Wait for all results (returns early on shutdown/pause)
         for _, event, _ in entries:
             self._wait_for_result(event)
-
-        # If we shutdown/paused, _wait_for_result returns early
-        if self._shutdown:
-            return [ValueOrError.from_error("Model shutdown") for _ in state_strs]
-        if self._paused:
-            return [ValueOrError.from_error("Model paused for training") for _ in state_strs]
 
         return [slot[0] if slot else ValueOrError.from_error("No result") for _, _, slot in entries]
 

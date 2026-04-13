@@ -43,7 +43,7 @@ if MODE == "raw_engine":
     predict_value = predict_value_
 
 elif MODE == "tactic_model":
-    tactic_model = TacticModel.create(model_path=model_path)
+    tactic_model = TacticModel.create(num_samples=6, model_path=model_path)
     _cached_value = None  # Cache value from tactic generation
 
     def generate_(inp_) -> list[str]:
