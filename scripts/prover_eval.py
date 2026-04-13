@@ -144,9 +144,14 @@ def main():
     inner_tactic_model = TacticModel.create(num_samples=6, model_path=args.model_path)
     tactic_model = BlockingTacticModel(inner_model=inner_tactic_model, timeout_seconds=0.2, max_batch_tokens=8000)
 
-    lean_server_addrs = [s if ":" in s else f"{s}:8000" for s in args.lean_servers]
+    from nanoproof.lean import parse_lean_server_addrs, query_lean_servers, assign_lean_servers
+    lean_server_addrs = parse_lean_server_addrs(args.lean_servers)
     balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
-    prover = Prover(balancer, lean_server_addrs) if balancer else None
+    if balancer:
+        lean_servers = assign_lean_servers(query_lean_servers(lean_server_addrs))
+        prover = Prover(balancer, lean_servers)
+    else:
+        prover = None
 
     if ddp:
         dist.barrier()

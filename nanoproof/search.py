@@ -14,9 +14,7 @@ from nanoproof.inference import TacticModel, BlockingTacticModel
 
 @dataclass
 class SearchConfig:
-    # Acting (num_simulations always varies; num_actors only used by ProverWorker)
     num_simulations: int
-    num_actors: int = 4
 
     # MCTS hyperparameters (defaults — rarely tuned)
     pb_c_base: int = 3200

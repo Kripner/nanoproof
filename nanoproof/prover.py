@@ -15,11 +15,7 @@ import threading
 import time
 import traceback
 from typing import Callable, Optional
-from urllib.request import urlopen
-import json as json_mod
-
 import torch
-import torch.distributed as dist
 from leantree.repl_adapter.server import LeanClient
 from leantree.repl_adapter.interaction import LeanProcessException
 
@@ -39,53 +35,6 @@ from nanoproof.replay_buffer import (
 )
 from nanoproof.search import Game, Node, SearchConfig, run_mcts, verify_node
 from nanoproof.inference import InferenceBalancer
-
-
-# -----------------------------------------------------------------------------
-# Lean server assignment
-# -----------------------------------------------------------------------------
-
-def query_lean_servers(server_addresses: list[str]) -> list[tuple[str, int, int]]:
-    """Query Lean servers for their max_processes and return server info.
-
-    Args:
-        server_addresses: list of "host:port" strings
-
-    Returns:
-        list of (host, port, max_processes) tuples
-    """
-    servers = []
-    for addr in server_addresses:
-        host, port_str = addr.split(":")
-        port = int(port_str)
-        try:
-            with urlopen(f"http://{host}:{port}/status", timeout=10) as resp:
-                status = json_mod.loads(resp.read())
-            max_procs = status.get("max_processes", 0)
-            log(f"Lean server {addr}: {max_procs} processes", component="LeanPool")
-        except Exception as e:
-            log(f"WARNING: Could not query Lean server {addr}: {e}", component="LeanPool")
-            max_procs = 0
-        servers.append((host, port, max_procs))
-    return servers
-
-
-def assign_lean_servers(
-    servers: list[tuple[str, int, int]],
-) -> list[tuple[str, int]]:
-    """Build a per-actor list of (host, port) assignments.
-
-    Each Lean process maps to one actor thread (1:1). Actors 0..N-1 get assigned
-    to servers in order of the server list.
-
-    Returns:
-        list of (host, port) — one per actor. Length = total max_processes across all servers.
-    """
-    assignments = []
-    for host, port, max_procs in servers:
-        for _ in range(max_procs):
-            assignments.append((host, port))
-    return assignments
 
 
 # -----------------------------------------------------------------------------
@@ -364,11 +313,12 @@ class Prover:
     def __init__(
         self,
         tactic_model: InferenceBalancer,
-        lean_server_addrs: list[str],
+        lean_servers: list[tuple[str, int]],
+        num_actors: int | None = None,
     ):
         self.tactic_model = tactic_model
-        lean_server_info = query_lean_servers(lean_server_addrs)
-        self.lean_servers = assign_lean_servers(lean_server_info)
+        self.lean_servers = lean_servers
+        self.num_actors = num_actors if num_actors is not None else len(lean_servers)
 
     @torch.no_grad()
     def collect(
@@ -383,9 +333,8 @@ class Prover:
         Spawns a ProverWorker, runs until target is reached, then stops.
         """
         monitor = get_monitor()
-        num_actors = len(self.lean_servers)
 
-        log(f"Starting collection with {num_actors} actors, target={target_transitions} transitions",
+        log(f"Starting collection with {self.num_actors} actors, target={target_transitions} transitions",
             component="Collection")
 
         theorem_counter = [0]
@@ -409,7 +358,7 @@ class Prover:
         worker = ProverWorker(
             config=config,
             tactic_model=self.tactic_model,
-            lean_servers=self.lean_servers,
+            lean_servers=self.lean_servers[:self.num_actors],
             get_theorem=get_theorem,
             on_result=on_result,
         )
@@ -458,10 +407,7 @@ class Prover:
         if monitor:
             monitor.start_eval(dataset_name, len(theorems))
 
-        eval_config = SearchConfig(
-            num_simulations=num_simulations,
-            num_actors=len(self.lean_servers),
-        )
+        eval_config = SearchConfig(num_simulations=num_simulations)
 
         index = [0]
         index_lock = threading.Lock()
@@ -512,7 +458,7 @@ class Prover:
         worker = ProverWorker(
             config=eval_config,
             tactic_model=self.tactic_model,
-            lean_servers=self.lean_servers,
+            lean_servers=self.lean_servers[:self.num_actors],
             get_theorem=get_theorem,
             on_result=on_result,
         )

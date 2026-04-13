@@ -138,9 +138,14 @@ replay_buffer = ReplayBuffer(window_size=args.replay_buffer_window_size, seed=ra
 theorems_sampler = TheoremsSampler(seed=rank_seed, datasets=args.datasets)
 
 # Set up distributed inference (starts servers on worker ranks, builds balancer on master)
-lean_server_addrs = [s if ":" in s else f"{s}:8000" for s in args.lean_servers]
+from nanoproof.lean import parse_lean_server_addrs, query_lean_servers, assign_lean_servers
+lean_server_addrs = parse_lean_server_addrs(args.lean_servers)
 balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
-prover = Prover(balancer, lean_server_addrs) if balancer else None
+if balancer:
+    lean_servers = assign_lean_servers(query_lean_servers(lean_server_addrs))
+    prover = Prover(balancer, lean_servers)
+else:
+    prover = None
 
 # Create the RL monitor (master only)
 rl_monitor = create_monitor(num_actors=0, enabled=master_process)
