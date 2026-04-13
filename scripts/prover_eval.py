@@ -34,7 +34,7 @@ from nanoproof.inference import setup_distributed_inference
 # TODO: during verification, maybe set 'set_option maxHeartbeats 0\nset_option maxRecDepth 100000'
 
 
-def print_results(results, name):
+def print_results(results, name, num_simulations):
     print0("-" * 80)
     print0(f"Evaluation results for {name}")
     print0(f"Success rate: {results['success_rate']:.4%}")
@@ -44,7 +44,7 @@ def print_results(results, name):
     detailed = results.get('detailed_results', [])
     if detailed:
         total = len(detailed)
-        thresholds = [8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+        thresholds = [t for t in [8, 16, 32, 64, 128, 256, 512, 1024, 2048] if t <= num_simulations]
         rates = []
         for t in thresholds:
             solved_at_t = sum(
@@ -70,6 +70,9 @@ def main():
     parser.add_argument("--split", type=str, default="valid", choices=["valid", "test"])
     parser.add_argument("--max-theorems", type=int, default=None)
     parser.add_argument("--num-simulations", type=int, default=512)
+    parser.add_argument("--num-sampled-tactics", type=int, default=6)
+    parser.add_argument("--batch-timeout", type=float, default=0.2)
+    parser.add_argument("--max-batch-tokens", type=int, default=8000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--force", action="store_true", help="overwrite existing results")
     parser.add_argument("--continue", dest="continue_eval", action="store_true",
@@ -141,8 +144,8 @@ def main():
 
     # Load model + set up inference
     print0(f"Loading checkpoint: {checkpoint_info.checkpoint_dir}, step={checkpoint_info.step}")
-    inner_tactic_model = TacticModel.create(num_samples=6, model_path=args.model_path)
-    tactic_model = BlockingTacticModel(inner_model=inner_tactic_model, timeout_seconds=0.2, max_batch_tokens=8000)
+    inner_tactic_model = TacticModel.create(num_samples=args.num_sampled_tactics, model_path=args.model_path)
+    tactic_model = BlockingTacticModel(inner_model=inner_tactic_model, timeout_seconds=args.batch_timeout, max_batch_tokens=args.max_batch_tokens)
 
     balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
     if balancer:
@@ -151,7 +154,7 @@ def main():
         prover = None
 
     if ddp:
-        dist.barrier()
+        active_barrier_master("inference_ready") if master_process else active_barrier_wait("inference_ready")
 
     atexit.register(lambda: tactic_model.shutdown())
 
@@ -179,7 +182,7 @@ def main():
             print0(f"\nEvaluating on {len(theorems)} theorems from {dataset_name}")
             results = prover.evaluate(theorems, dataset_name=dataset_name, num_simulations=args.num_simulations)
             all_results[dataset_name] = results
-            print_results(results, dataset_name)
+            print_results(results, dataset_name, args.num_simulations)
 
             prepend = continue_data.get(dataset_name, (None, None))[0] if args.continue_eval else None
             save_eval_results(checkpoint_info, dataset_name + split_suffix, results, prepend_entries=prepend)
