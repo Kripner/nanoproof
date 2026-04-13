@@ -74,7 +74,7 @@ def main():
     parser.add_argument("--max-theorems", type=int, default=None)
     parser.add_argument("--num-simulations", type=int, default=512)
     parser.add_argument("--num-sampled-tactics", type=int, default=6)
-    parser.add_argument("--batch-timeout", type=float, default=0.2)
+    parser.add_argument("--batch-timeout", type=float, default=0.5)
     parser.add_argument("--max-gen-samples", type=int, default=384,
                         help="max generation samples per batch (states * num_sampled_tactics)")
     parser.add_argument("--seed", type=int, default=0)

@@ -33,7 +33,7 @@ from nanoproof.replay_buffer import (
     extract_transitions,
     prune_redundant_nodes,
 )
-from nanoproof.search import Game, Node, SearchConfig, run_mcts, verify_node
+from nanoproof.search import Game, MCTSAbortedError, Node, SearchConfig, run_mcts, verify_node
 from nanoproof.inference import InferenceBalancer
 
 logger = logging.getLogger(__name__)
@@ -91,7 +91,8 @@ class Prover:
         self.config = config
         self.tactic_model = tactic_model
 
-    def prove(self, client: LeanClient, theorem: str, expansion_callback: Callable[[], None] | None = None) -> Game | None:
+    def prove(self, client: LeanClient, theorem: str, expansion_callback: Callable[[], None] | None = None,
+              abort_check: Callable[[], bool] | None = None) -> Game | None:
         """Run a single MCTS proof game.
 
         Returns a :class:`Game` with results, or ``None`` if Lean setup fails.
@@ -128,6 +129,7 @@ class Prover:
             run_mcts(
                 self.config, game, self.tactic_model,
                 expansion_callback=expansion_callback,
+                abort_check=abort_check,
             )
             if game.root.is_solved:
                 try:
@@ -406,7 +408,8 @@ class ProverWorker:
                 skip_report = False
                 for attempt in range(max_retries):
                     try:
-                        game = prover.prove(client, theorem, expansion_callback=on_expansion)
+                        game = prover.prove(client, theorem, expansion_callback=on_expansion,
+                                            abort_check=stop_flag.is_set)
                         consecutive_errors = 0
                         break
                     except (ConnectionResetError, ConnectionRefusedError, BrokenPipeError, LeanProcessException) as e:
@@ -417,6 +420,9 @@ class ProverWorker:
                         else:
                             error = str(e)
                             consecutive_errors += 1
+                    except MCTSAbortedError:
+                        skip_report = True
+                        break
                     except Exception as e:
                         if "Model paused for training" in str(e):
                             set_thread_state(actor_id, "idle")

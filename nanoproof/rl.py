@@ -67,7 +67,7 @@ parser.add_argument("--num-simulations-eval", type=int, default=50)
 parser.add_argument("--collect-every", type=int, default=1)
 parser.add_argument("--collect-transitions", type=int, default=100)
 parser.add_argument("--replay-buffer-window-size", type=int, default=60_000_000)
-parser.add_argument("--batch-timeout", type=float, default=0.2)
+parser.add_argument("--batch-timeout", type=float, default=0.5)
 parser.add_argument("--max-gen-samples", type=int, default=384,
                     help="max generation samples per batch (states * num_sampled_tactics)")
 
