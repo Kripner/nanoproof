@@ -238,6 +238,14 @@ def get_dist_info():
     else:
         return False, 0, 0, 1
 
+def broadcast_value(value, src=0):
+    """Broadcast a single scalar value from src rank to all other ranks."""
+    assert isinstance(value, (int, float, str, bool)) or value is None, f"Expected scalar value, got {type(value)}"
+    buf = [value]
+    dist.broadcast_object_list(buf, src=src)
+    assert buf[0] is not None, "Broadcast received None — src rank likely didn't set the value"
+    return buf[0]
+
 def autodetect_device_type():
     # prefer to use CUDA if available, otherwise use MPS, otherwise fallback on CPU
     if torch.cuda.is_available():

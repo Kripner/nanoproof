@@ -17,7 +17,7 @@ import torch.distributed as dist
 import leantree.augmentations
 from leantree.core.lean import LeanGoal
 
-from nanoproof.common import compute_init, compute_cleanup, get_base_dir, DummyWandb, autodetect_device_type, SimpleTimer, flush, create_run_dirs, active_barrier_master, active_barrier_wait
+from nanoproof.common import compute_init, compute_cleanup, get_base_dir, DummyWandb, autodetect_device_type, SimpleTimer, flush, create_run_dirs, active_barrier_master, active_barrier_wait, broadcast_value
 from nanoproof.checkpoints import load_model, save_checkpoint, save_eval_results_to_run_dir
 from nanoproof.engine import Engine
 from nanoproof.data.sft.leantree import leantree_transitions
@@ -153,6 +153,10 @@ if balancer:
     log0(f"Batch max gen samples: {max_gen_samples} ({prover.num_actors} actors * {args.num_sampled_tactics} samples)", component="Config")
 else:
     prover = None
+# Broadcast max_gen_samples from master to worker ranks so their Flask servers
+# can batch correctly (workers don't have a ProverWorker to compute it from).
+if ddp:
+    tactic_model.max_gen_samples = broadcast_value(tactic_model.max_gen_samples)
 
 # Create the RL monitor (master only)
 rl_monitor = create_monitor(num_actors=0, enabled=master_process)

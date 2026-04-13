@@ -27,7 +27,7 @@ from nanoproof.checkpoints import (
     parse_checkpoint_path,
     save_eval_results,
 )
-from nanoproof.common import active_barrier_master, active_barrier_wait, autodetect_device_type, compute_cleanup, compute_init, print0
+from nanoproof.common import active_barrier_master, active_barrier_wait, autodetect_device_type, broadcast_value, compute_cleanup, compute_init, print0
 from nanoproof.data.bench import minif2f
 from nanoproof.data.rl import leanworkbook
 from nanoproof.inference import BlockingTacticModel, TacticModel
@@ -164,6 +164,10 @@ def main():
         print0(f"Batch max gen samples: {max_gen_samples} ({prover.num_actors} actors * {args.num_sampled_tactics} samples)")
     else:
         prover = None
+    # Broadcast max_gen_samples from master to worker ranks so their Flask servers
+    # can batch correctly (workers don't have a ProverWorker to compute it from).
+    if ddp:
+        tactic_model.max_gen_samples = broadcast_value(tactic_model.max_gen_samples)
 
     if ddp:
         active_barrier_master("inference_ready") if master_process else active_barrier_wait("inference_ready")

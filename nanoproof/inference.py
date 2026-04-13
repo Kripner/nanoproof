@@ -225,6 +225,8 @@ class BlockingTacticModel:
         if not self._pending or self._first_request_time is None:
             return False
         elapsed = time.time() - self._first_request_time
+        if self.max_gen_samples is None:
+            return elapsed >= self.timeout_seconds
         return elapsed >= self.timeout_seconds or self._pending_gen_samples() >= self.max_gen_samples
 
     def shutdown(self):
