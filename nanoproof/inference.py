@@ -14,6 +14,7 @@ Usage:
 """
 
 import argparse
+import gc
 import logging
 import threading
 import uuid
@@ -127,6 +128,11 @@ class TacticModel:
                     continue
                 tactics.append(tactic)
             tactics_results.append(tactics)
+
+        # Free tactic generation intermediates before value prediction
+        del sample_toks_batch, masks_batch
+        gc.collect()
+        torch.cuda.empty_cache()
 
         # Prepare prompts for value prediction
         value_delim_tok = self.tokenizer.encode_special("<|value|>")
@@ -363,13 +369,15 @@ class BlockingTacticModel:
         batch = self._pending[:max(1, max_items)]
 
         # Further limit by prompt tokens: the KV cache memory scales with
-        # N_rows * max_prompt_len, so we cap total estimated prompt tokens
-        # to prevent OOM on batches with long prompts.
+        # N_rows * (prompt_len + gen_tokens), so we cap total estimated tokens
+        # to prevent OOM on batches with long prompts. The GEN_OVERHEAD accounts
+        # for the 64 decode tokens per item in the KV cache.
         if self.max_batch_prompt_tokens is not None and len(batch) > 1:
+            GEN_OVERHEAD = 64
             total_tokens = 0
             cut = len(batch)
             for i, (state_str, _, _) in enumerate(batch):
-                total_tokens += max(1, int(len(state_str) / self.CHARS_PER_TOKEN))
+                total_tokens += max(1, int(len(state_str) / self.CHARS_PER_TOKEN)) + GEN_OVERHEAD
                 if total_tokens > self.max_batch_prompt_tokens:
                     cut = max(1, i)
                     break
@@ -383,10 +391,17 @@ class BlockingTacticModel:
         # Release lock during inference
         self._lock.release()
         try:
+            # Force cleanup of any lingering KV cache tensors from previous batches.
+            # Python's GC may not have collected generator frames holding large GPU
+            # allocations, so we explicitly collect before allocating new KV caches.
+            gc.collect()
+            torch.cuda.empty_cache()
+
             state_strs = [item[0] for item in batch]
             gen_samples = len(batch) * self.inner_model.num_samples
             total_chars = sum(len(s) for s in state_strs)
-            logger.debug(f"Batch #{batch_num}: {len(batch)} states, {gen_samples} gen samples, {total_chars} chars")
+            allocated_gb = torch.cuda.memory_allocated() / 1024**3
+            logger.debug(f"Batch #{batch_num}: {len(batch)} states, {gen_samples} gen samples, {total_chars} chars, {allocated_gb:.1f} GiB allocated")
             t0 = time.time()
             results = self.inner_model.sample_tactic_from_str_batch(state_strs)
             logger.debug(f"Batch #{batch_num}: completed in {time.time() - t0:.3f}s")
