@@ -27,6 +27,8 @@ from flask import Flask, request, jsonify
 
 from nanoproof.checkpoints import load_model
 from nanoproof.cli import log, log0
+
+logger = logging.getLogger(__name__)
 from nanoproof.common import ValueOrError, GLOBAL_CONFIG, get_dist_info
 from nanoproof.engine import Engine
 from nanoproof.tokenizer import HuggingFaceTokenizer
@@ -354,7 +356,11 @@ class BlockingTacticModel:
         self._lock.release()
         try:
             state_strs = [item[0] for item in batch]
+            token_est = self._estimate_batch_tokens(batch)
+            logger.debug(f"Batch #{batch_num}: {len(batch)} items, ~{token_est} tokens")
+            t0 = time.time()
             results = self.inner_model.sample_tactic_from_str_batch(state_strs)
+            logger.debug(f"Batch #{batch_num}: completed in {time.time() - t0:.3f}s")
 
             # Distribute results
             for i, (_, event, slot) in enumerate(batch):
@@ -421,6 +427,8 @@ class RemoteTacticModel:
             return []
 
         try:
+            logger.debug(f"Remote batch: {len(state_strs)} states -> {self.server_address}")
+            t0 = time.time()
             response = self._session.post(
                 f"http://{self.server_address}/generate",
                 json={"states": state_strs},
@@ -428,6 +436,7 @@ class RemoteTacticModel:
             )
             response.raise_for_status()
             data = response.json()
+            logger.debug(f"Remote batch: {self.server_address} responded in {time.time() - t0:.3f}s")
 
             # Reset failure counter on success
             with self._lock:

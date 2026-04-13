@@ -12,9 +12,9 @@ Usage:
 
 import argparse
 import atexit
+import logging
 import os
 import sys
-
 import threading
 import time
 
@@ -81,7 +81,15 @@ def main():
     parser.add_argument("--continue", dest="continue_eval", action="store_true",
                         help="retry only theorems that failed with errors")
     parser.add_argument("--inference-server-port", type=int, default=5000)
+    parser.add_argument("--verbose", action="store_true", help="enable debug logging for inference and proving")
     args = parser.parse_args()
+
+    if args.verbose:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s", datefmt="%H:%M:%S"))
+        nanoproof_logger = logging.getLogger("nanoproof")
+        nanoproof_logger.setLevel(logging.DEBUG)
+        nanoproof_logger.addHandler(handler)
 
     if args.force and args.continue_eval:
         parser.error("--force and --continue are mutually exclusive")

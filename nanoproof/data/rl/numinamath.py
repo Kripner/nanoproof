@@ -36,7 +36,7 @@ def _process_statement(statement: str) -> str | None:
         lines.pop(0)
     statement = "\n".join(lines).rstrip()
 
-    if re.search(r":=\s+by\s*$", statement):
+    if re.search(r":=\s*by\s*$", statement):
         return statement + " sorry"
     if statement.endswith(":="):
         return statement + " by sorry"

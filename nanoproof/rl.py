@@ -1,6 +1,7 @@
 import atexit
 import os
 import json
+import logging
 import sys
 import argparse
 import random
@@ -87,8 +88,17 @@ parser.add_argument("--init-lr-frac", type=float, default=0.02)
 parser.add_argument("--eval-every", type=int, default=100)
 parser.add_argument("--eval-start", type=int, default=0)
 parser.add_argument("--save-every", type=int, default=500)
+parser.add_argument("--verbose", action="store_true", help="enable debug logging for inference and proving")
 args = parser.parse_args()
 user_config = vars(args).copy()
+
+if args.verbose:
+    import logging
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s", datefmt="%H:%M:%S"))
+    nanoproof_logger = logging.getLogger("nanoproof")
+    nanoproof_logger.setLevel(logging.DEBUG)
+    nanoproof_logger.addHandler(handler)
 
 
 # -----------------------------------------------------------------------------

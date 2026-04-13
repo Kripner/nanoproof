@@ -9,6 +9,7 @@ Components:
 """
 
 import asyncio
+import logging
 import random
 import threading
 import time
@@ -34,6 +35,8 @@ from nanoproof.replay_buffer import (
 )
 from nanoproof.search import Game, Node, SearchConfig, run_mcts, verify_node
 from nanoproof.inference import InferenceBalancer
+
+logger = logging.getLogger(__name__)
 
 import json as json_mod
 from urllib.request import urlopen
@@ -93,6 +96,7 @@ class Prover:
 
         Returns a :class:`Game` with results, or ``None`` if Lean setup fails.
         """
+        logger.debug(f"Proving: {theorem[:80]}...")
         process = client.get_process()
         if process is None:
             log(f"FAILED: Could not get Lean process for theorem", component="Collection")
@@ -125,6 +129,7 @@ class Prover:
                 self.config, game, self.tactic_model,
                 expansion_callback=expansion_callback,
             )
+            logger.debug(f"MCTS done: {game.num_iterations} iterations, solved={game.root.is_solved}")
             if game.root.is_solved:
                 try:
                     verify_node(game.root)
@@ -426,6 +431,7 @@ class ProverWorker:
                         break
 
                 if not skip_report:
+                    logger.debug(f"Actor {actor_id}: {theorem_id} {'solved' if game and game.root and game.root.is_solved else 'unsolved'} in {game.num_iterations if game else 0} iters")
                     if game is not None and game.root is not None:
                         with stats_lock:
                             games_played[0] += 1

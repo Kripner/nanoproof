@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import enum
+import logging
 from typing import Self
 import math
 import uuid
@@ -10,6 +11,8 @@ from leantree.repl_adapter.interaction import LeanProcess
 from nanoproof.common import pretty_print_tree, ValueOrError, theorem_to_example, Player
 from nanoproof.cli import get_monitor, log_tactic
 from nanoproof.inference import TacticModel, BlockingTacticModel
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -363,6 +366,8 @@ def run_mcts(config: SearchConfig, game: Game, model: "TacticModel | BlockingTac
     num_iterations = 0
     for i in range(game.num_simulations):
         num_iterations = i + 1
+        if num_iterations % 100 == 0:
+            logger.debug(f"MCTS iteration {num_iterations}/{game.num_simulations}")
         # Check if we should abort early (e.g., prover paused during evaluation)
         if abort_check is not None and abort_check():
             raise MCTSAbortedError("MCTS aborted: prover paused")
@@ -406,6 +411,7 @@ def run_mcts(config: SearchConfig, game: Game, model: "TacticModel | BlockingTac
         )
 
         if root.is_solved:
+            logger.debug(f"Proof found at iteration {num_iterations}")
             break
     
     game.num_iterations = num_iterations
