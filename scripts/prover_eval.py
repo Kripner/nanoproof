@@ -190,6 +190,7 @@ def main():
     # Evaluate (rank 0 only; worker ranks serve inference via their daemon threads)
     all_results = {}
     if master_process:
+        eval_start = time.monotonic()
         for dataset_name, theorems in dataset_theorems.items():
             print0(f"\nEvaluating on {len(theorems)} theorems from {dataset_name}")
             total = len(theorems)
@@ -214,15 +215,21 @@ def main():
             printer = threading.Thread(target=printer_loop, daemon=True)
             printer.start()
 
+            dataset_start = time.monotonic()
             results = prover.evaluate(theorems, dataset_name=dataset_name, num_simulations=args.num_simulations,
                                       progress_callback=progress_callback)
+            dataset_elapsed = time.monotonic() - dataset_start
             done.set()
             printer.join()
             all_results[dataset_name] = results
             print_results(results, dataset_name, args.num_simulations)
+            print0(f"Time for {dataset_name}: {dataset_elapsed:.1f}s")
 
             prepend = continue_data.get(dataset_name, (None, None))[0] if args.continue_eval else None
             save_eval_results(checkpoint_info, dataset_name + split_suffix, results, prepend_entries=prepend)
+
+        total_elapsed = time.monotonic() - eval_start
+        print0(f"\nTotal evaluation time: {total_elapsed:.1f}s")
 
         active_barrier_master("prover_eval_done")
     else:
