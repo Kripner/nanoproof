@@ -249,7 +249,8 @@ def main():
         total_elapsed = time.monotonic() - eval_start
         print0(f"\nTotal evaluation time: {total_elapsed:.1f}s")
 
-        active_barrier_master("prover_eval_done")
+        if ddp:
+            active_barrier_master("prover_eval_done")
     else:
         active_barrier_wait("prover_eval_done")
 
