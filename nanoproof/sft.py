@@ -355,19 +355,6 @@ if master_process:
     )
     print(f"Saved model checkpoint to {model_dir}")
 
-# Log to report
-from nanoproof.report import get_report
-get_report().log(section="SFT", data=[
-    user_config, # CLI args
-    {
-        "Training rows": len(train_ds),
-        "Validation rows": len(val_ds),
-        "Number of iterations": step,
-        "Training loss": train_loss_item,
-        "Validation loss": val_loss,
-    },
-])
-
 # Cleanup
 wandb_run.finish()
 compute_cleanup()

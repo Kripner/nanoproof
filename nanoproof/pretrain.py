@@ -470,28 +470,6 @@ print0(f"Total training time: {total_training_time/60:.2f}m")
 if val_bpb is not None:
     print0(f"Minimum validation bpb: {min_val_bpb:.6f}")
 
-# Log to report
-from nanoproof.report import get_report
-get_report().log(section="Base model training", data=[
-    user_config,
-    {
-        "Number of parameters": num_params,
-        "Number of FLOPs per token": f"{num_flops_per_token:e}",
-        "Calculated number of iterations": num_iterations,
-        "Number of training tokens": total_tokens,
-        "Tokens : Scaling params ratio": total_batch_size * num_iterations / num_scaling_params,
-        "DDP world size": ddp_world_size,
-    },
-    {
-        "Minimum validation bpb": min_val_bpb if val_bpb is not None else None,
-        "Final validation bpb": val_bpb,
-        "MFU %": f"{mfu:.2f}%",
-        "Total training flops": f"{flops_so_far:e}",
-        "Total training time": f"{total_training_time/60:.2f}m",
-        "Peak memory usage": f"{get_max_memory() / 1024 / 1024:.2f}MiB",
-    }
-])
-
 # Cleanup
 wandb_run.finish()
 compute_cleanup()
