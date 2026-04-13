@@ -156,92 +156,101 @@ class Engine:
         # Check if all prompts have same length (can batch prefill)
         all_same_length = len(set(prompt_lengths)) == 1
 
-        if all_same_length:
-            # Batched prefill: single forward pass
-            ids = torch.tensor(prompts, dtype=torch.long, device=device)
-            kv_cache_prefill = KVCache(batch_size=num_prompts, seq_len=max_prompt_len, device=device, dtype=dtype, **kv_kwargs)
-            logits = self.model.forward(ids, kv_cache=kv_cache_prefill)
-            logits = logits[:, -1, :]  # (num_prompts, vocab_size)
+        kv_cache_decode = None
+        try:
+            if all_same_length:
+                # Batched prefill: single forward pass
+                ids = torch.tensor(prompts, dtype=torch.long, device=device)
+                kv_cache_prefill = KVCache(batch_size=num_prompts, seq_len=max_prompt_len, device=device, dtype=dtype, **kv_kwargs)
+                logits = self.model.forward(ids, kv_cache=kv_cache_prefill)
+                logits = logits[:, -1, :]  # (num_prompts, vocab_size)
 
-            # Expand for num_samples
-            kv_cache_decode = KVCache(batch_size=total_rows, seq_len=kv_length_hint, device=device, dtype=dtype, **kv_kwargs)
-            pos = kv_cache_prefill.get_pos()
-            for i in range(num_prompts):
-                for j in range(num_samples):
-                    row_idx = i * num_samples + j
-                    kv_cache_decode.k_cache[:, row_idx:row_idx+1, :pos, :, :] = kv_cache_prefill.k_cache[:, i:i+1, :pos, :, :]
-                    kv_cache_decode.v_cache[:, row_idx:row_idx+1, :pos, :, :] = kv_cache_prefill.v_cache[:, i:i+1, :pos, :, :]
-            kv_cache_decode.cache_seqlens.fill_(pos)
-            if kv_cache_prefill.prev_embedding is not None:
-                kv_cache_decode.prev_embedding = kv_cache_prefill.prev_embedding.repeat_interleave(num_samples, dim=0)
-            del kv_cache_prefill
-            logits = logits.repeat_interleave(num_samples, dim=0)  # (total_rows, vocab_size)
-        else:
-            # Variable-length: prefill each prompt individually
-            kv_cache_decode = KVCache(batch_size=total_rows, seq_len=kv_length_hint, device=device, dtype=dtype, **kv_kwargs)
-            all_logits = []
-            for i, prompt in enumerate(prompts):
-                ids = torch.tensor([prompt], dtype=torch.long, device=device)
-                kv_single = KVCache(batch_size=1, seq_len=len(prompt), device=device, dtype=dtype, **kv_kwargs)
-                prompt_logits = self.model.forward(ids, kv_cache=kv_single)
-                prompt_logits = prompt_logits[:, -1, :]  # (1, vocab_size)
-                pos = kv_single.get_pos()
-                # Copy into decode cache for each sample
-                for j in range(num_samples):
-                    row_idx = i * num_samples + j
-                    kv_cache_decode.k_cache[:, row_idx:row_idx+1, :pos, :, :] = kv_single.k_cache[:, :, :pos, :, :]
-                    kv_cache_decode.v_cache[:, row_idx:row_idx+1, :pos, :, :] = kv_single.v_cache[:, :, :pos, :, :]
-                    kv_cache_decode.cache_seqlens[row_idx] = pos
-                    if kv_single.prev_embedding is not None:
-                        if kv_cache_decode.prev_embedding is None:
-                            kv_cache_decode.prev_embedding = torch.zeros(total_rows, 1, self.model.config.n_embd, device=device, dtype=dtype)
-                        kv_cache_decode.prev_embedding[row_idx] = kv_single.prev_embedding[0]
-                all_logits.append(prompt_logits.expand(num_samples, -1))
-                del kv_single
-            logits = torch.cat(all_logits, dim=0)  # (total_rows, vocab_size)
-
-        # 2) Decode loop
-        row_states = [RowState(prompt.copy()) for prompt in prompts for _ in range(num_samples)]
-        num_generated = 0
-
-        while True:
-            if min_tokens is not None and num_generated < min_tokens:
-                logits[:, eos] = float('-inf')
-                logits[:, bos] = float('-inf')
-            # Sample the next token for each row
-            next_ids = sample_next_token(logits, rng, temperature, top_k)
-            sampled_tokens = next_ids[:, 0].tolist()
-
-            token_column = []
-            token_masks = []
-            for i, state in enumerate(row_states):
-                token_masks.append(1)
-                next_token = sampled_tokens[i]
-                token_column.append(next_token)
-                state.current_tokens.append(next_token)
-                if next_token == eos or next_token == bos:
-                    state.completed = True
-
-            if is_batched:
-                result = ([token_column[i * num_samples:(i + 1) * num_samples] for i in range(num_prompts)],
-                          [token_masks[i * num_samples:(i + 1) * num_samples] for i in range(num_prompts)])
+                # Expand for num_samples
+                kv_cache_decode = KVCache(batch_size=total_rows, seq_len=kv_length_hint, device=device, dtype=dtype, **kv_kwargs)
+                pos = kv_cache_prefill.get_pos()
+                for i in range(num_prompts):
+                    for j in range(num_samples):
+                        row_idx = i * num_samples + j
+                        kv_cache_decode.k_cache[:, row_idx:row_idx+1, :pos, :, :] = kv_cache_prefill.k_cache[:, i:i+1, :pos, :, :]
+                        kv_cache_decode.v_cache[:, row_idx:row_idx+1, :pos, :, :] = kv_cache_prefill.v_cache[:, i:i+1, :pos, :, :]
+                kv_cache_decode.cache_seqlens.fill_(pos)
+                if kv_cache_prefill.prev_embedding is not None:
+                    kv_cache_decode.prev_embedding = kv_cache_prefill.prev_embedding.repeat_interleave(num_samples, dim=0)
+                del kv_cache_prefill
+                logits = logits.repeat_interleave(num_samples, dim=0)  # (total_rows, vocab_size)
             else:
-                result = (token_column, token_masks)
+                # Variable-length: prefill each prompt individually
+                kv_cache_decode = KVCache(batch_size=total_rows, seq_len=kv_length_hint, device=device, dtype=dtype, **kv_kwargs)
+                all_logits = []
+                for i, prompt in enumerate(prompts):
+                    ids = torch.tensor([prompt], dtype=torch.long, device=device)
+                    kv_single = KVCache(batch_size=1, seq_len=len(prompt), device=device, dtype=dtype, **kv_kwargs)
+                    prompt_logits = self.model.forward(ids, kv_cache=kv_single)
+                    prompt_logits = prompt_logits[:, -1, :]  # (1, vocab_size)
+                    pos = kv_single.get_pos()
+                    # Copy into decode cache for each sample
+                    for j in range(num_samples):
+                        row_idx = i * num_samples + j
+                        kv_cache_decode.k_cache[:, row_idx:row_idx+1, :pos, :, :] = kv_single.k_cache[:, :, :pos, :, :]
+                        kv_cache_decode.v_cache[:, row_idx:row_idx+1, :pos, :, :] = kv_single.v_cache[:, :, :pos, :, :]
+                        kv_cache_decode.cache_seqlens[row_idx] = pos
+                        if kv_single.prev_embedding is not None:
+                            if kv_cache_decode.prev_embedding is None:
+                                kv_cache_decode.prev_embedding = torch.zeros(total_rows, 1, self.model.config.n_embd, device=device, dtype=dtype)
+                            kv_cache_decode.prev_embedding[row_idx] = kv_single.prev_embedding[0]
+                    all_logits.append(prompt_logits.expand(num_samples, -1))
+                    del kv_single
+                logits = torch.cat(all_logits, dim=0)  # (total_rows, vocab_size)
 
-            if return_logits:
-                result = result + (logits,)
-            yield result
-            num_generated += 1
+            # 2) Decode loop
+            row_states = [RowState(prompt.copy()) for prompt in prompts for _ in range(num_samples)]
+            num_generated = 0
 
-            if max_tokens is not None and num_generated >= max_tokens:
-                break
-            if all(state.completed for state in row_states):
-                break
+            while True:
+                if min_tokens is not None and num_generated < min_tokens:
+                    logits[:, eos] = float('-inf')
+                    logits[:, bos] = float('-inf')
+                # Sample the next token for each row
+                next_ids = sample_next_token(logits, rng, temperature, top_k)
+                sampled_tokens = next_ids[:, 0].tolist()
 
-            # Prepare logits for next iteration
-            ids = torch.tensor(token_column, dtype=torch.long, device=device).unsqueeze(1)
-            logits = self.model.forward(ids, kv_cache=kv_cache_decode)
-            logits = logits[:, -1, :]
+                token_column = []
+                token_masks = []
+                for i, state in enumerate(row_states):
+                    token_masks.append(1)
+                    next_token = sampled_tokens[i]
+                    token_column.append(next_token)
+                    state.current_tokens.append(next_token)
+                    if next_token == eos or next_token == bos:
+                        state.completed = True
+
+                if is_batched:
+                    result = ([token_column[i * num_samples:(i + 1) * num_samples] for i in range(num_prompts)],
+                              [token_masks[i * num_samples:(i + 1) * num_samples] for i in range(num_prompts)])
+                else:
+                    result = (token_column, token_masks)
+
+                if return_logits:
+                    result = result + (logits,)
+                yield result
+                num_generated += 1
+
+                if max_tokens is not None and num_generated >= max_tokens:
+                    break
+                if all(state.completed for state in row_states):
+                    break
+
+                # Prepare logits for next iteration
+                ids = torch.tensor(token_column, dtype=torch.long, device=device).unsqueeze(1)
+                logits = self.model.forward(ids, kv_cache=kv_cache_decode)
+                logits = logits[:, -1, :]
+        finally:
+            # Explicitly free the KV cache. @torch.inference_mode() on a generator
+            # can prevent proper frame teardown on GeneratorExit, leaving the huge
+            # KV cache tensors alive. The finally block guarantees cleanup.
+            if kv_cache_decode is not None:
+                del kv_cache_decode.k_cache, kv_cache_decode.v_cache
+                del kv_cache_decode
 
     def generate_batch(self, tokens, num_samples=1, return_logits=False, **kwargs):
         """
