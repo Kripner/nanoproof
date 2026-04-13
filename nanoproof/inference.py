@@ -373,7 +373,7 @@ class RemoteTacticModel:
     talks to it over localhost HTTP.
     """
 
-    def __init__(self, server_address: str, timeout: float = 60.0, max_pool_size: int = 50):
+    def __init__(self, server_address: str, timeout: float = 60.0, max_pool_size: int = 512):
         self.server_address = server_address
         self.timeout = timeout
         # Configure session with larger connection pool for many concurrent actors
