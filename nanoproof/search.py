@@ -411,7 +411,6 @@ def run_mcts(config: SearchConfig, game: Game, model: "TacticModel | BlockingTac
         )
 
         if root.is_solved:
-            logger.debug(f"Proof found at iteration {num_iterations}")
             break
     
     game.num_iterations = num_iterations

@@ -129,7 +129,6 @@ class Prover:
                 self.config, game, self.tactic_model,
                 expansion_callback=expansion_callback,
             )
-            logger.debug(f"MCTS done: {game.num_iterations} iterations, solved={game.root.is_solved}")
             if game.root.is_solved:
                 try:
                     verify_node(game.root)
