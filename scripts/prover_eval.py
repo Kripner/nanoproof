@@ -28,7 +28,7 @@ from nanoproof.common import active_barrier_master, active_barrier_wait, autodet
 from nanoproof.data.bench import minif2f
 from nanoproof.data.rl import leanworkbook
 from nanoproof.inference import BlockingTacticModel, TacticModel
-from nanoproof.prover import Prover
+from nanoproof.prover import ProverWorker
 from nanoproof.inference import setup_distributed_inference
 
 # TODO: during verification, maybe set 'set_option maxHeartbeats 0\nset_option maxRecDepth 100000'
@@ -149,7 +149,7 @@ def main():
     balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
     if balancer:
         lean_servers = assign_lean_servers(query_lean_servers(lean_server_addrs))
-        prover = Prover(balancer, lean_servers)
+        prover = ProverWorker(balancer, lean_servers)
     else:
         prover = None
 

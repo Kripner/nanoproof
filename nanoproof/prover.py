@@ -3,10 +3,9 @@ Prover: runs MCTS proof searches for experience collection and evaluation.
 
 Components:
 - ``TheoremsSampler``: weighted sampler over configured training datasets.
-- ``ProverWorker``: thread pool that plays proof games via ``run_mcts``. Each
-  actor thread gets a dedicated ``LeanClient`` connection (1:1 mapping).
-- ``Prover``: high-level API used by the training loop. Manages a
-  ``ProverWorker`` for both collection and evaluation.
+- ``Prover``: stateless, thread-safe single-theorem proof search via MCTS.
+- ``ProverWorker``: manages parallel proof search with actor threads. Provides
+  ``collect()`` and ``evaluate()`` for the training loop.
 """
 
 import asyncio
@@ -72,174 +71,25 @@ class TheoremsSampler:
 
 
 # -----------------------------------------------------------------------------
-# ProverWorker
+# Prover
 # -----------------------------------------------------------------------------
 
-class ProverWorker:
-    """
-    Runs actor threads that play proof games via MCTS.
+class Prover:
+    """Proves a single theorem using MCTS. Stateless and thread-safe.
 
-    Each actor thread gets a dedicated Lean server connection (1:1 mapping
-    via the ``lean_servers`` list). Configurable with callbacks:
-    - get_theorem: returns (id, theorem) or None
-    - on_result: called with (id, theorem, game_or_none, error_or_none)
+    Multiple actor threads can call :meth:`prove` concurrently — the method
+    has no side-effects beyond the provided ``expansion_callback``.
     """
 
-    def __init__(
-        self,
-        config: SearchConfig,
-        tactic_model: InferenceBalancer,
-        lean_servers: list[tuple[str, int]],
-        get_theorem: Callable[[], Optional[tuple[str, str]]],
-        on_result: Callable[[str, str, Optional[Game], Optional[str]], None],
-        paused: bool = False,
-    ):
+    def __init__(self, config: SearchConfig, tactic_model: InferenceBalancer):
         self.config = config
         self.tactic_model = tactic_model
-        self.lean_servers = lean_servers  # one (host, port) per actor
-        self.get_theorem = get_theorem
-        self.on_result = on_result
-        self.num_actors = len(lean_servers)
 
-        self._running = False
-        self._paused = paused
-        self._stop_flag = threading.Event()
-        self._threads: list[threading.Thread] = []
-        self._thread_states: dict[int, str] = {}
-        self._thread_states_lock = threading.Lock()
+    def prove(self, client: LeanClient, theorem: str, expansion_callback: Callable[[], None] | None = None) -> Game | None:
+        """Run a single MCTS proof game.
 
-        self.games_played = 0
-        self.games_solved = 0
-        self.expansions = 0
-        self._stats_lock = threading.Lock()
-
-    def start(self):
-        """Start the actor threads. Can be called again to restart after actors exit."""
-        if self._running and not self.all_actors_exited():
-            return
-
-        self._threads = [t for t in self._threads if t.is_alive()]
-
-        self._running = True
-        self._paused = False
-        self._stop_flag.clear()
-
-        for i in range(self.num_actors):
-            t = threading.Thread(target=self._actor_loop, args=(i,), daemon=True)
-            t.start()
-            self._threads.append(t)
-
-    def stop(self):
-        """Stop all actor threads."""
-        self._stop_flag.set()
-        self._running = False
-        for t in self._threads:
-            t.join(timeout=5.0)
-        self._threads = []
-
-    def pause(self):
-        """Pause collection (actors will finish current game then wait)."""
-        self._paused = True
-
-    def resume(self):
-        """Resume collection."""
-        self._paused = False
-
-    def _set_thread_state(self, actor_id: int, state: str):
-        with self._thread_states_lock:
-            self._thread_states[actor_id] = state
-
-    def get_thread_states(self) -> list[str]:
-        with self._thread_states_lock:
-            return [self._thread_states.get(i, "idle") for i in range(self.num_actors)]
-
-    def get_expansions(self) -> int:
-        with self._stats_lock:
-            return self.expansions
-
-    def has_started_actors(self) -> bool:
-        return len(self._threads) > 0 and self._running
-
-    def all_actors_exited(self) -> bool:
-        return all(not t.is_alive() for t in self._threads)
-
-    def _actor_loop(self, actor_id: int):
-        """Main loop for a single actor thread."""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        # Connect to this actor's dedicated Lean server
-        lean_address, lean_port = self.lean_servers[actor_id]
-        self._set_thread_state(actor_id, "blocked")
-        client = LeanClient(lean_address, lean_port)
-        self._set_thread_state(actor_id, "idle")
-
-        consecutive_errors = 0
-        max_consecutive_errors = 5
-        max_retries = 3
-
-        while not self._stop_flag.is_set():
-            if self._paused:
-                self._set_thread_state(actor_id, "idle")
-                time.sleep(0.5)
-                continue
-
-            theorem_data = self.get_theorem()
-            if theorem_data is None:
-                self._set_thread_state(actor_id, "idle")
-                time.sleep(0.5)
-                continue
-
-            theorem_id, theorem = theorem_data
-            self._set_thread_state(actor_id, "running")
-
-            game = None
-            error = None
-            skip_report = False
-            for attempt in range(max_retries):
-                try:
-                    game = self._play_game(client, theorem)
-                    consecutive_errors = 0
-                    break
-                except (ConnectionResetError, ConnectionRefusedError, BrokenPipeError, LeanProcessException) as e:
-                    if attempt < max_retries - 1:
-                        self._set_thread_state(actor_id, "retry")
-                        log(f"[Actor {actor_id}] Connection error (attempt {attempt + 1}/{max_retries}): '{e}', reconnecting...", component="Collection")
-                        time.sleep(1.0 * (attempt + 1))
-                    else:
-                        error = str(e)
-                        consecutive_errors += 1
-                except Exception as e:
-                    if "Model paused for training" in str(e):
-                        self._set_thread_state(actor_id, "idle")
-                        skip_report = True
-                        break
-                    error = str(e)
-                    consecutive_errors += 1
-                    log(f"[Actor {actor_id}] Error (lean={lean_address}:{lean_port}): {e}", component="Collection")
-                    traceback.print_exc()
-                    break
-
-            if not skip_report:
-                if game is not None and game.root is not None:
-                    with self._stats_lock:
-                        self.games_played += 1
-                        if game.root.is_solved:
-                            self.games_solved += 1
-
-                if error is not None:
-                    self._set_thread_state(actor_id, "error")
-
-                self.on_result(theorem_id, theorem, game, error)
-
-            if consecutive_errors >= max_consecutive_errors:
-                log(f"[Actor {actor_id}] Too many consecutive errors, exiting", component="Collection")
-                break
-
-        self._set_thread_state(actor_id, "idle")
-
-    def _play_game(self, client, theorem: str):
-        """Play a single proof game."""
+        Returns a :class:`Game` with results, or ``None`` if Lean setup fails.
+        """
         process = client.get_process()
         if process is None:
             log(f"FAILED: Could not get Lean process for theorem", component="Collection")
@@ -268,13 +118,9 @@ class ProverWorker:
                 reward=None,
             )
 
-            def on_expansion():
-                with self._stats_lock:
-                    self.expansions += 1
-
             run_mcts(
                 self.config, game, self.tactic_model,
-                expansion_callback=on_expansion,
+                expansion_callback=expansion_callback,
             )
             if game.root.is_solved:
                 try:
@@ -300,14 +146,15 @@ class ProverWorker:
 
 
 # -----------------------------------------------------------------------------
-# Prover
+# ProverWorker
 # -----------------------------------------------------------------------------
 
-class Prover:
-    """High-level API for MCTS proof search (collection and evaluation).
+class ProverWorker:
+    """Manages parallel proof search across multiple Lean servers.
 
-    Manages a ``ProverWorker`` and exposes ``collect`` / ``evaluate`` for the
-    training loop. Only runs on the master rank (rank 0).
+    Runs actor threads that each get a dedicated ``LeanClient`` and call
+    :meth:`Prover.prove`. Provides :meth:`collect` and :meth:`evaluate`
+    as the two main modes of operation.
     """
 
     def __init__(
@@ -330,7 +177,7 @@ class Prover:
     ) -> int:
         """Collect transitions into replay_buffer.local_buffer.
 
-        Spawns a ProverWorker, runs until target is reached, then stops.
+        Runs actor threads until the target number of transitions is reached.
         """
         monitor = get_monitor()
 
@@ -354,46 +201,28 @@ class Prover:
             if monitor is not None:
                 monitor.record_transitions(transitions)
 
-        config = SearchConfig(num_simulations=num_simulations)
-        worker = ProverWorker(
-            config=config,
-            tactic_model=self.tactic_model,
-            lean_servers=self.lean_servers[:self.num_actors],
-            get_theorem=get_theorem,
-            on_result=on_result,
-        )
-        worker.start()
+        def done_check():
+            with replay_buffer._lock:
+                return len(replay_buffer.local_buffer) >= target_transitions
 
-        loop_count = 0
-        try:
-            while True:
+        loop_count = [0]
+
+        def poll_callback(thread_states):
+            if monitor is not None:
+                for i, state in enumerate(thread_states):
+                    monitor.update_local_actor(i, state=state)
+            loop_count[0] += 1
+            if loop_count[0] % 50 == 0:
                 with replay_buffer._lock:
                     collected = len(replay_buffer.local_buffer)
-                if collected >= target_transitions:
-                    log(f"Target reached: {collected}/{target_transitions} transitions collected",
-                        component="Collection")
-                    break
+                log(f"Progress: {collected}/{target_transitions} transitions",
+                    component="Collection")
 
-                if monitor is not None:
-                    states = worker.get_thread_states()
-                    for i, state in enumerate(states):
-                        monitor.update_local_actor(i, state=state)
+        prover = Prover(SearchConfig(num_simulations=num_simulations), self.tactic_model)
+        self._run_pool(prover, get_theorem, on_result, done_check, poll_callback)
 
-                if worker.has_started_actors() and worker.all_actors_exited():
-                    log("WARNING: All actors have exited unexpectedly", component="Collection")
-                    break
-
-                loop_count += 1
-                if loop_count % 50 == 0:
-                    log(f"Progress: {collected}/{target_transitions} transitions",
-                        component="Collection")
-
-                time.sleep(0.1)
-        finally:
-            log(f"Stopping actors...", component="Collection")
-            worker.stop()
-            if monitor is not None:
-                monitor.clear_local_actors()
+        if monitor is not None:
+            monitor.clear_local_actors()
 
         log(f"Collection complete: {len(replay_buffer.local_buffer)} transitions",
             component="Collection")
@@ -406,8 +235,6 @@ class Prover:
 
         if monitor:
             monitor.start_eval(dataset_name, len(theorems))
-
-        eval_config = SearchConfig(num_simulations=num_simulations)
 
         index = [0]
         index_lock = threading.Lock()
@@ -455,27 +282,12 @@ class Prover:
                     errors = sum(1 for r in results if r["error"])
                     monitor.update_eval_progress(current=n, solved=solved, errors=errors)
 
-        worker = ProverWorker(
-            config=eval_config,
-            tactic_model=self.tactic_model,
-            lean_servers=self.lean_servers[:self.num_actors],
-            get_theorem=get_theorem,
-            on_result=on_result,
-        )
-        worker.start()
+        def done_check():
+            with results_lock:
+                return len(results) >= len(theorems)
 
-        try:
-            while True:
-                with results_lock:
-                    done = len(results) >= len(theorems)
-                if done:
-                    break
-                if worker.has_started_actors() and worker.all_actors_exited():
-                    log("WARNING: All actors exited before eval completed", component="Eval")
-                    break
-                time.sleep(0.1)
-        finally:
-            worker.stop()
+        prover = Prover(SearchConfig(num_simulations=num_simulations), self.tactic_model)
+        self._run_pool(prover, get_theorem, on_result, done_check)
 
         total = len(results)
         solved = sum(1 for r in results if r["is_solved"])
@@ -488,3 +300,128 @@ class Prover:
             "detailed_results": results,
         }
 
+    def _run_pool(
+        self,
+        prover: Prover,
+        get_theorem: Callable[[], Optional[tuple[str, str]]],
+        on_result: Callable[[str, str, Optional[Game], Optional[str]], None],
+        done_check: Callable[[], bool],
+        poll_callback: Callable[[list[str]], None] | None = None,
+    ):
+        """Run actor threads until *done_check* returns ``True``.
+
+        All thread state is local to this call — the ``ProverWorker`` instance
+        remains reusable across multiple ``collect`` / ``evaluate`` invocations.
+        """
+        stop_flag = threading.Event()
+        thread_states: dict[int, str] = {}
+        thread_states_lock = threading.Lock()
+
+        games_played = [0]
+        games_solved = [0]
+        expansions = [0]
+        stats_lock = threading.Lock()
+
+        def set_thread_state(actor_id: int, state: str):
+            with thread_states_lock:
+                thread_states[actor_id] = state
+
+        def get_thread_states() -> list[str]:
+            with thread_states_lock:
+                return [thread_states.get(i, "idle") for i in range(self.num_actors)]
+
+        def on_expansion():
+            with stats_lock:
+                expansions[0] += 1
+
+        def actor_loop(actor_id: int):
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            lean_address, lean_port = self.lean_servers[actor_id]
+            set_thread_state(actor_id, "blocked")
+            client = LeanClient(lean_address, lean_port)
+            set_thread_state(actor_id, "idle")
+
+            consecutive_errors = 0
+            max_consecutive_errors = 5
+            max_retries = 3
+
+            while not stop_flag.is_set():
+                theorem_data = get_theorem()
+                if theorem_data is None:
+                    set_thread_state(actor_id, "idle")
+                    time.sleep(0.5)
+                    continue
+
+                theorem_id, theorem = theorem_data
+                set_thread_state(actor_id, "running")
+
+                game = None
+                error = None
+                skip_report = False
+                for attempt in range(max_retries):
+                    try:
+                        game = prover.prove(client, theorem, expansion_callback=on_expansion)
+                        consecutive_errors = 0
+                        break
+                    except (ConnectionResetError, ConnectionRefusedError, BrokenPipeError, LeanProcessException) as e:
+                        if attempt < max_retries - 1:
+                            set_thread_state(actor_id, "retry")
+                            log(f"[Actor {actor_id}] Connection error (attempt {attempt + 1}/{max_retries}): '{e}', reconnecting...", component="Collection")
+                            time.sleep(1.0 * (attempt + 1))
+                        else:
+                            error = str(e)
+                            consecutive_errors += 1
+                    except Exception as e:
+                        if "Model paused for training" in str(e):
+                            set_thread_state(actor_id, "idle")
+                            time.sleep(0.5)
+                            skip_report = True
+                            break
+                        error = str(e)
+                        consecutive_errors += 1
+                        log(f"[Actor {actor_id}] Error (lean={lean_address}:{lean_port}): {e}", component="Collection")
+                        traceback.print_exc()
+                        break
+
+                if not skip_report:
+                    if game is not None and game.root is not None:
+                        with stats_lock:
+                            games_played[0] += 1
+                            if game.root.is_solved:
+                                games_solved[0] += 1
+
+                    if error is not None:
+                        set_thread_state(actor_id, "error")
+
+                    on_result(theorem_id, theorem, game, error)
+
+                if consecutive_errors >= max_consecutive_errors:
+                    log(f"[Actor {actor_id}] Too many consecutive errors, exiting", component="Collection")
+                    break
+
+            set_thread_state(actor_id, "idle")
+
+        # Start actor threads
+        threads: list[threading.Thread] = []
+        for i in range(self.num_actors):
+            t = threading.Thread(target=actor_loop, args=(i,), daemon=True)
+            t.start()
+            threads.append(t)
+
+        # Poll until done
+        try:
+            while True:
+                if done_check():
+                    break
+                if all(not t.is_alive() for t in threads):
+                    log("WARNING: All actors have exited unexpectedly", component="Collection")
+                    break
+                if poll_callback is not None:
+                    poll_callback(get_thread_states())
+                time.sleep(0.1)
+        finally:
+            stop_flag.set()
+            for t in threads:
+                t.join(timeout=5.0)

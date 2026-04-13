@@ -21,7 +21,7 @@ from nanoproof.engine import Engine
 from nanoproof.data.sft.leantree import leantree_transitions
 from nanoproof.data.sft.leantree_dataloader import rl_data_generator
 from nanoproof.replay_buffer import ReplayBuffer
-from nanoproof.prover import TheoremsSampler, Prover
+from nanoproof.prover import TheoremsSampler, ProverWorker
 from nanoproof.inference import setup_distributed_inference
 from nanoproof.inference import TacticModel, BlockingTacticModel
 from nanoproof.optim import optimizer_to_cpu, optimizer_to_gpu
@@ -143,7 +143,7 @@ lean_server_addrs = parse_lean_server_addrs(args.lean_servers)
 balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
 if balancer:
     lean_servers = assign_lean_servers(query_lean_servers(lean_server_addrs))
-    prover = Prover(balancer, lean_servers)
+    prover = ProverWorker(balancer, lean_servers)
 else:
     prover = None
 
