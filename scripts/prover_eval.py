@@ -28,7 +28,8 @@ from nanoproof.common import active_barrier_master, active_barrier_wait, autodet
 from nanoproof.data.bench import minif2f
 from nanoproof.data.rl import leanworkbook
 from nanoproof.inference import BlockingTacticModel, TacticModel
-from nanoproof.prover import Prover, setup_distributed_inference
+from nanoproof.prover import Prover
+from nanoproof.inference import setup_distributed_inference
 
 # TODO: during verification, maybe set 'set_option maxHeartbeats 0\nset_option maxRecDepth 100000'
 

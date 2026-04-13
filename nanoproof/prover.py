@@ -7,8 +7,6 @@ Components:
   actor thread gets a dedicated ``LeanClient`` connection (1:1 mapping).
 - ``Prover``: high-level API used by the training loop. Manages a
   ``ProverWorker`` for both collection and evaluation.
-- ``setup_distributed_inference``: starts inference servers on ALL DDP
-  ranks and builds an ``InferenceBalancer`` on the master rank.
 """
 
 import asyncio
@@ -28,7 +26,6 @@ from leantree.repl_adapter.interaction import LeanProcessException
 from nanoproof.common import (
     Player,
     construct_proof_source,
-    get_dist_info,
     linearize_proof,
     theorem_to_example,
 )
@@ -41,7 +38,7 @@ from nanoproof.replay_buffer import (
     prune_redundant_nodes,
 )
 from nanoproof.search import Game, Node, SearchConfig, run_mcts, verify_node
-from nanoproof.inference import BlockingTacticModel, InferenceBalancer, TacticModel, start_inference_server
+from nanoproof.inference import InferenceBalancer
 
 
 # -----------------------------------------------------------------------------
@@ -545,36 +542,3 @@ class Prover:
             "detailed_results": results,
         }
 
-
-# -----------------------------------------------------------------------------
-# Distributed inference setup
-# -----------------------------------------------------------------------------
-
-def setup_distributed_inference(
-    tactic_model: BlockingTacticModel,
-    inference_server_port: int,
-) -> InferenceBalancer | None:
-    """Set up distributed inference across DDP ranks.
-
-    Every rank starts a Flask inference server for its BlockingTacticModel.
-    Master builds an InferenceBalancer that load-balances across all GPUs
-    via HTTP. Lifecycle (pause/resume/shutdown) is managed by each rank's
-    local BlockingTacticModel directly, not by the balancer.
-
-    Returns the balancer on master, None on workers.
-    Must be called by ALL DDP ranks.
-    """
-    ddp, rank, _, world_size = get_dist_info()
-
-    # Every rank (including rank 0) starts a Flask inference server
-    port = inference_server_port + rank
-    start_inference_server(tactic_model, port)
-
-    if rank != 0:
-        return None
-
-    all_endpoints = [
-        f"127.0.0.1:{inference_server_port + r}"
-        for r in range(world_size)
-    ]
-    return InferenceBalancer(all_endpoints)
