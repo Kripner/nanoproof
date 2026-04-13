@@ -23,6 +23,7 @@ import torch.distributed as dist
 from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type, is_ddp_initialized, create_run_dirs, GLOBAL_CONFIG, get_lr_multiplier
 from nanoproof.tokenizer import get_token_bytes
 from nanoproof.checkpoints import save_checkpoint
+from nanoproof.report import get_report
 from nanoproof.loss_eval import evaluate_bpb
 from nanoproof.checkpoints import load_model
 from nanoproof.data.midtrain.leangithubraw import leangithubraw_batches
@@ -226,7 +227,6 @@ print0(f"Minimum validation bpb: {min_val_bpb:.4f}")
 
 # Log to report
 if not args.dry_run:
-    from nanoproof.report import get_report
     get_report().log(section="Midtraining", data=[
         user_config, # CLI args
         { # stats about the training setup

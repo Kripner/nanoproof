@@ -131,8 +131,6 @@ def create_run_dirs(stage: str, run: str, args_dict: dict | None = None):
     Returns:
         (log_dir, model_dir) – absolute paths
     """
-    import torch.distributed as dist
-
     ddp = is_ddp_initialized()
     master = int(os.environ.get("RANK", 0)) == 0
 

@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -57,7 +58,6 @@ class TacticModel:
     seed: int = 0
 
     def __post_init__(self):
-        import torch
         self.rng = torch.Generator(device=self.network.get_device())
         self.rng.manual_seed(self.seed)
 
@@ -552,7 +552,6 @@ def create_blocking_model_app(model: BlockingTacticModel):
     app = Flask(__name__)
 
     # Disable Flask request logging to reduce spam
-    import logging
     log_flask = logging.getLogger('werkzeug')
     log_flask.setLevel(logging.ERROR)
 
@@ -592,7 +591,6 @@ def start_inference_server(model: BlockingTacticModel, port: int, host: str = "0
     app = create_blocking_model_app(model)
 
     def run_server():
-        import logging
         log_flask = logging.getLogger('werkzeug')
         log_flask.setLevel(logging.ERROR)
         app.run(host=host, port=port, threaded=True)

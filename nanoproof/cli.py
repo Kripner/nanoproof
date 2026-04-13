@@ -13,18 +13,20 @@ for state updates every second.
 """
 
 import json
+import logging
 import os
+import subprocess
 import sys
 import threading
 import time
 import traceback
+import urllib.request
 from collections import deque
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from statistics import median
 from typing import Literal, TextIO, Any
 from queue import Queue
-import os
 
 from flask import Flask, jsonify, Response, send_from_directory
 
@@ -443,7 +445,6 @@ class WebMonitor:
         self._app = self._create_app()
         
         def run_server():
-            import logging
             log_handler = logging.getLogger('werkzeug')
             log_handler.setLevel(logging.ERROR)
             self._app.run(host="0.0.0.0", port=self.port, threaded=True)
@@ -466,8 +467,6 @@ class WebMonitor:
             return
 
         def monitor_gpus():
-            import subprocess
-            
             # Map PyTorch indices to physical GPU IDs
             # If CUDA_VISIBLE_DEVICES is set, parse it to get physical IDs
             cuda_visible = os.environ.get('CUDA_VISIBLE_DEVICES', '')
@@ -558,9 +557,6 @@ class WebMonitor:
     def _start_lean_servers_monitor(self):
         """Start a background thread to monitor multiple Lean servers."""
         def monitor_lean_servers():
-            import urllib.request
-            import json as json_lib
-            
             while not self._stop_monitors.wait(timeout=3.0):
                 with self._lock:
                     servers = self.lean_servers[:]
@@ -575,7 +571,7 @@ class WebMonitor:
                         req.add_header("Accept", "application/json")
                         
                         with urllib.request.urlopen(req, timeout=5.0) as response:
-                            data = json_lib.loads(response.read().decode())
+                            data = json.loads(response.read().decode())
                         
                         with self._lock:
                             server.connected = True
@@ -600,9 +596,6 @@ class WebMonitor:
     def _start_lean_monitor(self):
         """Start a background thread to monitor Lean server status."""
         def monitor_lean():
-            import urllib.request
-            import json as json_lib
-            
             while not self._stop_monitors.wait(timeout=3.0):
                 with self._lock:
                     address = self.lean_server.address
@@ -617,7 +610,7 @@ class WebMonitor:
                     req.add_header("Accept", "application/json")
                     
                     with urllib.request.urlopen(req, timeout=5.0) as response:
-                        data = json_lib.loads(response.read().decode())
+                        data = json.loads(response.read().decode())
                     
                     with self._lock:
                         self.lean_server.connected = True

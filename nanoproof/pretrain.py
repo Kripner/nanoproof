@@ -23,13 +23,14 @@ from contextlib import contextmanager
 
 import wandb
 import torch
+import torch.nn as nn
 import torch.distributed as dist
 
 from nanoproof.model import Transformer, NetworkConfig, Linear
 from nanoproof.data.pretrain.nemotron_dataloader import nemotron_batches, nemotron_batches_with_state
 from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized, create_run_dirs, GLOBAL_CONFIG, get_lr_multiplier
 from nanoproof.tokenizer import get_tokenizer, get_token_bytes
-from nanoproof.checkpoints import save_checkpoint, load_checkpoint
+from nanoproof.checkpoints import save_checkpoint, load_checkpoint, parse_checkpoint_path
 from nanoproof.engine import Engine
 from nanoproof.loss_eval import evaluate_bpb
 from nanoproof.flash_attention import HAS_FA3
@@ -125,7 +126,6 @@ model.init_weights()
 resuming = args.resume_from is not None
 resume_step = -1
 if resuming:
-    from nanoproof.checkpoints import parse_checkpoint_path
     resume_checkpoint_dir, resume_step = parse_checkpoint_path(args.resume_from)
     print0(f"Resuming optimization from step {resume_step} (from {resume_checkpoint_dir})")
     model_data, optimizer_data, meta_data = load_checkpoint(resume_checkpoint_dir, resume_step, device, load_optimizer=True, rank=ddp_rank)
@@ -139,7 +139,6 @@ if args.fp8:
         print0("Warning: FP8 training requires CUDA, ignoring --fp8 flag")
     else:
         from nanoproof.fp8 import Float8LinearConfig, convert_to_float8_training
-        import torch.nn as nn
 
         def fp8_module_filter(mod: nn.Module, fqn: str) -> bool:
             if not isinstance(mod, nn.Linear):
@@ -160,7 +159,6 @@ if args.fp8:
 @contextmanager
 def disable_fp8(model):
     """Temporarily swap Float8Linear modules with nn.Linear for BF16 evaluation."""
-    import torch.nn as nn
     fp8_locations = []
     for name, module in model.named_modules():
         if 'Float8' in type(module).__name__:

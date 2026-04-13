@@ -575,7 +575,6 @@ def build_prover(
 
     Must be called by ALL DDP ranks (workers start their inference server here).
     """
-    from nanoproof.common import get_dist_info
     ddp, rank, _, world_size = get_dist_info()
     master = rank == 0
 

@@ -13,8 +13,12 @@ Usage (drop-in replacement for FA3):
     # Inference (with KV cache)
     y = flash_attn.flash_attn_with_kvcache(q, k_cache, v_cache, k=k, v=v, ...)
 """
+import os
+
 import torch
 import torch.nn.functional as F
+
+from nanoproof.common import COMPUTE_DTYPE
 
 
 # =============================================================================
@@ -30,7 +34,6 @@ def _load_flash_attention_3():
         # Ada (sm89), Blackwell (sm100) need SDPA fallback until FA3 is recompiled
         if major != 9:
             return None
-        import os
         os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
         from kernels import get_kernel
         return get_kernel('varunneal/flash-attention-3').flash_attn_interface
@@ -54,7 +57,6 @@ def _resolve_use_fa3():
         return False
     if HAS_FA3:
         # FA3 Hopper kernels only support bf16 and fp8; fp16/fp32 must use SDPA fallback
-        from nanoproof.common import COMPUTE_DTYPE
         if COMPUTE_DTYPE == torch.bfloat16:
             return True
         return False

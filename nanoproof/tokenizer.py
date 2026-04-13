@@ -9,7 +9,9 @@ Two implementations are available:
 
 import os
 
-from nanoproof.common import GLOBAL_CONFIG
+import torch
+
+from nanoproof.common import GLOBAL_CONFIG, get_base_dir
 
 SPECIAL_TOKENS = [
     # every document begins with the Beginning of Sequence (BOS) token that delimits documents
@@ -173,14 +175,11 @@ def token_ids_to_value(tokenizer, token_ids: list[int]) -> int | None:
 
 def get_tokenizer():
     # return HuggingFaceTokenizer.from_pretrained("gpt2")
-    from nanoproof.common import get_base_dir
     base_dir = get_base_dir()
     tokenizer_dir = os.path.join(base_dir, "tokenizer")
     return HuggingFaceTokenizer.from_directory(tokenizer_dir)
 
 def get_token_bytes(device="cpu"):
-    import torch
-    from nanoproof.common import get_base_dir
     base_dir = get_base_dir()
     tokenizer_dir = os.path.join(base_dir, "tokenizer")
     token_bytes_path = os.path.join(tokenizer_dir, "token_bytes.pt")

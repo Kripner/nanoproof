@@ -5,6 +5,7 @@ import argparse
 import json
 import random
 from collections import Counter
+from pathlib import Path
 
 from leantree.repl_adapter.server import LeanClient
 
@@ -353,8 +354,6 @@ def cmd_simplify(args):
 
 def cmd_gather_lean(args):
     """Gather Lean theorems with proofs from evaluation steps."""
-    from pathlib import Path
-    
     run_dir = Path(args.run_dir)
     evals_dir = run_dir / "evals"
     
