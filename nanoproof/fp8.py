@@ -1,4 +1,4 @@
-"""Minimal FP8 training for nanoproof — tensorwise dynamic scaling only.
+"""Minimal FP8 training for nanoproof - tensorwise dynamic scaling only.
 
 Drop-in replacement for torchao's Float8Linear (~2000 lines) with ~150 lines.
 We only need the "tensorwise" recipe (one scalar scale per tensor), not the full
@@ -35,7 +35,7 @@ The cuBLAS FP8 kernel requires specific memory layouts:
   - First argument (A):  must be row-major (contiguous)
   - Second argument (B): must be column-major (B.t().contiguous().t())
 If B is obtained by transposing a contiguous tensor (e.g. weight.t()), it is
-already column-major — no copy needed. Otherwise we use _to_col_major().
+already column-major, no copy needed. Otherwise we use _to_col_major().
 """
 
 import torch

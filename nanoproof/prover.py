@@ -47,7 +47,7 @@ from urllib.request import urlopen
 class Prover:
     """Proves a single theorem using MCTS. Stateless and thread-safe.
 
-    Multiple actor threads can call :meth:`prove` concurrently — the method
+    Multiple actor threads can call :meth:`prove` concurrently; the method
     has no side-effects beyond the provided ``expansion_callback``.
     """
 
@@ -320,7 +320,7 @@ class ProverWorker:
     ):
         """Run actor threads until *done_check* returns ``True``.
 
-        All thread state is local to this call — the ``ProverWorker`` instance
+        All thread state is local to this call; the ``ProverWorker`` instance
         remains reusable across multiple ``collect`` / ``evaluate`` invocations.
         """
         stop_flag = threading.Event()

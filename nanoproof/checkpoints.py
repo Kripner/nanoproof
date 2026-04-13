@@ -45,14 +45,14 @@ def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data,
 # Throughout the codebase a "model path" is a path to a specific
 # ``model_NNNNNN.pt`` file. The path may be absolute, or relative to
 # ``$NANOPROOF_HOME/models/``. We never resolve "latest in directory" magic
-# anywhere — every load explicitly names the checkpoint file it wants.
+# anywhere - every load explicitly names the checkpoint file it wants.
 
 def parse_checkpoint_path(model_path: str) -> tuple[str, int]:
     """Resolve a checkpoint file path and parse the step from its filename.
 
     ``model_path`` is either absolute or relative to ``$NANOPROOF_HOME/models/``.
     It must point to a ``model_NNNNNN.pt`` file (the file does not need to
-    exist at this point — only the filename is parsed).
+    exist at this point - only the filename is parsed).
 
     Returns ``(checkpoint_dir, step)``.
     """

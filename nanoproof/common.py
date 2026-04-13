@@ -129,7 +129,7 @@ def create_run_dirs(stage: str, run: str, args_dict: dict | None = None):
         args_dict: if provided, dumped as args.json in the log directory
 
     Returns:
-        (log_dir, model_dir) – absolute paths
+        (log_dir, model_dir) - absolute paths
     """
     ddp = is_ddp_initialized()
     master = int(os.environ.get("RANK", 0)) == 0
@@ -243,7 +243,7 @@ def broadcast_value(value, src=0):
     assert isinstance(value, (int, float, str, bool)) or value is None, f"Expected scalar value, got {type(value)}"
     buf = [value]
     dist.broadcast_object_list(buf, src=src)
-    assert buf[0] is not None, "Broadcast received None — src rank likely didn't set the value"
+    assert buf[0] is not None, "Broadcast received None - src rank likely didn't set the value"
     return buf[0]
 
 def autodetect_device_type():

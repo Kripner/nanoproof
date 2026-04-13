@@ -1,8 +1,8 @@
 """Lean-Workbook dataset (only theorems with a known InternLM-Prover proof).
 
 Public interface:
-- ``download_dataset()`` — fetch the source JSON from HuggingFace.
-- ``list_theorems(split)`` — return the parsed formal statements for the
+- ``download_dataset()`` - fetch the source JSON from HuggingFace.
+- ``list_theorems(split)`` - return the parsed formal statements for the
   requested split (``"train"`` or ``"valid"``). The dataset has no test split.
 
 CLI: see ``python -m nanoproof.data.rl.leanworkbook --help``.

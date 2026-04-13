@@ -256,7 +256,7 @@ while True:
         model.eval()
         rl_monitor.set_phase("evaluating")
 
-        # Policy evaluation (all ranks — uses DDP collectives internally)
+        # Policy evaluation (all ranks, uses DDP collectives internally)
         eval_steps = 200
         build_val_loader = lambda: sft_data_generator(mathlib_val, batch_size=args.device_batch_size)
         tactic_results = eval_tactic_accuracy(model, inner_tactic_model.tokenizer, build_val_loader(), eval_steps=eval_steps)
@@ -337,7 +337,7 @@ while True:
             if ddp:
                 dist.barrier()
         else:
-            # Collect proofs (rank 0 only — worker ranks serve inference)
+            # Collect proofs (rank 0 only, worker ranks serve inference)
             timer.start("collect")
             model.eval()
             rl_monitor.set_step(step)

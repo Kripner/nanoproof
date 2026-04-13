@@ -1,8 +1,8 @@
 """NuminaMath-LEAN dataset.
 
 Public interface:
-- ``download_dataset()`` — fetch the source parquet from HuggingFace.
-- ``list_theorems(split)`` — return the parsed formal statements for the
+- ``download_dataset()`` - fetch the source parquet from HuggingFace.
+- ``list_theorems(split)`` - return the parsed formal statements for the
   requested split (``"train"`` or ``"valid"``). The dataset has no test split.
   Each entry is a Lean source string ending in ``sorry``.
 

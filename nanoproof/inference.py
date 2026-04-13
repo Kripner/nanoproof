@@ -341,7 +341,8 @@ class BlockingTacticModel:
         try:
             state_strs = [item[0] for item in batch]
             gen_samples = len(batch) * self.inner_model.num_samples
-            logger.debug(f"Batch #{batch_num}: {len(batch)} states, {gen_samples} gen samples")
+            total_chars = sum(len(s) for s in state_strs)
+            logger.debug(f"Batch #{batch_num}: {len(batch)} states, {gen_samples} gen samples, {total_chars} chars")
             t0 = time.time()
             results = self.inner_model.sample_tactic_from_str_batch(state_strs)
             logger.debug(f"Batch #{batch_num}: completed in {time.time() - t0:.3f}s")

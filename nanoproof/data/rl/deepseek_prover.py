@@ -1,8 +1,8 @@
 """DeepSeek-Prover-V1 dataset.
 
 Public interface:
-- ``download_dataset()`` — fetch the source JSONL from HuggingFace.
-- ``list_theorems(split)`` — return the parsed theorem statements for the
+- ``download_dataset()`` - fetch the source JSONL from HuggingFace.
+- ``list_theorems(split)`` - return the parsed theorem statements for the
   requested split (``"train"`` or ``"valid"``). Each entry is a Lean source
   string ending in ``:= by sorry``, ready to feed to ``proof_from_sorry``.
 
@@ -11,7 +11,7 @@ CLI: see ``python -m nanoproof.data.rl.deepseek_prover --help``.
 Note on disregarding proofs: in this dataset, each row's ``formal_statement``
 field contains *only* the theorem header (always ending in ``:= by``); the
 actual proof tactics live in a separate ``formal_proof`` field that we never
-read. So "use only the statements" is automatically satisfied — we just take
+read. So "use only the statements" is automatically satisfied - we just take
 ``formal_statement`` and append ``sorry`` so the prover can attempt its own
 proof.
 """

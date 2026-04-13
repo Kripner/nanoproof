@@ -1,10 +1,10 @@
 """miniF2F benchmark dataset.
 
 Public interface:
-- ``download_dataset()`` — fetch the .lean files from the GitHub repo.
-- ``list_theorems(split)`` — return the parsed theorems for the requested
+- ``download_dataset()`` - fetch the .lean files from the GitHub repo.
+- ``list_theorems(split)`` - return the parsed theorems for the requested
   split (``"valid"`` or ``"test"``). The dataset has no train split.
-- ``get_imports()`` — the canonical Lean preamble used by miniF2F problems.
+- ``get_imports()`` - the canonical Lean preamble used by miniF2F problems.
 
 CLI: see ``python -m nanoproof.data.bench.minif2f --help``.
 """
