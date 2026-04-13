@@ -188,16 +188,16 @@ class BlockingTacticModel:
     Thread-safe wrapper around TacticModel that batches LLM calls from multiple threads.
 
     Batches are processed when either:
-    1. pending items exceed max_batch_tokens, or
+    1. pending items exceed max_gen_samples, or
     2. timeout_seconds has elapsed since the first pending request
 
     Each request generates both tactics and value prediction together.
     """
 
-    def __init__(self, inner_model: TacticModel, timeout_seconds: float, max_batch_tokens: int):
+    def __init__(self, inner_model: TacticModel, timeout_seconds: float, max_gen_samples: int):
         self.inner_model = inner_model
         self.timeout_seconds = timeout_seconds
-        self.max_batch_tokens = max_batch_tokens
+        self.max_gen_samples = max_gen_samples
 
         # Synchronization primitives
         self._lock = threading.Lock()
@@ -216,27 +216,16 @@ class BlockingTacticModel:
     def network(self):
         return self.inner_model.network
 
-    def _estimate_batch_tokens(self, items: list[tuple[str, any, any]]) -> int:
-        """Estimate total tokens for a batch of items (assumes padding to max length).
-
-        Memory scales with max_len * batch_size * num_samples due to padding and sample expansion.
-        """
-        if not items:
-            return 0
-        # Estimate tokens as chars/4 (rough average for code/math text)
-        max_len = max(len(item[0]) // 4 + 1 for item in items)
-        return max_len * len(items) * self.inner_model.num_samples
-
-    def _pending_tokens(self) -> int:
-        """Estimate total tokens in pending queue."""
-        return self._estimate_batch_tokens(self._pending)
+    def _pending_gen_samples(self) -> int:
+        """Number of generation samples if pending items were batched now."""
+        return len(self._pending) * self.inner_model.num_samples
 
     def _should_process(self) -> bool:
-        """Check if batch should be processed based on timeout or token count."""
+        """Check if batch should be processed based on timeout or sample count."""
         if not self._pending or self._first_request_time is None:
             return False
         elapsed = time.time() - self._first_request_time
-        return elapsed >= self.timeout_seconds or self._pending_tokens() >= self.max_batch_tokens
+        return elapsed >= self.timeout_seconds or self._pending_gen_samples() >= self.max_gen_samples
 
     def shutdown(self):
         """Signal shutdown to unblock all waiting threads."""
@@ -337,17 +326,10 @@ class BlockingTacticModel:
         self._total_batches += 1
         batch_num = self._total_batches
 
-        # Take items up to max_batch_tokens limit to avoid OOM
-        batch = []
-        remaining = []
-
-        for item in self._pending:
-            candidate_batch = batch + [item]
-            if batch and self._estimate_batch_tokens(candidate_batch) > self.max_batch_tokens:
-                # Adding this item would exceed limit, save for next batch
-                remaining.append(item)
-            else:
-                batch = candidate_batch
+        # Take items up to max_gen_samples limit to avoid OOM
+        max_items = self.max_gen_samples // self.inner_model.num_samples
+        batch = self._pending[:max(1, max_items)]
+        remaining = self._pending[max(1, max_items):]
 
         self._pending = remaining
         self._first_request_time = time.time() if remaining else None
@@ -356,8 +338,8 @@ class BlockingTacticModel:
         self._lock.release()
         try:
             state_strs = [item[0] for item in batch]
-            token_est = self._estimate_batch_tokens(batch)
-            logger.debug(f"Batch #{batch_num}: {len(batch)} items, ~{token_est} tokens")
+            gen_samples = len(batch) * self.inner_model.num_samples
+            logger.debug(f"Batch #{batch_num}: {len(batch)} states, {gen_samples} gen samples")
             t0 = time.time()
             results = self.inner_model.sample_tactic_from_str_batch(state_strs)
             logger.debug(f"Batch #{batch_num}: completed in {time.time() - t0:.3f}s")
@@ -427,8 +409,6 @@ class RemoteTacticModel:
             return []
 
         try:
-            logger.debug(f"Remote batch: {len(state_strs)} states -> {self.server_address}")
-            t0 = time.time()
             response = self._session.post(
                 f"http://{self.server_address}/generate",
                 json={"states": state_strs},
@@ -436,7 +416,6 @@ class RemoteTacticModel:
             )
             response.raise_for_status()
             data = response.json()
-            logger.debug(f"Remote batch: {self.server_address} responded in {time.time() - t0:.3f}s")
 
             # Reset failure counter on success
             with self._lock:

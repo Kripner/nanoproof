@@ -75,7 +75,8 @@ def main():
     parser.add_argument("--num-simulations", type=int, default=512)
     parser.add_argument("--num-sampled-tactics", type=int, default=6)
     parser.add_argument("--batch-timeout", type=float, default=0.2)
-    parser.add_argument("--max-batch-tokens", type=int, default=8000)
+    parser.add_argument("--max-gen-samples", type=int, default=384,
+                        help="max generation samples per batch (states * num_sampled_tactics)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--force", action="store_true", help="overwrite existing results")
     parser.add_argument("--continue", dest="continue_eval", action="store_true",
@@ -152,7 +153,7 @@ def main():
     # Load model + set up inference
     print0(f"Loading checkpoint: {checkpoint_info.checkpoint_dir}, step={checkpoint_info.step}")
     inner_tactic_model = TacticModel.create(num_samples=args.num_sampled_tactics, model_path=args.model_path)
-    tactic_model = BlockingTacticModel(inner_model=inner_tactic_model, timeout_seconds=args.batch_timeout, max_batch_tokens=args.max_batch_tokens)
+    tactic_model = BlockingTacticModel(inner_model=inner_tactic_model, timeout_seconds=args.batch_timeout, max_gen_samples=args.max_gen_samples)
 
     balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
     if balancer:

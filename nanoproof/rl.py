@@ -68,7 +68,8 @@ parser.add_argument("--collect-every", type=int, default=1)
 parser.add_argument("--collect-transitions", type=int, default=100)
 parser.add_argument("--replay-buffer-window-size", type=int, default=60_000_000)
 parser.add_argument("--batch-timeout", type=float, default=0.2)
-parser.add_argument("--max-batch-tokens", type=int, default=8000)
+parser.add_argument("--max-gen-samples", type=int, default=384,
+                    help="max generation samples per batch (states * num_sampled_tactics)")
 
 # Training
 parser.add_argument("--device-batch-size", type=int, default=8)
@@ -122,7 +123,7 @@ inner_tactic_model = TacticModel.create(num_samples=args.num_sampled_tactics, mo
 tactic_model = BlockingTacticModel(
     inner_model=inner_tactic_model,
     timeout_seconds=args.batch_timeout,
-    max_batch_tokens=args.max_batch_tokens,
+    max_gen_samples=args.max_gen_samples,
 )
 model = tactic_model.network
 
