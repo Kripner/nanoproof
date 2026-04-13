@@ -54,15 +54,12 @@ parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (e
 parser.add_argument("--resume-from", type=str, default="")
 
 # Infrastructure
-parser.add_argument("--lean-servers", type=str, required=True,
-                    help="comma-separated Lean server addresses (e.g., '10.10.25.33:8000,10.10.25.34:8000')")
-parser.add_argument("--inference-server-port", type=int, default=5000,
-                    help="base port for per-rank inference servers (rank N uses port base+1+N)")
+parser.add_argument("--lean-servers", type=str, nargs="+", required=True, help="Lean server addresses (e.g., 10.10.25.33:8000 10.10.25.34); port defaults to 8000")
+parser.add_argument("--inference-server-port", type=int, default=5000, help="base port for per-rank inference servers (rank N uses port base+1+N)")
 
 # Search / collection
 ALL_DATASETS = ["leanworkbook", "deepseek_prover", "numinamath"]
-parser.add_argument("--datasets", nargs="+", default=ALL_DATASETS, choices=ALL_DATASETS,
-                    help="which theorem datasets to sample from (default: all three)")
+parser.add_argument("--datasets", nargs="+", default=ALL_DATASETS, choices=ALL_DATASETS, help="which theorem datasets to sample from (default: all three)")
 parser.add_argument("--num-sampled-tactics", type=int, default=6)
 parser.add_argument("--num-simulations-collect", type=int, default=50)
 parser.add_argument("--num-simulations-eval", type=int, default=50)
@@ -141,7 +138,7 @@ replay_buffer = ReplayBuffer(window_size=args.replay_buffer_window_size, seed=ra
 theorems_sampler = TheoremsSampler(seed=rank_seed, datasets=args.datasets)
 
 # Build prover (also starts inference servers on worker ranks)
-lean_server_addrs = [s.strip() for s in args.lean_servers.split(",")]
+lean_server_addrs = [s if ":" in s else f"{s}:8000" for s in args.lean_servers]
 prover = build_prover(
     tactic_model=tactic_model,
     lean_server_addrs=lean_server_addrs,

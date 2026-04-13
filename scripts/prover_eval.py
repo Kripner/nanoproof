@@ -62,8 +62,8 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate a prover model on theorem proving benchmarks")
 
     parser.add_argument("--model-path", type=str, required=True)
-    parser.add_argument("--lean-servers", type=str, required=True,
-                        help="comma-separated Lean server addresses (e.g., '10.10.25.33:8000')")
+    parser.add_argument("--lean-servers", type=str, nargs="+", required=True,
+                        help="Lean server addresses (e.g., 10.10.25.33:8000 10.10.25.34); port defaults to 8000")
     parser.add_argument("--datasets", type=str, default="minif2f",
                         help="comma-separated datasets (minif2f, leanworkbook)")
     parser.add_argument("--split", type=str, default="valid", choices=["valid", "test"])
@@ -143,7 +143,7 @@ def main():
     inner_tactic_model = TacticModel.create(num_samples=6, model_path=args.model_path)
     tactic_model = BlockingTacticModel(inner_model=inner_tactic_model, timeout_seconds=0.2, max_batch_tokens=8000)
 
-    lean_server_addrs = [s.strip() for s in args.lean_servers.split(",")]
+    lean_server_addrs = [s if ":" in s else f"{s}:8000" for s in args.lean_servers]
     prover = build_prover(
         tactic_model=tactic_model,
         lean_server_addrs=lean_server_addrs,
