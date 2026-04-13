@@ -2,7 +2,6 @@
 Prover: runs MCTS proof searches for experience collection and evaluation.
 
 Components:
-- ``TheoremsSampler``: weighted sampler over configured training datasets.
 - ``Prover``: stateless, thread-safe single-theorem proof search via MCTS.
 - ``ProverWorker``: manages parallel proof search with actor threads. Provides
   ``collect()`` and ``evaluate()`` for the training loop.
@@ -10,7 +9,6 @@ Components:
 
 import asyncio
 import logging
-import random
 import threading
 import time
 import traceback
@@ -26,8 +24,8 @@ from nanoproof.common import (
     theorem_to_example,
 )
 from nanoproof.cli import get_monitor, log
-from nanoproof.data.rl import deepseek_prover, leanworkbook, numinamath
-from nanoproof.replay_buffer import (
+from nanoproof.experience_collection import (
+    TheoremsSampler,
     ReplayBuffer,
     compute_value_target,
     extract_transitions,
@@ -40,40 +38,6 @@ logger = logging.getLogger(__name__)
 
 import json as json_mod
 from urllib.request import urlopen
-
-
-# -----------------------------------------------------------------------------
-# Theorem sampler
-# -----------------------------------------------------------------------------
-
-class TheoremsSampler:
-    """Samples theorems for experience collection from multiple datasets.
-
-    Samples uniformly at random from one of the available datasets, then
-    uniformly at random from that dataset. Thread-safe.
-    """
-
-    ALL_DATASETS = {
-        "leanworkbook": lambda: leanworkbook.list_theorems(split="train"),
-        "deepseek_prover": lambda: deepseek_prover.list_theorems(split="train"),
-        "numinamath": lambda: numinamath.list_theorems(split="train"),
-    }
-
-    def __init__(self, seed: int | None = 0, datasets: list[str] | None = None):
-        if datasets is None:
-            datasets = list(self.ALL_DATASETS.keys())
-        self.datasets = {name: self.ALL_DATASETS[name]() for name in datasets}
-        self.dataset_names = list(self.datasets.keys())
-        self.rng = random.Random(seed)
-        self._lock = threading.Lock()
-
-        for name, theorems in self.datasets.items():
-            log(f"Loaded {len(theorems)} theorems from {name}", component="Sampler")
-
-    def sample_theorem(self) -> str:
-        with self._lock:
-            dataset_name = self.rng.choice(self.dataset_names)
-            return self.rng.choice(self.datasets[dataset_name])
 
 
 # -----------------------------------------------------------------------------

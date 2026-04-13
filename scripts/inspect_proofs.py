@@ -11,7 +11,7 @@ from leantree.repl_adapter.server import LeanClient
 
 from nanoproof.common import linearize_proof, format_linearized_proof
 from nanoproof.search import Node, revive_tree_states
-from nanoproof.replay_buffer import prune_redundant_nodes, compute_value_target
+from nanoproof.experience_collection import prune_redundant_nodes, compute_value_target
 
 MINIF2F_IMPORTS = """
 import Mathlib

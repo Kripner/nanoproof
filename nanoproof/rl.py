@@ -22,8 +22,8 @@ from nanoproof.checkpoints import load_model, save_checkpoint, save_eval_results
 from nanoproof.engine import Engine
 from nanoproof.data.sft.leantree import leantree_transitions
 from nanoproof.data.sft.leantree_dataloader import rl_data_generator
-from nanoproof.replay_buffer import ReplayBuffer
-from nanoproof.prover import TheoremsSampler, ProverWorker
+from nanoproof.experience_collection import ReplayBuffer, TheoremsSampler
+from nanoproof.prover import ProverWorker
 from nanoproof.inference import setup_distributed_inference
 from nanoproof.inference import TacticModel, BlockingTacticModel
 from nanoproof.optim import optimizer_to_cpu, optimizer_to_gpu

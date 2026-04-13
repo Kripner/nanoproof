@@ -1,7 +1,8 @@
 """
-Replay buffer + proof-tree → transitions pipeline.
+Experience collection: replay buffer, theorem sampling, and proof-tree → transitions pipeline.
 
 This module owns:
+- TheoremsSampler: weighted sampler over configured training datasets.
 - ReplayBuffer: thread-safe DDP-aware buffer of (context, tactic, value_target) transitions
 - compute_value_target: assigns regression targets to nodes of a solved proof tree
 - extract_transitions: walks a solved proof tree and yields training transitions
@@ -16,8 +17,44 @@ import threading
 
 import torch.distributed as dist
 
+from nanoproof.cli import log
 from nanoproof.common import get_dist_info, Player, GLOBAL_CONFIG
+from nanoproof.data.rl import deepseek_prover, leanworkbook, numinamath
 from nanoproof.search import Node, execute_tree
+
+
+# -----------------------------------------------------------------------------
+# Theorem sampler
+# -----------------------------------------------------------------------------
+
+class TheoremsSampler:
+    """Samples theorems for experience collection from multiple datasets.
+
+    Samples uniformly at random from one of the available datasets, then
+    uniformly at random from that dataset. Thread-safe.
+    """
+
+    ALL_DATASETS = {
+        "leanworkbook": lambda: leanworkbook.list_theorems(split="train"),
+        "deepseek_prover": lambda: deepseek_prover.list_theorems(split="train"),
+        "numinamath": lambda: numinamath.list_theorems(split="train"),
+    }
+
+    def __init__(self, seed: int | None = 0, datasets: list[str] | None = None):
+        if datasets is None:
+            datasets = list(self.ALL_DATASETS.keys())
+        self.datasets = {name: self.ALL_DATASETS[name]() for name in datasets}
+        self.dataset_names = list(self.datasets.keys())
+        self.rng = random.Random(seed)
+        self._lock = threading.Lock()
+
+        for name, theorems in self.datasets.items():
+            log(f"Loaded {len(theorems)} theorems from {name}", component="Sampler")
+
+    def sample_theorem(self) -> str:
+        with self._lock:
+            dataset_name = self.rng.choice(self.dataset_names)
+            return self.rng.choice(self.datasets[dataset_name])
 
 
 class ReplayBuffer:
