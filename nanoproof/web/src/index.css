@@ -740,6 +740,22 @@ body {
 
 .lean-compact-bars {
   margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lean-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.lean-bar-label {
+  font-size: 9px;
+  color: var(--text-muted);
+  width: 24px;
+  flex-shrink: 0;
 }
 
 .lean-bar-tiny {
@@ -747,6 +763,7 @@ body {
   background: var(--bg-primary);
   border-radius: 1px;
   overflow: hidden;
+  flex: 1;
 }
 
 .lean-stats {

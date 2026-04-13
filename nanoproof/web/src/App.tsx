@@ -140,13 +140,15 @@ function App() {
             evalHistory={state.eval_history}
           />
           
-          <div className="card">
-            <div className="card-title">Provers</div>
-            <ProverGrid
-              localActors={state.local_actors}
-              onActorClick={handleActorClick}
-            />
-          </div>
+          {Object.keys(state.local_actors).length > 0 && (
+            <div className="card">
+              <div className="card-title">Provers</div>
+              <ProverGrid
+                localActors={state.local_actors}
+                onActorClick={handleActorClick}
+              />
+            </div>
+          )}
 
           <LeanServerPanel server={state.lean_server} servers={state.lean_servers} />
         </div>

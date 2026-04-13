@@ -52,11 +52,32 @@ function SingleLeanServer({ server, compact = false }: { server: LeanServerStatu
           </div>
         </div>
         <div className="lean-compact-bars">
-          <div className="lean-bar-tiny">
-            <div 
-              className={`lean-bar-fill ${processUtilization > 80 ? 'high' : processUtilization > 50 ? 'medium' : 'low'}`}
-              style={{ width: `${processUtilization}%` }}
-            />
+          <div className="lean-bar-row">
+            <span className="lean-bar-label">Proc</span>
+            <div className="lean-bar-tiny">
+              <div
+                className={`lean-bar-fill ${processUtilization > 80 ? 'high' : processUtilization > 50 ? 'medium' : 'low'}`}
+                style={{ width: `${processUtilization}%` }}
+              />
+            </div>
+          </div>
+          <div className="lean-bar-row">
+            <span className="lean-bar-label">CPU</span>
+            <div className="lean-bar-tiny">
+              <div
+                className={`lean-bar-fill ${avgCpu > 80 ? 'high' : avgCpu > 50 ? 'medium' : 'low'}`}
+                style={{ width: `${avgCpu}%` }}
+              />
+            </div>
+          </div>
+          <div className="lean-bar-row">
+            <span className="lean-bar-label">RAM</span>
+            <div className="lean-bar-tiny">
+              <div
+                className={`lean-bar-fill ${server.ram_percent > 80 ? 'high' : server.ram_percent > 50 ? 'medium' : 'low'}`}
+                style={{ width: `${server.ram_percent}%` }}
+              />
+            </div>
           </div>
         </div>
       </div>
