@@ -85,11 +85,7 @@ def main():
     args = parser.parse_args()
 
     if args.verbose:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s", datefmt="%H:%M:%S"))
-        nanoproof_logger = logging.getLogger("nanoproof")
-        nanoproof_logger.setLevel(logging.DEBUG)
-        nanoproof_logger.addHandler(handler)
+        logging.getLogger("nanoproof").setLevel(logging.DEBUG)
 
     if args.force and args.continue_eval:
         parser.error("--force and --continue are mutually exclusive")

@@ -93,12 +93,7 @@ args = parser.parse_args()
 user_config = vars(args).copy()
 
 if args.verbose:
-    import logging
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s", datefmt="%H:%M:%S"))
-    nanoproof_logger = logging.getLogger("nanoproof")
-    nanoproof_logger.setLevel(logging.DEBUG)
-    nanoproof_logger.addHandler(handler)
+    logging.getLogger("nanoproof").setLevel(logging.DEBUG)
 
 
 # -----------------------------------------------------------------------------
