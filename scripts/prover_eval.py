@@ -28,7 +28,7 @@ from nanoproof.common import active_barrier_master, active_barrier_wait, autodet
 from nanoproof.data.bench import minif2f
 from nanoproof.data.rl import leanworkbook
 from nanoproof.inference import BlockingTacticModel, TacticModel
-from nanoproof.prover import build_prover
+from nanoproof.prover import Prover, setup_distributed_inference
 
 # TODO: during verification, maybe set 'set_option maxHeartbeats 0\nset_option maxRecDepth 100000'
 
@@ -138,19 +138,14 @@ def main():
         compute_cleanup()
         sys.exit(1)
 
-    # Load model + build prover (same as rl.py)
+    # Load model + set up inference
     print0(f"Loading checkpoint: {checkpoint_info.checkpoint_dir}, step={checkpoint_info.step}")
     inner_tactic_model = TacticModel.create(num_samples=6, model_path=args.model_path)
     tactic_model = BlockingTacticModel(inner_model=inner_tactic_model, timeout_seconds=0.2, max_batch_tokens=8000)
 
     lean_server_addrs = [s if ":" in s else f"{s}:8000" for s in args.lean_servers]
-    prover = build_prover(
-        tactic_model=tactic_model,
-        lean_server_addrs=lean_server_addrs,
-        num_simulations_collect=args.num_simulations,
-        num_simulations_eval=args.num_simulations,
-        inference_server_port=args.inference_server_port,
-    )
+    balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
+    prover = Prover(balancer, lean_server_addrs) if balancer else None
 
     if ddp:
         dist.barrier()
@@ -179,7 +174,7 @@ def main():
     if master_process:
         for dataset_name, theorems in dataset_theorems.items():
             print0(f"\nEvaluating on {len(theorems)} theorems from {dataset_name}")
-            results = prover.evaluate(theorems, dataset_name=dataset_name)
+            results = prover.evaluate(theorems, dataset_name=dataset_name, num_simulations=args.num_simulations)
             all_results[dataset_name] = results
             print_results(results, dataset_name)
 

@@ -18,11 +18,10 @@ from leantree.core.lean import LeanGoal
 from nanoproof.common import compute_init, compute_cleanup, get_base_dir, DummyWandb, autodetect_device_type, SimpleTimer, flush, create_run_dirs, active_barrier_master, active_barrier_wait
 from nanoproof.checkpoints import load_model, save_checkpoint, save_eval_results_to_run_dir
 from nanoproof.engine import Engine
-from nanoproof.search import SearchConfig
 from nanoproof.data.sft.leantree import leantree_transitions
 from nanoproof.data.sft.leantree_dataloader import rl_data_generator
 from nanoproof.replay_buffer import ReplayBuffer
-from nanoproof.prover import TheoremsSampler, Prover, build_prover
+from nanoproof.prover import TheoremsSampler, Prover, setup_distributed_inference
 from nanoproof.inference import TacticModel, BlockingTacticModel
 from nanoproof.optim import optimizer_to_cpu, optimizer_to_gpu
 from nanoproof.data.bench import minif2f
@@ -137,15 +136,10 @@ rank_seed = args.seed + ddp_rank
 replay_buffer = ReplayBuffer(window_size=args.replay_buffer_window_size, seed=rank_seed)
 theorems_sampler = TheoremsSampler(seed=rank_seed, datasets=args.datasets)
 
-# Build prover (also starts inference servers on worker ranks)
+# Set up distributed inference (starts servers on worker ranks, builds balancer on master)
 lean_server_addrs = [s if ":" in s else f"{s}:8000" for s in args.lean_servers]
-prover = build_prover(
-    tactic_model=tactic_model,
-    lean_server_addrs=lean_server_addrs,
-    num_simulations_collect=args.num_simulations_collect,
-    num_simulations_eval=args.num_simulations_eval,
-    inference_server_port=args.inference_server_port,
-)
+balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
+prover = Prover(balancer, lean_server_addrs) if balancer else None
 
 # Create the RL monitor (master only)
 rl_monitor = create_monitor(num_actors=0, enabled=master_process)
@@ -262,9 +256,9 @@ while True:
             leanworkbook_theorems = leanworkbook.list_theorems(split="valid")[:128]
 
             log(f"Evaluating on {len(minif2f_theorems)} theorems from MiniF2F", component="Eval")
-            minif2f_results = prover.evaluate(minif2f_theorems, dataset_name="MiniF2F")
+            minif2f_results = prover.evaluate(minif2f_theorems, dataset_name="MiniF2F", num_simulations=args.num_simulations_eval)
             log(f"Evaluating on {len(leanworkbook_theorems)} theorems from LeanWorkBook", component="Eval")
-            leanworkbook_results = prover.evaluate(leanworkbook_theorems, dataset_name="LeanWorkBook")
+            leanworkbook_results = prover.evaluate(leanworkbook_theorems, dataset_name="LeanWorkBook", num_simulations=args.num_simulations_eval)
 
             rl_monitor.record_eval(step, "MiniF2F", minif2f_results['success_rate'],
                                    minif2f_results['solved'], minif2f_results['total'], minif2f_results['errors'])
@@ -326,7 +320,7 @@ while True:
             rl_monitor.set_step(step)
 
             if master_process:
-                prover.collect(theorems_sampler, args.collect_transitions, replay_buffer)
+                prover.collect(theorems_sampler, args.collect_transitions, replay_buffer, num_simulations=args.num_simulations_collect)
 
             model.train()
             timer.end("collect")

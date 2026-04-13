@@ -7,8 +7,8 @@ Components:
   actor thread gets a dedicated ``LeanClient`` connection (1:1 mapping).
 - ``Prover``: high-level API used by the training loop. Manages a
   ``ProverWorker`` for both collection and evaluation.
-- ``query_lean_servers``: queries remote Lean servers for available process
-  counts and builds the per-actor server assignment.
+- ``setup_distributed_inference``: starts inference servers on DDP worker
+  ranks and builds an ``InferenceBalancer`` on the master rank.
 """
 
 import asyncio
@@ -366,15 +366,12 @@ class Prover:
 
     def __init__(
         self,
-        config: SearchConfig,
-        tactic_model,  # BlockingTacticModel | InferenceBalancer
-        lean_servers: list[tuple[str, int]],
-        num_simulations_eval: int,
+        tactic_model,  # TacticModel | BlockingTacticModel | InferenceBalancer
+        lean_server_addrs: list[str],
     ):
-        self.config = config
         self.tactic_model = tactic_model
-        self.lean_servers = lean_servers  # one (host, port) per actor
-        self.num_simulations_eval = num_simulations_eval
+        lean_server_info = query_lean_servers(lean_server_addrs)
+        self.lean_servers = assign_lean_servers(lean_server_info)
 
     @torch.no_grad()
     def collect(
@@ -382,6 +379,7 @@ class Prover:
         sampler: TheoremsSampler,
         target_transitions: int,
         replay_buffer: ReplayBuffer,
+        num_simulations: int,
     ) -> int:
         """Collect transitions into replay_buffer.local_buffer.
 
@@ -410,8 +408,9 @@ class Prover:
             if monitor is not None:
                 monitor.record_transitions(transitions)
 
+        config = SearchConfig(num_simulations=num_simulations)
         worker = ProverWorker(
-            config=self.config,
+            config=config,
             tactic_model=self.tactic_model,
             lean_servers=self.lean_servers,
             get_theorem=get_theorem,
@@ -455,7 +454,7 @@ class Prover:
         return len(replay_buffer.local_buffer)
 
     @torch.no_grad()
-    def evaluate(self, theorems: list[str], dataset_name: str) -> dict:
+    def evaluate(self, theorems: list[str], dataset_name: str, num_simulations: int) -> dict:
         """Evaluate theorems using MCTS. Returns metrics dict."""
         monitor = get_monitor()
 
@@ -463,7 +462,7 @@ class Prover:
             monitor.start_eval(dataset_name, len(theorems))
 
         eval_config = SearchConfig(
-            num_simulations=self.num_simulations_eval,
+            num_simulations=num_simulations,
             num_actors=len(self.lean_servers),
         )
 
@@ -557,49 +556,31 @@ class Prover:
 
 
 # -----------------------------------------------------------------------------
-# build_prover: shared setup for rl.py and prover_eval.py
+# Distributed inference setup
 # -----------------------------------------------------------------------------
 
-def build_prover(
+def setup_distributed_inference(
     tactic_model: BlockingTacticModel,
-    lean_server_addrs: list[str],
-    num_simulations_collect: int,
-    num_simulations_eval: int,
     inference_server_port: int,
-) -> "Prover":
-    """Build the Prover + InferenceBalancer for the master rank.
+) -> InferenceBalancer | None:
+    """Set up distributed inference across DDP ranks.
 
-    On worker ranks, starts an inference server (daemon thread) and returns None.
-    On the master rank, builds an InferenceBalancer across all GPUs and a Prover
-    with one actor per available Lean process.
+    Workers start inference servers (daemon threads). Master builds an
+    InferenceBalancer that load-balances across all GPUs (local in-process
+    for rank 0, HTTP for ranks 1+).
 
-    Must be called by ALL DDP ranks (workers start their inference server here).
+    Returns the balancer on master, None on workers.
+    Must be called by ALL DDP ranks.
     """
     ddp, rank, _, world_size = get_dist_info()
-    master = rank == 0
 
-    # Worker ranks: start inference server
-    if not master:
+    if rank != 0:
         port = inference_server_port + 1 + rank
         start_inference_server(tactic_model, port)
+        return None
 
-    # Query lean servers and build assignments
-    lean_server_info = query_lean_servers(lean_server_addrs)
-    lean_assignments = assign_lean_servers(lean_server_info)
-
-    prover = None
-    if master:
-        remote_endpoints = [
-            f"127.0.0.1:{inference_server_port + 1 + r}"
-            for r in range(1, world_size)
-        ]
-        balancer = InferenceBalancer(tactic_model, remote_endpoints)
-        config = SearchConfig(num_simulations=num_simulations_collect)
-        prover = Prover(
-            config=config,
-            tactic_model=balancer,
-            lean_servers=lean_assignments,
-            num_simulations_eval=num_simulations_eval,
-        )
-
-    return prover
+    remote_endpoints = [
+        f"127.0.0.1:{inference_server_port + 1 + r}"
+        for r in range(1, world_size)
+    ]
+    return InferenceBalancer(tactic_model, remote_endpoints)
