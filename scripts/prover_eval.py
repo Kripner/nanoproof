@@ -15,7 +15,8 @@ import atexit
 import os
 import sys
 
-from tqdm import tqdm
+import threading
+import time
 
 import torch
 import torch.distributed as dist
@@ -183,21 +184,31 @@ def main():
         for dataset_name, theorems in dataset_theorems.items():
             print0(f"\nEvaluating on {len(theorems)} theorems from {dataset_name}")
             total = len(theorems)
-            bar_started = tqdm(total=total, desc="started", position=0)
-            bar_finished = tqdm(total=total, desc="finished", position=1)
+            latest = [0, 0, 0, 0]  # started, finished, solved, errors
+            printed = list(latest)
+            lock = threading.Lock()
+            done = threading.Event()
 
             def progress_callback(started, finished, solved, errors):
-                bar_started.n = started
-                bar_started.set_postfix_str(f"{started}/{total}")
-                bar_started.refresh()
-                bar_finished.n = finished
-                bar_finished.set_postfix_str(f"solved={solved} err={errors}")
-                bar_finished.refresh()
+                with lock:
+                    latest[:] = [started, finished, solved, errors]
+
+            def printer_loop():
+                while not done.wait(timeout=1.0):
+                    with lock:
+                        snap = list(latest)
+                    if snap != printed:
+                        printed[:] = snap
+                        s, f, ok, err = snap
+                        print0(f"  started={s}/{total}  finished={f}/{total}  solved={ok}  errors={err}")
+
+            printer = threading.Thread(target=printer_loop, daemon=True)
+            printer.start()
 
             results = prover.evaluate(theorems, dataset_name=dataset_name, num_simulations=args.num_simulations,
                                       progress_callback=progress_callback)
-            bar_started.close()
-            bar_finished.close()
+            done.set()
+            printer.join()
             all_results[dataset_name] = results
             print_results(results, dataset_name, args.num_simulations)
 
