@@ -6,6 +6,7 @@ import sys
 import argparse
 import random
 import time
+import uuid
 from dataclasses import asdict
 
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
@@ -230,6 +231,7 @@ if ddp:
     dist.barrier()
 
 # Go!
+barrier_nonce = uuid.uuid4().hex[:8]
 step = 0
 minif2f_results = None
 leanworkbook_results = None
@@ -260,7 +262,7 @@ while True:
             log(f"Step {step:05d} | Tactic full acc: {tactic_results['full_acc']:.4%} | Tactic first acc: {tactic_results['first_token_acc']:.4%} | Critic argmax MSE: {critic_results['argmax_mse']:.4f} | Critic soft MSE: {critic_results['soft_mse']:.4f}", component="Eval")
             log(f"  Entropy - Tactic first: {tactic_results['first_token_entropy']:.4f} | Tactic all: {tactic_results['all_tokens_entropy']:.4f} | Critic: {critic_results['entropy']:.4f}", component="Eval")
 
-        # Prover evaluation + collection (rank 0 only).
+        # Prover evaluation (rank 0 only).
         # Worker ranks poll via active_barrier so their inference servers stay responsive.
         if master_process:
             minif2f_theorems = minif2f.list_theorems(split="valid")
@@ -301,6 +303,12 @@ while True:
 
             save_eval_results_to_run_dir(output_dir, step, "minif2f", minif2f_results)
             save_eval_results_to_run_dir(output_dir, step, "leanworkbook", leanworkbook_results)
+
+            if ddp:
+                active_barrier_master(f"prover_eval_{barrier_nonce}_{step}")
+        else:
+            if ddp:
+                active_barrier_wait(f"prover_eval_{barrier_nonce}_{step}")
 
         model.train()
         timer.end("eval")
