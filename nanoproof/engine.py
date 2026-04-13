@@ -259,7 +259,8 @@ class Engine:
         all_logits = [[None] * len(p) for p in prompts for _ in range(num_samples)] if return_logits else None
         completed = [False] * len(results)
 
-        for gen_output in self.generate(tokens, num_samples, return_logits=return_logits, **kwargs):
+        gen = self.generate(tokens, num_samples, return_logits=return_logits, **kwargs)
+        for gen_output in gen:
             if return_logits:
                 token_column, token_masks, logits_batch = gen_output
             else:
@@ -281,6 +282,9 @@ class Engine:
                             all_logits[i].append(logits_batch[i])
             if all(completed):
                 break
+        # Explicitly close the generator to free the KV cache tensors immediately,
+        # rather than waiting for GC (which may not run before the next allocation).
+        gen.close()
 
         if is_batched:
             results = [results[i * num_samples:(i + 1) * num_samples] for i in range(len(prompts))]

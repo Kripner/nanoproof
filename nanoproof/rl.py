@@ -25,7 +25,7 @@ from nanoproof.data.sft.leantree_dataloader import rl_data_generator
 from nanoproof.experience_collection import ReplayBuffer, TheoremsSampler
 from nanoproof.prover import ProverWorker
 from nanoproof.inference import setup_distributed_inference
-from nanoproof.inference import TacticModel, BlockingTacticModel
+from nanoproof.inference import TacticModel, BlockingTacticModel, compute_max_batch_prompt_tokens
 from nanoproof.optim import optimizer_to_cpu, optimizer_to_gpu
 from nanoproof.data.bench import minif2f
 from nanoproof.data.rl import leanworkbook
@@ -71,6 +71,8 @@ parser.add_argument("--replay-buffer-window-size", type=int, default=60_000_000)
 parser.add_argument("--batch-time-limit", type=float, default=0.5)
 parser.add_argument("--batch-max-gen-samples", type=int, default=None,
                     help="max generation samples per batch (default: num_actors * num_sampled_tactics)")
+parser.add_argument("--batch-max-prompt-tokens", type=int, default=None,
+                    help="max estimated prompt tokens per batch (default: auto from VRAM)")
 
 # Training
 parser.add_argument("--device-batch-size", type=int, default=8)
@@ -153,10 +155,22 @@ if balancer:
     log0(f"Batch max gen samples: {max_gen_samples} ({prover.num_actors} actors * {args.num_sampled_tactics} samples)", component="Config")
 else:
     prover = None
-# Broadcast max_gen_samples from master to worker ranks so their Flask servers
-# can batch correctly (workers don't have a ProverWorker to compute it from).
+
+# Prompt token limit for inference batches (prevents OOM on long prompts)
+max_prompt_tokens = args.batch_max_prompt_tokens
+if max_prompt_tokens is None:
+    max_prompt_tokens = compute_max_batch_prompt_tokens(model.config, args.num_sampled_tactics, device)
+    log0(f"Batch max prompt tokens: {max_prompt_tokens} (auto from {torch.cuda.get_device_properties(device).total_memory / 1024**3:.1f} GiB VRAM, {torch.cuda.memory_allocated(device) / 1024**3:.1f} GiB used)", component="Config")
+else:
+    log0(f"Batch max prompt tokens: {max_prompt_tokens} (manual)", component="Config")
+tactic_model.max_batch_prompt_tokens = max_prompt_tokens
+
+# Broadcast max_gen_samples and max_batch_prompt_tokens from master to worker
+# ranks so their Flask servers can batch correctly (workers don't have a
+# ProverWorker to compute it from).
 if ddp:
     tactic_model.max_gen_samples = broadcast_value(tactic_model.max_gen_samples)
+    tactic_model.max_batch_prompt_tokens = broadcast_value(tactic_model.max_batch_prompt_tokens)
 
 # Create the RL monitor (master only)
 rl_monitor = create_monitor(num_actors=0, enabled=master_process)

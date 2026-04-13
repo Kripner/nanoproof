@@ -183,6 +183,28 @@ class TacticModel:
         return cls(model, tokenizer, engine, num_samples=num_samples, seed=seed)
 
 
+def compute_max_batch_prompt_tokens(model_config, num_samples: int, device: torch.device) -> int:
+    """Compute max_batch_prompt_tokens from available VRAM.
+
+    The main memory consumer during batched inference is the KV cache, allocated as:
+        2 (k+v) * n_layers * total_rows * kv_seq_len * n_kv_head * head_dim * dtype_bytes
+
+    where total_rows = N_states * num_samples and kv_seq_len ~ max_prompt_len + max_gen_tokens.
+    We approximate total memory as proportional to sum_of_prompt_tokens * num_samples,
+    and set the limit so the KV cache fits in available VRAM with headroom for activations.
+    """
+    total_vram = torch.cuda.get_device_properties(device).total_memory
+    already_used = torch.cuda.memory_allocated(device)
+    # Use 80% of remaining VRAM for KV cache; the rest covers activations,
+    # prefill/decode KV cache overlap, and allocator fragmentation.
+    available = (total_vram - already_used) * 0.80
+    dtype_bytes = 2  # bf16/fp16
+    head_dim = model_config.n_embd // model_config.n_head
+    kv_bytes_per_token = 2 * model_config.n_layer * model_config.n_kv_head * head_dim * dtype_bytes
+    max_tokens = int(available / (num_samples * kv_bytes_per_token))
+    return max(1, max_tokens)
+
+
 class BlockingTacticModel:
     """
     Thread-safe wrapper around TacticModel that batches LLM calls from multiple threads.
@@ -194,10 +216,15 @@ class BlockingTacticModel:
     Each request generates both tactics and value prediction together.
     """
 
-    def __init__(self, inner_model: TacticModel, timeout_seconds: float, max_gen_samples: int | None):
+    # Rough estimate: ~3.5 characters per token for math/code proof states.
+    CHARS_PER_TOKEN = 3.5
+
+    def __init__(self, inner_model: TacticModel, timeout_seconds: float, max_gen_samples: int | None,
+                 max_batch_prompt_tokens: int | None = None):
         self.inner_model = inner_model
         self.timeout_seconds = timeout_seconds
         self.max_gen_samples = max_gen_samples
+        self.max_batch_prompt_tokens = max_batch_prompt_tokens
 
         # Synchronization primitives
         self._lock = threading.Lock()
@@ -329,9 +356,26 @@ class BlockingTacticModel:
         batch_num = self._total_batches
 
         # Take items up to max_gen_samples limit to avoid OOM
-        max_items = self.max_gen_samples // self.inner_model.num_samples
+        if self.max_gen_samples is not None:
+            max_items = self.max_gen_samples // self.inner_model.num_samples
+        else:
+            max_items = len(self._pending)
         batch = self._pending[:max(1, max_items)]
-        remaining = self._pending[max(1, max_items):]
+
+        # Further limit by prompt tokens: the KV cache memory scales with
+        # N_rows * max_prompt_len, so we cap total estimated prompt tokens
+        # to prevent OOM on batches with long prompts.
+        if self.max_batch_prompt_tokens is not None and len(batch) > 1:
+            total_tokens = 0
+            cut = len(batch)
+            for i, (state_str, _, _) in enumerate(batch):
+                total_tokens += max(1, int(len(state_str) / self.CHARS_PER_TOKEN))
+                if total_tokens > self.max_batch_prompt_tokens:
+                    cut = max(1, i)
+                    break
+            batch = batch[:cut]
+
+        remaining = self._pending[len(batch):]
 
         self._pending = remaining
         self._first_request_time = time.time() if remaining else None
