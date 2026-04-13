@@ -194,7 +194,7 @@ class BlockingTacticModel:
     Each request generates both tactics and value prediction together.
     """
 
-    def __init__(self, inner_model: TacticModel, timeout_seconds: float, max_gen_samples: int):
+    def __init__(self, inner_model: TacticModel, timeout_seconds: float, max_gen_samples: int | None):
         self.inner_model = inner_model
         self.timeout_seconds = timeout_seconds
         self.max_gen_samples = max_gen_samples

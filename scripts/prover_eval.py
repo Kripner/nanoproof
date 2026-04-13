@@ -74,9 +74,9 @@ def main():
     parser.add_argument("--max-theorems", type=int, default=None)
     parser.add_argument("--num-simulations", type=int, default=512)
     parser.add_argument("--num-sampled-tactics", type=int, default=6)
-    parser.add_argument("--batch-timeout", type=float, default=0.5)
-    parser.add_argument("--max-gen-samples", type=int, default=384,
-                        help="max generation samples per batch (states * num_sampled_tactics)")
+    parser.add_argument("--batch-time-limit", type=float, default=0.5)
+    parser.add_argument("--batch-max-gen-samples", type=int, default=None,
+                        help="max generation samples per batch (default: num_actors * num_sampled_tactics)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--force", action="store_true", help="overwrite existing results")
     parser.add_argument("--continue", dest="continue_eval", action="store_true",
@@ -153,11 +153,15 @@ def main():
     # Load model + set up inference
     print0(f"Loading checkpoint: {checkpoint_info.checkpoint_dir}, step={checkpoint_info.step}")
     inner_tactic_model = TacticModel.create(num_samples=args.num_sampled_tactics, model_path=args.model_path)
-    tactic_model = BlockingTacticModel(inner_model=inner_tactic_model, timeout_seconds=args.batch_timeout, max_gen_samples=args.max_gen_samples)
+    # Defer max_gen_samples default until we know num_actors
+    tactic_model = BlockingTacticModel(inner_model=inner_tactic_model, timeout_seconds=args.batch_time_limit, max_gen_samples=None)
 
     balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
     if balancer:
         prover = ProverWorker(balancer, args.lean_servers)
+        max_gen_samples = args.batch_max_gen_samples or prover.num_actors * args.num_sampled_tactics
+        tactic_model.max_gen_samples = max_gen_samples
+        print0(f"Batch max gen samples: {max_gen_samples} ({prover.num_actors} actors * {args.num_sampled_tactics} samples)")
     else:
         prover = None
 

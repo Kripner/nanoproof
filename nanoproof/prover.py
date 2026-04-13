@@ -436,7 +436,10 @@ class ProverWorker:
                         break
 
                 if not skip_report:
-                    logger.debug(f"Actor {actor_id}: {theorem_id} {'solved' if game and game.root and game.root.is_solved else 'unsolved'} in {game.num_iterations if game else 0} iters")
+                    is_solved = game and game.root and game.root.is_solved
+                    logger.debug(f"Actor {actor_id}: {theorem_id} {'solved' if is_solved else 'unsolved'} in {game.num_iterations if game else 0} iters")
+                    if is_solved:
+                        logger.debug(f"Actor {actor_id}: proof tree for {theorem_id}:\n{game.root.pp_tree()}")
                     if game is not None and game.root is not None:
                         with stats_lock:
                             games_played[0] += 1

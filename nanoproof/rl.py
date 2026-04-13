@@ -67,9 +67,9 @@ parser.add_argument("--num-simulations-eval", type=int, default=50)
 parser.add_argument("--collect-every", type=int, default=1)
 parser.add_argument("--collect-transitions", type=int, default=100)
 parser.add_argument("--replay-buffer-window-size", type=int, default=60_000_000)
-parser.add_argument("--batch-timeout", type=float, default=0.5)
-parser.add_argument("--max-gen-samples", type=int, default=384,
-                    help="max generation samples per batch (states * num_sampled_tactics)")
+parser.add_argument("--batch-time-limit", type=float, default=0.5)
+parser.add_argument("--batch-max-gen-samples", type=int, default=None,
+                    help="max generation samples per batch (default: num_actors * num_sampled_tactics)")
 
 # Training
 parser.add_argument("--device-batch-size", type=int, default=8)
@@ -122,8 +122,8 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-r
 inner_tactic_model = TacticModel.create(num_samples=args.num_sampled_tactics, model_path=args.model_path)
 tactic_model = BlockingTacticModel(
     inner_model=inner_tactic_model,
-    timeout_seconds=args.batch_timeout,
-    max_gen_samples=args.max_gen_samples,
+    timeout_seconds=args.batch_time_limit,
+    max_gen_samples=None,  # resolved after ProverWorker init
 )
 model = tactic_model.network
 
@@ -147,6 +147,9 @@ theorems_sampler = TheoremsSampler(seed=rank_seed, datasets=args.datasets)
 balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
 if balancer:
     prover = ProverWorker(balancer, args.lean_servers)
+    max_gen_samples = args.batch_max_gen_samples or prover.num_actors * args.num_sampled_tactics
+    tactic_model.max_gen_samples = max_gen_samples
+    log0(f"Batch max gen samples: {max_gen_samples} ({prover.num_actors} actors * {args.num_sampled_tactics} samples)", component="Config")
 else:
     prover = None
 
