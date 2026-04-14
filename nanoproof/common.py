@@ -610,13 +610,17 @@ class DummyTimer(SimpleTimer):
     def gather(self) -> Self: return DummyTimer()
 
 
-def active_barrier(key: str, timeout: float = 300.0, poll_interval: float = 0.5) -> None:
+def active_barrier(key: str, timeout: float | None = 300.0, poll_interval: float = 0.5) -> None:
     """Rank-symmetric barrier over the distributed store.
 
     Does not use NCCL, so it never triggers the NCCL watchdog and leaves the
     Python thread in a sleep loop (Flask handler threads on worker ranks stay
     responsive). On timeout, dumps all-thread tracebacks on this rank and
     raises, turning silent rank desyncs into diagnosable failures.
+
+    Pass `timeout=None` to wait indefinitely, for phases whose duration is
+    genuinely unbounded (e.g. prover evaluation). Use a finite timeout for
+    transitions that are expected to be quick.
 
     No-op when DDP is not active.
     """
@@ -626,12 +630,12 @@ def active_barrier(key: str, timeout: float = 300.0, poll_interval: float = 0.5)
     store = dist.distributed_c10d._get_default_store()
     counter_key = f"active_barrier/{key}/count"
     store.add(counter_key, 1)
-    deadline = time.time() + timeout
+    deadline = None if timeout is None else time.time() + timeout
     while True:
         count = int(store.get(counter_key))
         if count >= world_size:
             return
-        if time.time() > deadline:
+        if deadline is not None and time.time() > deadline:
             faulthandler.dump_traceback()
             raise TimeoutError(
                 f"active_barrier({key}) timed out on rank {rank}: {count}/{world_size} ranks arrived"

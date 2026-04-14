@@ -333,7 +333,8 @@ while True:
             save_eval_results_to_run_dir(output_dir, step, "minif2f", minif2f_results)
             save_eval_results_to_run_dir(output_dir, step, "leanworkbook", leanworkbook_results)
 
-        active_barrier(f"prover_eval_{barrier_nonce}_{step}")
+        # Prover eval can take many minutes; no timeout (use SIGUSR1 to debug).
+        active_barrier(f"prover_eval_{barrier_nonce}_{step}", timeout=None)
 
         model.train()
         timer.end("eval")

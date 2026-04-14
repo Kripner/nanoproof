@@ -254,7 +254,9 @@ def main():
         total_elapsed = time.monotonic() - eval_start
         print0(f"\nTotal evaluation time: {total_elapsed:.1f}s")
 
-    active_barrier("prover_eval_done")
+    # Workers are blocked here for the entire master-side evaluation, which
+    # can take many minutes; no timeout (use SIGUSR1 to debug).
+    active_barrier("prover_eval_done", timeout=None)
 
     compute_cleanup()
     return all_results
