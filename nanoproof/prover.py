@@ -65,7 +65,7 @@ class Prover:
         logger.debug(f"Proving: {theorem[:80]}...")
         process = client.get_process()
         if process is None:
-            log(f"FAILED: Could not get Lean process for theorem", component="Collection")
+            log(f"FAILED: Could not get Lean process for theorem", component="Prover")
             return None
 
         with process as env:
@@ -77,7 +77,7 @@ class Prover:
             """)
             init_branch = env.proof_from_sorry(theorem_to_example(theorem))
             if not init_branch.is_success():
-                log(f"FAILED: Could not initialize proof - {init_branch.error if hasattr(init_branch, 'error') else 'unknown error'}", component="Collection")
+                log(f"FAILED: Could not initialize proof - {init_branch.error if hasattr(init_branch, 'error') else 'unknown error'}", component="Prover")
                 return None
             init_branch = init_branch.value
 
@@ -100,7 +100,7 @@ class Prover:
                 try:
                     verify_node(game.root)
                 except AssertionError as e:
-                    log(f"FAILED: Verification failed after {game.num_iterations} iterations: '{e}'\nTheorem: '{theorem}'\nProof tree:\n{game.root.pp_tree()}", component="Collection")
+                    log(f"FAILED: Verification failed after {game.num_iterations} iterations: '{e}'\nTheorem: '{theorem}'\nProof tree:\n{game.root.pp_tree()}", component="Prover")
                     game.root.is_solved = False
                     return game
                 game.unsimplified_root = game.root.clone()
@@ -113,7 +113,7 @@ class Prover:
                 tactics = linearize_proof(game.root)
                 proof_source = construct_proof_source(theorem, tactics)
                 if not env.is_valid_source(proof_source):
-                    log(f"FAILED: Linearized proof verification failed after {game.num_iterations} iterations:\n\"\"\"\n{proof_source}\n\"\"\"\n... proof tree:\n{game.root.pp_tree()}\n", component="Collection")
+                    log(f"FAILED: Linearized proof verification failed after {game.num_iterations} iterations:\n\"\"\"\n{proof_source}\n\"\"\"\n... proof tree:\n{game.root.pp_tree()}\n", component="Prover")
                     game.root.is_solved = False
 
             return game
@@ -380,7 +380,7 @@ class ProverWorker:
                     except (ConnectionResetError, ConnectionRefusedError, BrokenPipeError, LeanProcessException) as e:
                         if attempt < max_retries - 1:
                             set_thread_state(actor_id, "retry")
-                            log(f"[Actor {actor_id}] Connection error (attempt {attempt + 1}/{max_retries}): '{e}', reconnecting...", component="Collection")
+                            log(f"[Actor {actor_id}] Connection error (attempt {attempt + 1}/{max_retries}): '{e}', reconnecting...", component="Prover")
                             time.sleep(1.0 * (attempt + 1))
                         else:
                             error = str(e)
@@ -396,7 +396,7 @@ class ProverWorker:
                             break
                         error = str(e)
                         consecutive_errors += 1
-                        log(f"[Actor {actor_id}] Error (lean={lean_address}:{lean_port}): {e}", component="Collection")
+                        log(f"[Actor {actor_id}] Error (lean={lean_address}:{lean_port}): {e}", component="Prover")
                         traceback.print_exc()
                         break
 
@@ -417,7 +417,7 @@ class ProverWorker:
                     on_result(theorem_id, theorem, game, error)
 
                 if consecutive_errors >= max_consecutive_errors:
-                    log(f"[Actor {actor_id}] Too many consecutive errors, exiting", component="Collection")
+                    log(f"[Actor {actor_id}] Too many consecutive errors, exiting", component="Prover")
                     break
 
             set_thread_state(actor_id, "idle")
@@ -435,7 +435,7 @@ class ProverWorker:
                 if done_check():
                     break
                 if all(not t.is_alive() for t in threads):
-                    log("WARNING: All actors have exited unexpectedly", component="Collection")
+                    log("WARNING: All actors have exited unexpectedly", component="Prover")
                     break
                 if poll_callback is not None:
                     poll_callback(get_thread_states())
@@ -447,5 +447,5 @@ class ProverWorker:
                 t.join(timeout=max(0.0, deadline - time.time()))
             alive = sum(1 for t in threads if t.is_alive())
             if alive:
-                log(f"WARNING: {alive}/{len(threads)} actor threads still alive after 60s", component="Collection")
+                log(f"WARNING: {alive}/{len(threads)} actor threads still alive after 60s", component="Prover")
                 faulthandler.dump_traceback()
