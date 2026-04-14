@@ -384,7 +384,14 @@ def optimizer_to_cpu(optimizer: torch.optim.Optimizer):
     """Move all optimizer state tensors to CPU.
 
     Call after optimizer.step() to free GPU memory for inference.
+
+    Uses non_blocking=True for the copy, then synchronizes. Without the sync,
+    the CUDA caching allocator keeps the source GPU tensors (~10+ GiB for a
+    large model with AdamW) alive until the background copy finishes, and
+    inference batches that start right after can OOM while the transfer is
+    still in flight.
     """
+    had_cuda_state = False
     for group in optimizer.param_groups:
         for p in group["params"]:
             state = optimizer.state.get(p)
@@ -393,6 +400,9 @@ def optimizer_to_cpu(optimizer: torch.optim.Optimizer):
             for key, val in state.items():
                 if isinstance(val, torch.Tensor) and val.is_cuda:
                     state[key] = val.to("cpu", non_blocking=True)
+                    had_cuda_state = True
+    if had_cuda_state:
+        torch.cuda.synchronize()
 
 
 def optimizer_to_gpu(optimizer: torch.optim.Optimizer, device: torch.device):
