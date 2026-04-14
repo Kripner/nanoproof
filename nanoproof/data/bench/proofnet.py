@@ -66,9 +66,17 @@ def list_theorems(split: str) -> list[BenchTheorem]:
     records = [r for r in _load_records() if r["split"] == split]
     theorems: list[BenchTheorem] = []
     for r in records:
-        # ``formal_statement`` ends with ``:=`` (no body); append a ``sorry``
-        # stub so it matches the minif2f shape and feeds ``proof_from_sorry``.
-        source = r["formal_statement"].rstrip() + "\n  sorry"
+        # Upstream ``formal_statement`` ends with ``:=`` (term-mode placeholder,
+        # no body). Emit tactic-mode ``:= by\n  sorry`` so the shape matches
+        # miniF2F exactly and we don't rely on leantree's ``:= sorry`` regex
+        # rewrite in ``_eliminate_sorry_without_by``.
+        stmt = r["formal_statement"].rstrip()
+        if stmt.endswith(":= by"):
+            source = stmt + "\n  sorry"
+        elif stmt.endswith(":="):
+            source = stmt + " by\n  sorry"
+        else:
+            raise ValueError(f"unexpected suffix in formal_statement for {r.get('name')!r}: {stmt!r}")
         header = _strip_import_mathlib(r["header"])
         theorems.append(BenchTheorem(source=source, header=header, name=r.get("name")))
     assert all(t.source.count("sorry") == 1 for t in theorems), "Found a theorem with no or multiple `sorry`."

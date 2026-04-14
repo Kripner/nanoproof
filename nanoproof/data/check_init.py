@@ -217,9 +217,11 @@ def run_check_init(
             results[h] = ok
             num_done[0] += 1
             n = num_done[0]
-            if not ok and verbose:
+            if not ok:
+                name = f" {theorem.name}" if theorem.name else ""
                 print(
-                    f"[{n}/{total}] FAILED ({h}): {err}\n"
+                    f"[{n}/{total}]{name} FAILED ({h}): {err}\n"
+                    f"--- header ---\n{theorem.header}\n"
                     f"--- theorem ---\n{theorem.source}\n",
                     flush=True,
                 )
