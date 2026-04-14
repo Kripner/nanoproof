@@ -8,7 +8,6 @@ import faulthandler
 import random
 import signal
 import time
-import uuid
 from dataclasses import asdict
 
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
@@ -260,7 +259,6 @@ if ddp:
     dist.barrier()
 
 # Go!
-barrier_nonce = uuid.uuid4().hex[:8]
 step = 0
 minif2f_results = None
 leanworkbook_results = None
@@ -334,7 +332,7 @@ while True:
             save_eval_results_to_run_dir(output_dir, step, "leanworkbook", leanworkbook_results)
 
         # Prover eval can take many minutes; no timeout (use SIGUSR1 to debug).
-        active_barrier(f"prover_eval_{barrier_nonce}_{step}", timeout=None)
+        active_barrier(f"prover_eval_{step}", timeout=None)
 
         model.train()
         timer.end("eval")
