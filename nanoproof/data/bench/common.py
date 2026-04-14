@@ -19,14 +19,26 @@ class BenchTheorem:
     name: str | None = None
 
 
-# Shared preamble used by miniF2F and the RL datasets (leanworkbook,
-# deepseek_prover, numinamath). Uses ``open scoped`` instead of bare ``open``
-# so e.g. ``Nat.gcd`` is not pulled in as top-level ``gcd`` (which would
-# conflict with ``GCDMonoid.gcd`` from Mathlib and produce
+# miniF2F preamble. Mirrors the upstream Valid.lean header exactly. Uses
+# ``open scoped`` so e.g. ``Nat.gcd`` is not pulled in as top-level ``gcd``
+# (which would conflict with ``GCDMonoid.gcd`` from Mathlib and produce
 # "Ambiguous term: gcd" init failures).
 MINIF2F_HEADER = (
     "open scoped Real\n"
     "open scoped Nat\n"
     "open scoped Topology\n"
     "open scoped Polynomial"
+)
+
+# LeanWorkBook preamble. Matches InternLM's upstream header at
+# https://github.com/InternLM/InternLM-Math/blob/main/leanworkbook/header.lean
+# - unscoped opens for Nat/Real/Rat so bare identifiers like ``choose``,
+# ``factorial``, ``gcd``, ``log`` resolve without qualification. The
+# ``open scoped`` variant used by MINIF2F_HEADER would reject most of these
+# since LeanWorkBook theorems were generated against this header.
+LEANWORKBOOK_HEADER = (
+    "open BigOperators\n"
+    "open Nat\n"
+    "open Real\n"
+    "open Rat"
 )
