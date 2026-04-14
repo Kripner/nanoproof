@@ -300,16 +300,26 @@ class BlockingTacticModel:
             self._batch_ready.notify_all()
 
     def pause(self):
-        """Pause inference and wait for any in-progress batch to complete.
+        """Pause inference, drain pending and in-progress work, free the
+        CUDA allocator.
 
-        After this returns, no new batches will be processed until resume() is called.
-        Safe to call multiple times.
+        After this returns, no new batches will be processed until resume()
+        is called, the pending queue is empty (handlers return "paused"
+        errors), and the first subsequent training forward starts with a
+        clean allocator state.
         """
         with self._lock:
             self._paused = True
-            # Wait for any in-progress batch to complete
+            for _, _, event, slot in self._pending:
+                slot.append(ValueOrError.from_error("Model paused for training"))
+                event.set()
+            self._pending = []
+            self._first_request_time = None
+            self._batch_ready.notify_all()
             while self._batch_in_progress:
                 self._batch_ready.wait(timeout=0.1)
+        gc.collect()
+        torch.cuda.empty_cache()
 
     def resume(self):
         """Resume inference after pause()."""

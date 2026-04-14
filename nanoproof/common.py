@@ -11,6 +11,7 @@ import logging
 import math
 import urllib.request
 import gc
+import faulthandler
 from dataclasses import dataclass
 from datetime import datetime
 from collections import Counter
@@ -609,37 +610,34 @@ class DummyTimer(SimpleTimer):
     def gather(self) -> Self: return DummyTimer()
 
 
-def active_barrier_master(key: str) -> None:
-    """
-    Signal completion to non-master ranks via the distributed store.
-    
-    This is used instead of dist.barrier() when non-master ranks need to
-    actively poll (e.g., because they're running inference servers that
-    need the Python thread to remain unblocked).
-    
-    The master process calls this after completing its work.
-    Non-master processes should call active_barrier_wait() with the same key.
-    """
-    store = dist.distributed_c10d._get_default_store()
-    store.set(key, "1")
+def active_barrier(key: str, timeout: float = 300.0, poll_interval: float = 0.5) -> None:
+    """Rank-symmetric barrier over the distributed store.
 
+    Does not use NCCL, so it never triggers the NCCL watchdog and leaves the
+    Python thread in a sleep loop (Flask handler threads on worker ranks stay
+    responsive). On timeout, dumps all-thread tracebacks on this rank and
+    raises, turning silent rank desyncs into diagnosable failures.
 
-def active_barrier_wait(key: str, poll_interval: float = 1.0) -> None:
+    No-op when DDP is not active.
     """
-    Wait for master to signal completion via the distributed store.
-    
-    This actively polls instead of blocking, allowing the Python thread
-    to remain responsive (e.g., for inference server requests).
-    
-    Args:
-        key: The key that master will set when done
-        poll_interval: How often to poll in seconds (default: 1.0)
-    """
+    ddp, rank, _, world_size = get_dist_info()
+    if not ddp:
+        return
     store = dist.distributed_c10d._get_default_store()
+    counter_key = f"active_barrier/{key}/count"
+    store.add(counter_key, 1)
+    deadline = time.time() + timeout
     while True:
-        if store.check([key]):
-            break
+        count = int(store.get(counter_key))
+        if count >= world_size:
+            return
+        if time.time() > deadline:
+            faulthandler.dump_traceback()
+            raise TimeoutError(
+                f"active_barrier({key}) timed out on rank {rank}: {count}/{world_size} ranks arrived"
+            )
         time.sleep(poll_interval)
+
 
 class Player(enum.Enum):
     OR = 1

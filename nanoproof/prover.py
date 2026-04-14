@@ -8,6 +8,7 @@ Components:
 """
 
 import asyncio
+import faulthandler
 import logging
 import threading
 import time
@@ -69,10 +70,10 @@ class Prover:
 
         with process as env:
             env.send_command("""
-                open scoped Real
-                open scoped Nat
-                open scoped Topology
-                open scoped Polynomial
+                open Real
+                open Nat
+                open Topology
+                open Polynomial
             """)
             init_branch = env.proof_from_sorry(theorem_to_example(theorem))
             if not init_branch.is_success():
@@ -441,5 +442,10 @@ class ProverWorker:
                 time.sleep(0.1)
         finally:
             stop_flag.set()
+            deadline = time.time() + 60.0
             for t in threads:
-                t.join(timeout=5.0)
+                t.join(timeout=max(0.0, deadline - time.time()))
+            alive = sum(1 for t in threads if t.is_alive())
+            if alive:
+                log(f"WARNING: {alive}/{len(threads)} actor threads still alive after 60s", component="Collection")
+                faulthandler.dump_traceback()

@@ -4,7 +4,9 @@ import json
 import logging
 import sys
 import argparse
+import faulthandler
 import random
+import signal
 import time
 import uuid
 from dataclasses import asdict
@@ -17,7 +19,7 @@ import torch.distributed as dist
 import leantree.augmentations
 from leantree.core.lean import LeanGoal
 
-from nanoproof.common import compute_init, compute_cleanup, get_base_dir, DummyWandb, autodetect_device_type, SimpleTimer, flush, create_run_dirs, active_barrier_master, active_barrier_wait, broadcast_value, enable_memory_profiling
+from nanoproof.common import compute_init, compute_cleanup, get_base_dir, DummyWandb, autodetect_device_type, SimpleTimer, flush, create_run_dirs, active_barrier, broadcast_value, enable_memory_profiling
 from nanoproof.checkpoints import load_model, save_checkpoint, save_eval_results_to_run_dir
 from nanoproof.engine import Engine
 from nanoproof.data.sft.leantree import leantree_transitions
@@ -109,6 +111,9 @@ args.device_type = autodetect_device_type() if args.device_type == "" else args.
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(args.device_type)
 master_process = ddp_rank == 0
 set_ddp_info(is_master=master_process, rank=ddp_rank)
+
+# `kill -USR1 <pid>` on any rank dumps all-thread Python tracebacks to stderr.
+faulthandler.register(signal.SIGUSR1, all_threads=True)
 
 # Output directory init
 log_dir, model_dir = create_run_dirs("rl", args.run, args_dict=user_config)
@@ -328,11 +333,7 @@ while True:
             save_eval_results_to_run_dir(output_dir, step, "minif2f", minif2f_results)
             save_eval_results_to_run_dir(output_dir, step, "leanworkbook", leanworkbook_results)
 
-            if ddp:
-                active_barrier_master(f"prover_eval_{barrier_nonce}_{step}")
-        else:
-            if ddp:
-                active_barrier_wait(f"prover_eval_{barrier_nonce}_{step}")
+        active_barrier(f"prover_eval_{barrier_nonce}_{step}")
 
         model.train()
         timer.end("eval")
@@ -399,13 +400,14 @@ while True:
     timer.start("train")
     rl_monitor.set_phase("training")
 
-    # Pause inference during training to prevent concurrent model access.
+    # Pause inference across all ranks before touching the model for training.
+    # The store-based barrier turns rank desyncs at this transition into a
+    # diagnosable TimeoutError + traceback instead of a cryptic NCCL watchdog.
     tactic_model.pause()
+    active_barrier(f"train_{step}/enter")
 
-    # Move optimizer state to GPU for training
     optimizer_to_gpu(optimizer, device)
 
-    # Evaluate the gradient
     num_tokens = torch.tensor(0, device=device)
     for micro_step in range(grad_accum_steps):
         train_inputs, train_targets = next(train_loader)
@@ -429,9 +431,10 @@ while True:
     optimizer.step()
     model.zero_grad(set_to_none=True)
 
-    # Offload optimizer state back to CPU, resume inference
     optimizer_to_cpu(optimizer)
     flush()
+
+    active_barrier(f"train_{step}/exit")
     tactic_model.resume()
 
     timer.end("train")
