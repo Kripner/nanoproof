@@ -29,7 +29,7 @@ from nanoproof.checkpoints import (
     parse_checkpoint_path,
     save_eval_results,
 )
-from nanoproof.common import active_barrier_master, active_barrier_wait, autodetect_device_type, broadcast_value, compute_cleanup, compute_init, print0
+from nanoproof.common import active_barrier_master, active_barrier_wait, autodetect_device_type, broadcast_value, compute_cleanup, compute_init, enable_memory_profiling, print0
 from nanoproof.data.bench import minif2f
 from nanoproof.data.rl import leanworkbook
 from nanoproof.inference import BlockingTacticModel, TacticModel, compute_max_batch_prompt_tokens
@@ -81,6 +81,8 @@ def main():
                         help="max generation samples per batch (default: num_actors * num_sampled_tactics)")
     parser.add_argument("--batch-max-prompt-tokens", type=int, default=None,
                         help="max estimated prompt tokens per batch (default: auto from VRAM)")
+    parser.add_argument("--memory-profile", type=str, default=None,
+                        help="if set, record CUDA memory history and dump snapshot to this dir on first OOM")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--force", action="store_true", help="overwrite existing results")
     parser.add_argument("--continue", dest="continue_eval", action="store_true",
@@ -153,6 +155,10 @@ def main():
     if should_exit:
         compute_cleanup()
         sys.exit(1)
+
+    # Enable memory profiling before model load so model weight allocations are captured.
+    if args.memory_profile:
+        enable_memory_profiling(args.memory_profile)
 
     # Load model + set up inference
     print0(f"Loading checkpoint: {checkpoint_info.checkpoint_dir}, step={checkpoint_info.step}")

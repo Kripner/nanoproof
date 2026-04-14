@@ -17,7 +17,7 @@ import torch.distributed as dist
 import leantree.augmentations
 from leantree.core.lean import LeanGoal
 
-from nanoproof.common import compute_init, compute_cleanup, get_base_dir, DummyWandb, autodetect_device_type, SimpleTimer, flush, create_run_dirs, active_barrier_master, active_barrier_wait, broadcast_value
+from nanoproof.common import compute_init, compute_cleanup, get_base_dir, DummyWandb, autodetect_device_type, SimpleTimer, flush, create_run_dirs, active_barrier_master, active_barrier_wait, broadcast_value, enable_memory_profiling
 from nanoproof.checkpoints import load_model, save_checkpoint, save_eval_results_to_run_dir
 from nanoproof.engine import Engine
 from nanoproof.data.sft.leantree import leantree_transitions
@@ -73,6 +73,8 @@ parser.add_argument("--batch-max-gen-samples", type=int, default=None,
                     help="max generation samples per batch (default: num_actors * num_sampled_tactics)")
 parser.add_argument("--batch-max-prompt-tokens", type=int, default=None,
                     help="max estimated prompt tokens per batch (default: auto from VRAM)")
+parser.add_argument("--memory-profile", type=str, default=None,
+                    help="if set, record CUDA memory history and dump snapshot to this dir on first OOM")
 
 # Training
 parser.add_argument("--device-batch-size", type=int, default=8)
@@ -120,6 +122,10 @@ if master_process:
 # wandb logging init
 use_dummy_wandb = args.run == "dummy" or not master_process
 wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-rl", name=args.run, dir=log_dir, config=user_config, save_code=True)
+
+# Enable memory profiling before model load so model weight allocations are captured.
+if args.memory_profile:
+    enable_memory_profiling(args.memory_profile)
 
 # Create the policy/critic model.
 inner_tactic_model = TacticModel.create(num_samples=args.num_sampled_tactics, model_path=args.model_path)

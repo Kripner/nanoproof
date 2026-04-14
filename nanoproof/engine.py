@@ -15,7 +15,7 @@ Engine supports batched generation with variable-length prompts:
 import torch
 import torch.nn.functional as F
 
-from nanoproof.common import COMPUTE_DTYPE
+from nanoproof.common import COMPUTE_DTYPE, maybe_dump_memory_snapshot
 
 
 class KVCache:
@@ -244,6 +244,12 @@ class Engine:
                 ids = torch.tensor(token_column, dtype=torch.long, device=device).unsqueeze(1)
                 logits = self.model.forward(ids, kv_cache=kv_cache_decode)
                 logits = logits[:, -1, :]
+        except torch.cuda.OutOfMemoryError:
+            # Dump the snapshot BEFORE the finally block frees the KV cache so
+            # the snapshot captures the actual state at OOM (with live KV cache
+            # and peak fragmentation), not the cleaned-up state afterwards.
+            maybe_dump_memory_snapshot(f"OOM in Engine.generate (num_prompts={num_prompts}, max_prompt_len={max_prompt_len}, num_samples={num_samples})")
+            raise
         finally:
             # Explicitly free the KV cache. @torch.inference_mode() on a generator
             # can prevent proper frame teardown on GeneratorExit, leaving the huge

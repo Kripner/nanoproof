@@ -76,6 +76,29 @@ class TacticModel:
         """Sample tactics and predict value for a state string. Returns (tactics, value)."""
         return self.sample_tactic_from_str_batch([state_str])[0]
 
+    def _max_prompt_len(self) -> int:
+        """Maximum tokenized prompt length the model accepts.
+
+        RoPE tables are allocated for sequence_len * 10; we cap prompts at * 9
+        to leave headroom for up to ~64 generated tokens.
+        """
+        return self.network.config.sequence_len * 9
+
+    def prepare_tactic_prompt(self, state_str: str) -> tuple[list[int], bool]:
+        """Tokenize a state string for tactic generation.
+
+        Returns (prompt_tokens, is_too_long). When too_long, prompt_tokens is a
+        single-token dummy and the caller is expected to surface an error for
+        that index. Single source of truth for the tactic-prompt format and the
+        oversized-prompt substitution; reused by BlockingTacticModel for its
+        KV-cache budget.
+        """
+        bos = self.tokenizer.get_bos_token_id()
+        tokens = self.tokenizer(state_str + "\n<|tactic|>", prepend=bos)
+        if len(tokens) > self._max_prompt_len():
+            return [bos], True
+        return tokens, False
+
     def sample_tactic_from_str_batch(self, state_strs: list[str]) -> list[ValueOrError[TacticAndValue]]:
         """
         Batched tactic generation and value prediction from state strings.
@@ -85,20 +108,14 @@ class TacticModel:
         device = self.network.get_device()
         assert device.type == "cuda"
 
-        # RoPE tables are allocated for sequence_len * 10; keep prompts under * 9
-        # to leave headroom for the 64 generated tokens.
-        max_prompt_len = self.network.config.sequence_len * 9
-
         # Prepare tokenized prompts for tactic generation
         tactic_prompts = []
         too_long_indices = set()
         for idx, state_str in enumerate(state_strs):
-            tokens = self.tokenizer(state_str + "\n<|tactic|>", prepend=self.tokenizer.get_bos_token_id())
-            if len(tokens) > max_prompt_len:
+            tokens, too_long = self.prepare_tactic_prompt(state_str)
+            tactic_prompts.append(tokens)
+            if too_long:
                 too_long_indices.add(idx)
-                tactic_prompts.append([self.tokenizer.get_bos_token_id()])  # dummy prompt
-            else:
-                tactic_prompts.append(tokens)
 
         # Generate tactics
         seed = torch.randint(torch.iinfo(torch.int32).max, (1,), device=device, generator=self.rng).item()
@@ -222,9 +239,6 @@ class BlockingTacticModel:
     Each request generates both tactics and value prediction together.
     """
 
-    # Rough estimate: ~3.5 characters per token for math/code proof states.
-    CHARS_PER_TOKEN = 3.5
-
     def __init__(self, inner_model: TacticModel, timeout_seconds: float, max_gen_samples: int | None,
                  max_batch_prompt_tokens: int | None = None):
         self.inner_model = inner_model
@@ -239,15 +253,27 @@ class BlockingTacticModel:
         self._shutdown = False
         self._paused = False
 
-        # Single queue for combined tactic+value requests
-        # Each entry is (state_str, event, result_slot)
-        self._pending: list[tuple[str, threading.Event, list]] = []
+        # Single queue for combined tactic+value requests.
+        # Each entry is (state_str, token_count, event, result_slot), where
+        # token_count is the tokenized length of the tactic-gen prompt, used
+        # for the KV-cache budget (see _process_batch_locked).
+        self._pending: list[tuple[str, int, threading.Event, list]] = []
         self._first_request_time: float | None = None
         self._total_batches = 0
 
     @property
     def network(self):
         return self.inner_model.network
+
+    def _count_prompt_tokens(self, state_str: str) -> int:
+        """Token count for the tactic-gen prompt (the dominant KV-cache driver).
+
+        Delegates to TacticModel.prepare_tactic_prompt so the count matches the
+        actual prompt that will be fed to Engine.generate, including the
+        single-token dummy substitution for oversized prompts.
+        """
+        tokens, _ = self.inner_model.prepare_tactic_prompt(state_str)
+        return len(tokens)
 
     def _pending_gen_samples(self) -> int:
         """Number of generation samples if pending items were batched now."""
@@ -266,7 +292,7 @@ class BlockingTacticModel:
         """Signal shutdown to unblock all waiting threads."""
         with self._lock:
             self._shutdown = True
-            for _, event, slot in self._pending:
+            for _, _, event, slot in self._pending:
                 slot.append(ValueOrError.from_error("Model shutdown"))
                 event.set()
             self._pending = []
@@ -314,6 +340,12 @@ class BlockingTacticModel:
         if not state_strs:
             return []
 
+        # Tokenize upfront to get accurate prompt lengths for the KV-cache
+        # budget. Done outside the lock since tokenization is pure-CPU work.
+        # We use the same suffix as the tactic-generation path in TacticModel,
+        # which is the dominant allocation (num_samples times bigger than value).
+        token_counts = [self._count_prompt_tokens(s) for s in state_strs]
+
         with self._lock:
             if self._shutdown:
                 return [ValueOrError.from_error("Model shutdown") for _ in state_strs]
@@ -321,7 +353,7 @@ class BlockingTacticModel:
                 return [ValueOrError.from_error("Model paused for training") for _ in state_strs]
 
             # Create events and slots for all states
-            entries = [(s, threading.Event(), []) for s in state_strs]
+            entries = [(s, tc, threading.Event(), []) for s, tc in zip(state_strs, token_counts)]
 
             # Add all to pending queue
             if self._first_request_time is None and entries:
@@ -333,10 +365,10 @@ class BlockingTacticModel:
                 self._process_batch_locked()
 
         # Wait for all results (returns early on shutdown/pause)
-        for _, event, _ in entries:
+        for _, _, event, _ in entries:
             self._wait_for_result(event)
 
-        return [slot[0] if slot else ValueOrError.from_error("No result") for _, _, slot in entries]
+        return [slot[0] if slot else ValueOrError.from_error("No result") for _, _, _, slot in entries]
 
     def _wait_for_result(self, event: threading.Event):
         """Wait for a result, triggering batch processing if needed."""
@@ -371,14 +403,14 @@ class BlockingTacticModel:
         # Further limit by prompt tokens: the KV cache is allocated as
         # N_rows * max_prompt_len, so one long prompt inflates memory for ALL
         # rows. We track count * running_max to match the actual allocation.
+        # Token counts are pre-computed by the tokenizer on queue entry.
         if self.max_batch_prompt_tokens is not None and len(batch) > 1:
             GEN_OVERHEAD = 64
-            max_est = 0
+            max_tokens = 0
             cut = len(batch)
-            for i, (state_str, _, _) in enumerate(batch):
-                est = max(1, int(len(state_str) / self.CHARS_PER_TOKEN)) + GEN_OVERHEAD
-                max_est = max(max_est, est)
-                effective = (i + 1) * max_est
+            for i, (_, tc, _, _) in enumerate(batch):
+                max_tokens = max(max_tokens, tc + GEN_OVERHEAD)
+                effective = (i + 1) * max_tokens
                 if effective > self.max_batch_prompt_tokens:
                     cut = max(1, i)
                     break
@@ -400,21 +432,24 @@ class BlockingTacticModel:
 
             state_strs = [item[0] for item in batch]
             gen_samples = len(batch) * self.inner_model.num_samples
-            total_chars = sum(len(s) for s in state_strs)
+            max_tc = max((item[1] for item in batch), default=0)
+            sum_tc = sum(item[1] for item in batch)
             allocated_gb = torch.cuda.memory_allocated() / 1024**3
-            logger.debug(f"Batch #{batch_num}: {len(batch)} states, {gen_samples} gen samples, {total_chars} chars, {allocated_gb:.1f} GiB allocated")
+            logger.debug(f"Batch #{batch_num}: {len(batch)} states, {gen_samples} gen samples, max_tokens={max_tc}, sum_tokens={sum_tc}, {allocated_gb:.1f} GiB allocated")
             t0 = time.time()
             results = self.inner_model.sample_tactic_from_str_batch(state_strs)
             logger.debug(f"Batch #{batch_num}: completed in {time.time() - t0:.3f}s")
 
             # Distribute results
-            for i, (_, event, slot) in enumerate(batch):
+            for i, (_, _, event, slot) in enumerate(batch):
                 slot.append(results[i])
                 event.set()
 
         except Exception as e:
             log(f"Batch #{batch_num}: FAILED - {e}", component="BlockingTacticModel")
-            for _, event, slot in batch:
+            # Note: OOM snapshots are dumped deeper in Engine.generate so the
+            # snapshot captures the state *before* the finally-block cleanup.
+            for _, _, event, slot in batch:
                 slot.append(ValueOrError.from_error(str(e)))
                 event.set()
         finally:

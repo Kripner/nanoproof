@@ -299,6 +299,48 @@ def compute_cleanup():
     if is_ddp_initialized():
         dist.destroy_process_group()
 
+
+# -----------------------------------------------------------------------------
+# CUDA memory profiling
+#
+# enable_memory_profiling() starts torch's memory history recorder. The first
+# CUDA OOM that calls maybe_dump_memory_snapshot() writes a pickle that can be
+# loaded into https://pytorch.org/memory_viz to inspect every live tensor's
+# stack trace.
+# -----------------------------------------------------------------------------
+
+_memory_profile_path: str | None = None
+_memory_profile_dumped: bool = False
+
+
+def enable_memory_profiling(output_dir: str) -> None:
+    """Start recording CUDA memory history; first OOM dump goes to output_dir.
+
+    Call once at startup, before any significant GPU allocation.
+    """
+    global _memory_profile_path
+    os.makedirs(output_dir, exist_ok=True)
+    _, rank, _, _ = get_dist_info()
+    _memory_profile_path = os.path.join(output_dir, f"memory_snapshot_rank{rank}.pickle")
+    # max_entries=100k is plenty (a full run typically generates 10-30k allocations).
+    # stacks="python" captures Python frames; "all" adds C++ but slows things down.
+    torch.cuda.memory._record_memory_history(max_entries=100_000, stacks="python")
+    logger.info(f"Memory profiling enabled; snapshot will be written to {_memory_profile_path} on first OOM")
+
+
+def maybe_dump_memory_snapshot(context: str) -> None:
+    """Dump a CUDA memory snapshot on the first OOM; no-op otherwise."""
+    global _memory_profile_dumped
+    if _memory_profile_path is None or _memory_profile_dumped:
+        return
+    _memory_profile_dumped = True
+    try:
+        torch.cuda.memory._dump_snapshot(_memory_profile_path)
+        logger.info(f"Memory snapshot dumped to {_memory_profile_path} ({context})")
+    except Exception as e:
+        logger.warning(f"Failed to dump memory snapshot: {e}")
+
+
 # hardcoded BF16 peak flops for various GPUs
 # inspired by torchtitan: https://github.com/pytorch/torchtitan/blob/main/torchtitan/tools/utils.py
 def get_peak_flops(device_name: str) -> float:
