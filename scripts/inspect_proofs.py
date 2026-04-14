@@ -10,22 +10,27 @@ from pathlib import Path
 from leantree.repl_adapter.server import LeanClient
 
 from nanoproof.common import linearize_proof, format_linearized_proof
+from nanoproof.data.bench.common import MINIF2F_HEADER
 from nanoproof.search import Node, revive_tree_states
 from nanoproof.experience_collection import prune_redundant_nodes, compute_value_target
 
-MINIF2F_IMPORTS = """
+# Imports needed when writing exported proofs as standalone .lean files.
+# (Not sent to the REPL - the server is launched with --imports Mathlib
+# already, and per-theorem headers below cover opens + aux defs.)
+_EXPORT_IMPORTS = """
 import Mathlib
 import FormalConjecturesForMathlib.Analysis.SpecialFunctions.NthRoot
 import FormalConjectures.Util.Answer
 """
 
-# Lean environment setup commands
-LEAN_OPEN_SCOPED_COMMANDS = """
-open scoped Real
-open scoped Nat
-open scoped Topology
-open scoped Polynomial
-"""
+
+def _record_header(item: dict) -> str:
+    """Return the header to send to the REPL for a stored proof record.
+
+    Older JSONL records predate the header field - default to the shared
+    miniF2F preamble in that case.
+    """
+    return item.get("header") or MINIF2F_HEADER
 
 
 def load_proofs(path: str) -> list[dict]:
@@ -290,34 +295,39 @@ def cmd_simplify(args):
         return
     
     with process as env:
-        env.send_command(LEAN_OPEN_SCOPED_COMMANDS)
-        
         for i, item in enumerate(selected):
+            # Per-theorem header (opens + aux defs). Pool rollback resets env
+            # to the post-Mathlib checkpoint on release, but within a single
+            # process session these accumulate. That's fine for inspection -
+            # name clashes would only matter if headers conflict across
+            # theorems in the same file, which doesn't happen in practice.
+            env.send_command(_record_header(item))
+
             idx = f"[{args.offset + i}]" if not args.random else ""
             print(f"{'=' * 60}")
             print(f"Proof {i + 1} {idx}")
             print(f"{'=' * 60}")
-            
+
             # Print theorem
             theorem = item.get("theorem", "(no theorem)")
             print(f"Theorem:")
             print(f"  {theorem}")
             print()
-            
+
             # Load and deserialize proof tree
             proof_dict = item.get("proof")
             node = Node.deserialize(proof_dict)
-            
+
             # Print tree before pruning
             print(f"Proof tree (before pruning):")
             formatted = node.pp_tree()
             for line in formatted.split("\n"):
                 print(f"  {line}")
             print()
-            
+
             # Capture linearized proof before pruning
             tactics_before = linearize_proof(node)
-            
+
             # Revive tree states
             revive_tree_states(node, theorem, env)
             
@@ -391,39 +401,38 @@ def cmd_gather_lean(args):
             continue
         
         proofs = load_proofs(str(minif2f_path))
-        
-        # Collect theorems
-        lean_content = []
+
+        # Collect theorems, each wrapped in its own `section ... end` with
+        # its stored header so opens/defs don't leak between theorems.
+        lean_blocks = []
         proven_count = 0
-        
+
         for item in proofs:
             theorem = item.get("theorem", "").strip()
             proof_dict = item.get("proof")
-            
+
             if proof_dict is not None:
-                # Deserialize and linearize the proof
                 node = Node.deserialize(proof_dict)
                 tactics = linearize_proof(node)
-                
+
                 assert theorem.endswith("sorry"), "theorem should end with 'sorry'"
                 proven_count += 1
-                # Replace "sorry" with the proof
-                theorem_body = theorem[:-len("sorry")]  # Remove "sorry"
+                theorem_body = theorem[:-len("sorry")]
                 if len(tactics) == 1:
                     theorem = theorem_body + tactics[0]
                 else:
-                    # Multi-line proof with indentation
                     proof_lines = "\n  ".join(tactics)
                     theorem = theorem_body + proof_lines
-            
-            lean_content.append(theorem)
-        
+
+            header = _record_header(item)
+            lean_blocks.append(f"section\n{header}\n\n{theorem}\n\nend")
+
         # Write the Lean file
         output_path = output_base / f"{step}-minif2f.lean"
         with open(output_path, "w") as f:
-            f.write(MINIF2F_IMPORTS.strip() + "\n\n" + LEAN_OPEN_SCOPED_COMMANDS.strip() + "\n\n\n" + "\n\n".join(lean_content))
+            f.write(_EXPORT_IMPORTS.strip() + "\n\n\n" + "\n\n".join(lean_blocks))
         
-        print(f"Step {step}: {proven_count}/{len(lean_content)} proven -> {output_path}")
+        print(f"Step {step}: {proven_count}/{len(lean_blocks)} proven -> {output_path}")
 
 
 def main():

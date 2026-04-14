@@ -25,6 +25,7 @@ from nanoproof.common import (
     theorem_to_example,
 )
 from nanoproof.cli import get_monitor, log
+from nanoproof.data.bench.common import BenchTheorem
 from nanoproof.experience_collection import (
     TheoremsSampler,
     ReplayBuffer,
@@ -56,32 +57,29 @@ class Prover:
         self.config = config
         self.tactic_model = tactic_model
 
-    def prove(self, client: LeanClient, theorem: str, expansion_callback: Callable[[], None] | None = None,
+    def prove(self, client: LeanClient, theorem: BenchTheorem, expansion_callback: Callable[[], None] | None = None,
               abort_check: Callable[[], bool] | None = None) -> Game | None:
         """Run a single MCTS proof game.
 
         Returns a :class:`Game` with results, or ``None`` if Lean setup fails.
         """
-        logger.debug(f"Proving: {theorem[:80]}...")
+        logger.debug(f"Proving: {theorem.source[:80]}...")
         process = client.get_process()
         if process is None:
             log(f"FAILED: Could not get Lean process for theorem", component="Prover")
             return None
 
         with process as env:
-            env.send_command("""
-                open Real
-                open Nat
-                open Topology
-                open Polynomial
-            """)
-            init_branch = env.proof_from_sorry(theorem_to_example(theorem))
+            env.send_command(theorem.header)
+            example = theorem_to_example(theorem.source)
+            init_branch = env.proof_from_sorry(example)
             if not init_branch.is_success():
-                log(f"FAILED: Could not initialize proof - {init_branch.error if hasattr(init_branch, 'error') else 'unknown error'}", component="Prover")
+                err = init_branch.error if hasattr(init_branch, 'error') else 'unknown error'
+                log(f"FAILED: Could not initialize proof - {err}\nLean code:\n{example}", component="Prover")
                 return None
             init_branch = init_branch.value
 
-            game = Game(theorem, self.config.num_simulations)
+            game = Game(theorem.source, self.config.num_simulations)
             game.root = Node(
                 parent=None,
                 action=None,
@@ -100,7 +98,7 @@ class Prover:
                 try:
                     verify_node(game.root)
                 except AssertionError as e:
-                    log(f"FAILED: Verification failed after {game.num_iterations} iterations: '{e}'\nTheorem: '{theorem}'\nProof tree:\n{game.root.pp_tree()}", component="Prover")
+                    log(f"FAILED: Verification failed after {game.num_iterations} iterations: '{e}'\nTheorem: '{theorem.source}'\nProof tree:\n{game.root.pp_tree()}", component="Prover")
                     game.root.is_solved = False
                     return game
                 game.unsimplified_root = game.root.clone()
@@ -111,7 +109,7 @@ class Prover:
 
                 # Verify the linearized proof compiles correctly
                 tactics = linearize_proof(game.root)
-                proof_source = construct_proof_source(theorem, tactics)
+                proof_source = construct_proof_source(theorem.source, tactics)
                 if not env.is_valid_source(proof_source):
                     log(f"FAILED: Linearized proof verification failed after {game.num_iterations} iterations:\n\"\"\"\n{proof_source}\n\"\"\"\n... proof tree:\n{game.root.pp_tree()}\n", component="Prover")
                     game.root.is_solved = False
@@ -221,7 +219,7 @@ class ProverWorker:
         return len(replay_buffer.local_buffer)
 
     @torch.no_grad()
-    def evaluate(self, theorems: list[str], dataset_name: str, num_simulations: int,
+    def evaluate(self, theorems: list[BenchTheorem], dataset_name: str, num_simulations: int,
                  progress_callback: Callable[[int, int, int, int], None] | None = None) -> dict:
         """Evaluate theorems using MCTS. Returns metrics dict.
 
@@ -256,7 +254,7 @@ class ProverWorker:
         results: list[dict] = []
         results_lock = threading.Lock()
 
-        def on_result(theorem_id, theorem, game, error):
+        def on_result(theorem_id, theorem: BenchTheorem, game, error):
             is_solved = bool(game and game.root and game.root.is_solved)
             num_iterations = game.num_iterations if game else 0
 
@@ -268,11 +266,13 @@ class ProverWorker:
                 if game.unsimplified_root is not None:
                     unsimplified_proof_tree = game.unsimplified_root.serialize()
                 tactics = linearize_proof(game.root)
-                linearized = construct_proof_source(theorem, tactics)
+                linearized = construct_proof_source(theorem.source, tactics)
 
             with results_lock:
                 results.append({
-                    "theorem": theorem,
+                    "theorem": theorem.source,
+                    "header": theorem.header,
+                    "name": theorem.name,
                     "is_solved": is_solved,
                     "error": error,
                     "proof_tree": proof_tree,
@@ -314,8 +314,8 @@ class ProverWorker:
     def _run_pool(
         self,
         prover: Prover,
-        get_theorem: Callable[[], Optional[tuple[str, str]]],
-        on_result: Callable[[str, str, Optional[Game], Optional[str]], None],
+        get_theorem: Callable[[], Optional[tuple[str, BenchTheorem]]],
+        on_result: Callable[[str, BenchTheorem, Optional[Game], Optional[str]], None],
         done_check: Callable[[], bool],
         poll_callback: Callable[[list[str]], None] | None = None,
     ):

@@ -13,6 +13,7 @@ import json
 import os
 
 from nanoproof.common import get_base_dir
+from nanoproof.data.bench.common import BenchTheorem, MINIF2F_HEADER
 from nanoproof.data.rl.common import download_hf_file, shuffle_train_valid_split
 
 DATA_DIR = os.path.join(get_base_dir(), "data", "leanworkbook")
@@ -24,7 +25,7 @@ def download_dataset() -> None:
     download_hf_file(HF_URL, JSON_PATH, desc="lean_workbook.json")
 
 
-def list_theorems(split: str) -> list[str]:
+def list_theorems(split: str) -> list[BenchTheorem]:
     assert split in ("train", "valid"), f"Invalid split: {split!r}"
     if not os.path.exists(JSON_PATH):
         raise FileNotFoundError(
@@ -34,8 +35,9 @@ def list_theorems(split: str) -> list[str]:
         data = json.load(f)
     # Keep only entries that InternLM Prover successfully proved (we don't
     # use the proof itself, but proven theorems are higher quality).
-    theorems = [item["formal_statement"] for item in data if item["proof"]]
-    return shuffle_train_valid_split(theorems, valid_size=500, seed=0)[split]
+    sources = [item["formal_statement"] for item in data if item["proof"]]
+    split_sources = shuffle_train_valid_split(sources, valid_size=500, seed=0)[split]
+    return [BenchTheorem(source=s, header=MINIF2F_HEADER) for s in split_sources]
 
 
 # -----------------------------------------------------------------------------
@@ -55,7 +57,7 @@ def _main():
         download_dataset()
     elif args.action == "show":
         for thm in list_theorems(args.split)[:args.n]:
-            print(thm)
+            print(thm.source)
             print("-" * 80)
     elif args.action == "stats":
         for split in ("train", "valid"):

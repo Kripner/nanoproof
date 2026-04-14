@@ -16,6 +16,7 @@ import re
 import pyarrow.parquet as pq
 
 from nanoproof.common import get_base_dir
+from nanoproof.data.bench.common import BenchTheorem, MINIF2F_HEADER
 from nanoproof.data.rl.common import download_hf_file, shuffle_train_valid_split
 
 DATA_DIR = os.path.join(get_base_dir(), "data", "numinamath")
@@ -47,7 +48,7 @@ def download_dataset() -> None:
     download_hf_file(HF_URL, PARQUET_PATH, desc="numinamath.parquet")
 
 
-def list_theorems(split: str) -> list[str]:
+def list_theorems(split: str) -> list[BenchTheorem]:
     assert split in ("train", "valid"), f"Invalid split: {split!r}"
     if not os.path.exists(PARQUET_PATH):
         raise FileNotFoundError(
@@ -74,7 +75,8 @@ def list_theorems(split: str) -> list[str]:
         if skipped_example is not None:
             print(f"Example skipped statement:\n{skipped_example}")
 
-    return shuffle_train_valid_split(theorems, valid_size=500, seed=0)[split]
+    split_sources = shuffle_train_valid_split(theorems, valid_size=500, seed=0)[split]
+    return [BenchTheorem(source=s, header=MINIF2F_HEADER) for s in split_sources]
 
 
 # -----------------------------------------------------------------------------
@@ -94,7 +96,7 @@ def _main():
         download_dataset()
     elif args.action == "show":
         for thm in list_theorems(args.split)[:args.n]:
-            print(thm)
+            print(thm.source)
             print("-" * 80)
     elif args.action == "stats":
         for split in ("train", "valid"):

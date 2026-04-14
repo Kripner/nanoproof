@@ -30,7 +30,8 @@ from nanoproof.checkpoints import (
     save_eval_results,
 )
 from nanoproof.common import active_barrier, autodetect_device_type, broadcast_value, compute_cleanup, compute_init, enable_memory_profiling, print0
-from nanoproof.data.bench import minif2f
+from nanoproof.data.bench import minif2f, proofnet
+from nanoproof.data.bench.common import BenchTheorem, MINIF2F_HEADER
 from nanoproof.data.rl import leanworkbook
 from nanoproof.inference import BlockingTacticModel, TacticModel, compute_max_batch_prompt_tokens
 from nanoproof.prover import ProverWorker
@@ -71,7 +72,7 @@ def main():
     parser.add_argument("--lean-servers", type=str, nargs="+", required=True,
                         help="Lean server addresses (e.g., 10.10.25.33:8000 10.10.25.34); port defaults to 8000")
     parser.add_argument("--datasets", type=str, default="minif2f",
-                        help="comma-separated datasets (minif2f, leanworkbook)")
+                        help="comma-separated datasets (minif2f, leanworkbook, proofnet)")
     parser.add_argument("--split", type=str, default="valid", choices=["valid", "test"])
     parser.add_argument("--max-theorems", type=int, default=None)
     parser.add_argument("--num-simulations", type=int, default=512)
@@ -98,7 +99,7 @@ def main():
         parser.error("--force and --continue are mutually exclusive")
 
     datasets = [d.strip().lower() for d in args.datasets.split(",")]
-    valid_datasets = {"minif2f", "leanworkbook"}
+    valid_datasets = {"minif2f", "leanworkbook", "proofnet"}
     for d in datasets:
         if d not in valid_datasets:
             parser.error(f"Unknown dataset: {d}. Valid: {valid_datasets}")
@@ -136,7 +137,17 @@ def main():
             else:
                 for dataset_name, eval_path in existing_results:
                     successful, errors = load_existing_eval_results(eval_path)
-                    error_theorems = [e["theorem"] for e in errors]
+                    # Reconstruct BenchTheorem from stored records. Older JSONL
+                    # files may predate the header field; default to MINIF2F_HEADER
+                    # in that case (what prover.py implicitly used before).
+                    error_theorems = [
+                        BenchTheorem(
+                            source=e["theorem"],
+                            header=e.get("header") or MINIF2F_HEADER,
+                            name=e.get("name"),
+                        )
+                        for e in errors
+                    ]
                     continue_data[dataset_name] = (successful, error_theorems)
                     if error_theorems:
                         print0(f"Found {len(errors)} error entries to retry in {dataset_name}")
@@ -204,6 +215,8 @@ def main():
             dataset_theorems["minif2f"] = minif2f.list_theorems(split=args.split)
         if "leanworkbook" in datasets:
             dataset_theorems["leanworkbook"] = leanworkbook.list_theorems(split="valid")
+        if "proofnet" in datasets:
+            dataset_theorems["proofnet"] = proofnet.list_theorems(split=args.split)
         if args.max_theorems:
             for name in dataset_theorems:
                 dataset_theorems[name] = dataset_theorems[name][:args.max_theorems]

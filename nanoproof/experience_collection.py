@@ -19,6 +19,7 @@ import torch.distributed as dist
 
 from nanoproof.cli import log
 from nanoproof.common import get_dist_info, Player, GLOBAL_CONFIG
+from nanoproof.data.bench.common import BenchTheorem
 from nanoproof.data.rl import deepseek_prover, leanworkbook, numinamath
 from nanoproof.search import Node, execute_tree
 
@@ -51,7 +52,7 @@ class TheoremsSampler:
         for name, theorems in self.datasets.items():
             log(f"Loaded {len(theorems)} theorems from {name}", component="Sampler")
 
-    def sample_theorem(self) -> str:
+    def sample_theorem(self) -> BenchTheorem:
         with self._lock:
             dataset_name = self.rng.choice(self.dataset_names)
             return self.rng.choice(self.datasets[dataset_name])

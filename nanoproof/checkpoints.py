@@ -165,6 +165,8 @@ def write_eval_results_jsonl(jsonl_path: str, results: dict, prepend_entries: li
         for item in detailed_results:
             entry = {
                 "theorem": item["theorem"],
+                "header": item.get("header"),
+                "name": item.get("name"),
                 "proof": item["proof_tree"],
                 "unsimplified_proof": item.get("unsimplified_proof_tree"),
                 "linearized_proof": item.get("linearized_proof"),
