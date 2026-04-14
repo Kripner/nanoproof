@@ -29,6 +29,7 @@ from nanoproof.inference import setup_distributed_inference
 from nanoproof.inference import TacticModel, BlockingTacticModel, compute_max_batch_prompt_tokens
 from nanoproof.optim import optimizer_to_cpu, optimizer_to_gpu
 from nanoproof.data.bench import minif2f
+from nanoproof.data.check_init import read_lean_version
 from nanoproof.data.rl import leanworkbook
 from nanoproof.cli import create_monitor, configure_logging, log, log0, set_ddp_info
 from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
@@ -58,6 +59,7 @@ parser.add_argument("--resume-from", type=str, default="")
 
 # Infrastructure
 parser.add_argument("--lean-servers", type=str, nargs="+", required=True, help="Lean server addresses (e.g., 10.10.25.33:8000 10.10.25.34); port defaults to 8000")
+parser.add_argument("--lean-project", type=str, required=True, help="Path to the Lean project directory (contains lean-toolchain). The Lean version is read from this file and used to select per-dataset whitelists.")
 parser.add_argument("--inference-server-port", type=int, default=5000, help="base port for per-rank inference servers (rank N uses port base+1+N)")
 
 # Search / collection
@@ -153,8 +155,11 @@ log0(f"=> Setting grad accum steps: {grad_accum_steps}", component="Config")
 
 rank_seed = args.seed + ddp_rank
 
+lean_version = read_lean_version(args.lean_project)
+log0(f"Lean version: {lean_version} (from {args.lean_project}/lean-toolchain)", component="Config")
+
 replay_buffer = ReplayBuffer(window_size=args.replay_buffer_window_size, seed=rank_seed)
-theorems_sampler = TheoremsSampler(seed=rank_seed, datasets=args.datasets)
+theorems_sampler = TheoremsSampler(seed=rank_seed, datasets=args.datasets, lean_version=lean_version)
 
 # Set up distributed inference (starts servers on worker ranks, builds balancer on master)
 balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
@@ -293,7 +298,7 @@ while True:
         # Worker ranks poll via active_barrier so their inference servers stay responsive.
         if master_process:
             minif2f_theorems = minif2f.list_theorems(split="valid")
-            leanworkbook_theorems = leanworkbook.list_theorems(split="valid")[:128]
+            leanworkbook_theorems = leanworkbook.list_theorems(split="valid", lean_version=lean_version)[:128]
 
             log(f"Evaluating on {len(minif2f_theorems)} theorems from MiniF2F", component="Eval")
             minif2f_results = prover.evaluate(minif2f_theorems, dataset_name="MiniF2F", num_simulations=args.num_simulations_eval)

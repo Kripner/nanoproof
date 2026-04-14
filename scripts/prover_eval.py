@@ -32,6 +32,7 @@ from nanoproof.checkpoints import (
 from nanoproof.common import active_barrier, autodetect_device_type, broadcast_value, compute_cleanup, compute_init, enable_memory_profiling, print0
 from nanoproof.data.bench import minif2f, proofnet
 from nanoproof.data.bench.common import BenchTheorem, MINIF2F_HEADER
+from nanoproof.data.check_init import read_lean_version
 from nanoproof.data.rl import leanworkbook
 from nanoproof.inference import BlockingTacticModel, TacticModel, compute_max_batch_prompt_tokens
 from nanoproof.prover import ProverWorker
@@ -69,6 +70,8 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate a prover model on theorem proving benchmarks")
 
     parser.add_argument("--model-path", type=str, required=True)
+    parser.add_argument("--lean-project", type=str, required=True,
+                        help="Path to the Lean project directory (contains lean-toolchain). The Lean version is read from this file and used to select per-dataset whitelists.")
     parser.add_argument("--lean-servers", type=str, nargs="+", required=True,
                         help="Lean server addresses (e.g., 10.10.25.33:8000 10.10.25.34); port defaults to 8000")
     parser.add_argument("--datasets", type=str, default="minif2f",
@@ -211,10 +214,12 @@ def main():
             if error_theorems:
                 dataset_theorems[dataset_name] = error_theorems
     else:
+        lean_version = read_lean_version(args.lean_project)
+        print0(f"Lean version: {lean_version} (from {args.lean_project}/lean-toolchain)")
         if "minif2f" in datasets:
             dataset_theorems["minif2f"] = minif2f.list_theorems(split=args.split)
         if "leanworkbook" in datasets:
-            dataset_theorems["leanworkbook"] = leanworkbook.list_theorems(split="valid")
+            dataset_theorems["leanworkbook"] = leanworkbook.list_theorems(split="valid", lean_version=lean_version)
         if "proofnet" in datasets:
             dataset_theorems["proofnet"] = proofnet.list_theorems(split=args.split)
         if args.max_theorems:

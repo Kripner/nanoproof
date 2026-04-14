@@ -36,15 +36,15 @@ class TheoremsSampler:
     """
 
     ALL_DATASETS = {
-        "leanworkbook": lambda: leanworkbook.list_theorems(split="train"),
-        "deepseek_prover": lambda: deepseek_prover.list_theorems(split="train"),
-        "numinamath": lambda: numinamath.list_theorems(split="train"),
+        "leanworkbook": lambda lean_version: leanworkbook.list_theorems(split="train", lean_version=lean_version),
+        "deepseek_prover": lambda lean_version: deepseek_prover.list_theorems(split="train", lean_version=lean_version),
+        "numinamath": lambda lean_version: numinamath.list_theorems(split="train", lean_version=lean_version),
     }
 
-    def __init__(self, seed: int | None = 0, datasets: list[str] | None = None):
+    def __init__(self, seed: int | None = 0, datasets: list[str] | None = None, lean_version: str | None = None):
         if datasets is None:
             datasets = list(self.ALL_DATASETS.keys())
-        self.datasets = {name: self.ALL_DATASETS[name]() for name in datasets}
+        self.datasets = {name: self.ALL_DATASETS[name](lean_version) for name in datasets}
         self.dataset_names = list(self.datasets.keys())
         self.rng = random.Random(seed)
         self._lock = threading.Lock()

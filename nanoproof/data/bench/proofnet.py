@@ -16,15 +16,15 @@ import json
 import os
 from pathlib import Path
 
-from leantree.repl_adapter.server import LeanClient
-
-from nanoproof.common import get_base_dir, theorem_to_example
+from nanoproof.common import get_base_dir
 from nanoproof.data.bench.common import BenchTheorem
+from nanoproof.data.check_init import add_check_init_args, run_check_init_cli
 from nanoproof.data.rl.common import download_hf_file
 
 DATA_DIR = os.path.join(get_base_dir(), "data", "proofnet")
 SOURCE_URL = "https://raw.githubusercontent.com/deepseek-ai/DeepSeek-Prover-V1.5/refs/heads/main/datasets/proofnet.jsonl"
 FILENAME = "proofnet.jsonl"
+FILE_PATH = os.path.join(DATA_DIR, FILENAME)
 
 _SPLITS = ("valid", "test")
 
@@ -33,12 +33,11 @@ _IMPORT_PREFIX = "import Mathlib"
 
 def download_dataset() -> None:
     """Download proofnet.jsonl from the DeepSeek-Prover-V1.5 GitHub repo."""
-    dest = os.path.join(DATA_DIR, FILENAME)
-    download_hf_file(SOURCE_URL, dest, desc=FILENAME)
+    download_hf_file(SOURCE_URL, FILE_PATH, desc=FILENAME)
 
 
 def _load_records() -> list[dict]:
-    file_path = Path(DATA_DIR) / FILENAME
+    file_path = Path(FILE_PATH)
     if not file_path.exists():
         raise FileNotFoundError(
             f"ProofNet file not found at {file_path}. Run with `download` first."
@@ -76,46 +75,6 @@ def list_theorems(split: str) -> list[BenchTheorem]:
     return theorems
 
 
-def _check_init(split: str, lean_server: str, limit: int | None) -> None:
-    """Try ``proof_from_sorry`` on each theorem and print the ones that fail."""
-    theorems = list_theorems(split)
-    if limit is not None:
-        theorems = theorems[:limit]
-
-    if ":" in lean_server:
-        host, port_str = lean_server.rsplit(":", 1)
-        port = int(port_str)
-    else:
-        host, port = lean_server, 8000
-
-    print(f"Connecting to Lean server {host}:{port}...")
-    client = LeanClient(host, port)
-    process = client.get_process()
-    if process is None:
-        print(f"Failed to acquire Lean process from {host}:{port}")
-        return
-
-    num_failed = 0
-    with process as env:
-        for i, theorem in enumerate(theorems):
-            env.send_command(theorem.header)
-            example = theorem_to_example(theorem.source)
-            try:
-                init_branch = env.proof_from_sorry(example)
-            except Exception as e:
-                num_failed += 1
-                print(f"[{i}] {theorem.name}: EXCEPTION: {e}\n--- theorem ---\n{theorem.source}\n")
-                continue
-            if not init_branch.is_success():
-                num_failed += 1
-                err = init_branch.error if hasattr(init_branch, 'error') else 'unknown error'
-                print(f"[{i}] {theorem.name}: FAILED: {err}\n--- theorem ---\n{theorem.source}\n")
-            else:
-                print(f"[{i}] {theorem.name}: ok")
-
-    print(f"\nDone: {num_failed}/{len(theorems)} theorems failed to initialize.")
-
-
 # -----------------------------------------------------------------------------
 # CLI: download / show / stats / check-init
 
@@ -129,12 +88,11 @@ def _main():
     sub.add_parser("stats", help="Print theorem counts per split")
     check = sub.add_parser(
         "check-init",
-        help="Try to initialize each theorem's proof in a Lean REPL and report failures",
+        help="Try to initialize each theorem's proof in a Lean REPL and report failures "
+        "(benchmarks do not get whitelists - failures are warnings)",
     )
     check.add_argument("--split", choices=list(_SPLITS), default="valid")
-    check.add_argument("--lean-server", type=str, required=True,
-                       help="Lean server address (e.g., 10.10.25.33:8000); port defaults to 8000")
-    check.add_argument("--limit", type=int, default=None, help="Only check the first N theorems")
+    add_check_init_args(check, default_jobs=1)
     args = parser.parse_args()
 
     if args.action == "download":
@@ -149,7 +107,16 @@ def _main():
         for split in _SPLITS:
             print(f"{split}: {len(list_theorems(split))} theorems")
     elif args.action == "check-init":
-        _check_init(args.split, args.lean_server, args.limit)
+        run_check_init_cli(
+            theorems=list_theorems(args.split),
+            dataset_file=FILE_PATH,
+            lean_server=args.lean_server,
+            lean_project=args.lean_project,
+            num_workers=args.jobs,
+            limit=args.limit,
+            verbose=args.verbose,
+            save=False,
+        )
 
 
 if __name__ == "__main__":
