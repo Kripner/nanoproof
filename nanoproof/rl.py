@@ -371,6 +371,12 @@ while True:
             timer.end("collect")
             flush()
 
+            # Park workers in a Python-level wait while master collects, so they
+            # do not enter the NCCL broadcast below until master is also there.
+            # Without this, workers block in NCCL for the entire collect duration
+            # and trip the 10-min watchdog if collect ever takes longer.
+            active_barrier(f"collect_{step}", timeout=None)
+
             # Broadcast replay buffer from rank 0 to all ranks
             replay_buffer.synchronize()
 
