@@ -29,7 +29,7 @@ from nanoproof.checkpoints import (
     parse_checkpoint_path,
     save_eval_results,
 )
-from nanoproof.common import active_barrier_master, active_barrier_wait, autodetect_device_type, broadcast_value, compute_cleanup, compute_init, enable_memory_profiling, print0
+from nanoproof.common import active_barrier, autodetect_device_type, broadcast_value, compute_cleanup, compute_init, enable_memory_profiling, print0
 from nanoproof.data.bench import minif2f
 from nanoproof.data.rl import leanworkbook
 from nanoproof.inference import BlockingTacticModel, TacticModel, compute_max_batch_prompt_tokens
@@ -189,8 +189,7 @@ def main():
         tactic_model.max_gen_samples = broadcast_value(tactic_model.max_gen_samples)
         tactic_model.max_batch_prompt_tokens = broadcast_value(tactic_model.max_batch_prompt_tokens)
 
-    if ddp:
-        active_barrier_master("inference_ready") if master_process else active_barrier_wait("inference_ready")
+    active_barrier("inference_ready")
 
     atexit.register(lambda: tactic_model.shutdown())
 
@@ -255,10 +254,7 @@ def main():
         total_elapsed = time.monotonic() - eval_start
         print0(f"\nTotal evaluation time: {total_elapsed:.1f}s")
 
-        if ddp:
-            active_barrier_master("prover_eval_done")
-    else:
-        active_barrier_wait("prover_eval_done")
+    active_barrier("prover_eval_done")
 
     compute_cleanup()
     return all_results
