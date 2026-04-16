@@ -103,10 +103,12 @@ def filter_by_whitelist(
     """
     wl = load_whitelist(whitelist_file)
     if wl is None:
-        raise FileNotFoundError(
+        msg = (
             f"Whitelist not found: {whitelist_file}. "
             f"Generate it via the {dataset_name!r} module's `check-init` CLI action."
         )
+        log(msg, component="Whitelist")
+        raise FileNotFoundError(msg)
 
     passing = wl["passing"]
     failing = wl["failing"]
