@@ -57,6 +57,27 @@ class Prover:
         self.config = config
         self.tactic_model = tactic_model
 
+    @staticmethod
+    def _get_process_interruptible(client: LeanClient, abort_check: Callable[[], bool] | None,
+                                   poll_interval: float = 10.0, max_wait: float = 300.0):
+        """Get a Lean process, polling abort_check between short blocking calls.
+
+        Uses short server-side timeouts so that abort_check is tested every
+        *poll_interval* seconds.  Returns None if aborted or *max_wait* is
+        exceeded.
+        """
+        deadline = time.time() + max_wait
+        while True:
+            if abort_check is not None and abort_check():
+                return None
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return None
+            timeout = min(poll_interval, remaining)
+            process = client.get_process(timeout=timeout)
+            if process is not None:
+                return process
+
     def prove(self, client: LeanClient, theorem: BenchTheorem, expansion_callback: Callable[[], None] | None = None,
               abort_check: Callable[[], bool] | None = None) -> Game | None:
         """Run a single MCTS proof game.
@@ -64,13 +85,12 @@ class Prover:
         Returns a :class:`Game` with results, or ``None`` if Lean setup fails.
         """
         logger.debug(f"Proving: {theorem.source[:80]}...")
-        process = client.get_process()
+        process = self._get_process_interruptible(client, abort_check)
         if process is None:
             log(f"FAILED: Could not get Lean process for theorem", component="Prover")
             return None
 
         with process as env:
-            env.send_command(theorem.header)
             example = theorem_to_example(theorem.source)
             init_branch = env.proof_from_sorry(example)
             if not init_branch.is_success():
@@ -275,7 +295,6 @@ class ProverWorker:
             with results_lock:
                 results.append({
                     "theorem": theorem.source,
-                    "header": theorem.header,
                     "name": theorem.name,
                     "is_solved": is_solved,
                     "error": error,
