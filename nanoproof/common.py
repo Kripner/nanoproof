@@ -749,15 +749,15 @@ def theorem_to_example(source: str) -> str:
     stripped_line = theorem_line.lstrip()
     
     # Find the end of the theorem name (first whitespace after "theorem ")
-    rest_after_theorem = stripped_line[len(theorem_prefix):]
-    
+    rest_after_theorem = stripped_line[len(theorem_prefix):].lstrip()
+
     # The theorem name is the first token - find where it ends
     name_end = None
     for i, char in enumerate(rest_after_theorem):
         if char in (' ', '\t', '\n', '(', ':'):
             name_end = i
             break
-    
+
     # If no delimiter found, the theorem name extends to end of line
     if name_end is None:
         name_end = len(rest_after_theorem)
