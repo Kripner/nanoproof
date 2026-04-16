@@ -3,10 +3,10 @@
 Public interface:
 - ``download_dataset()`` - fetch the source JSONL from HuggingFace.
 - ``list_theorems(split, lean_version=None)`` - return the parsed theorem
-  statements for the requested split (``"train"`` or ``"valid"``). Each entry
-  is a Lean source string ending in ``:= by sorry``, ready to feed to
-  ``proof_from_sorry``. If ``lean_version`` is given, filter via the matching
-  on-disk whitelist.
+  statements for the requested split (``"train"`` or ``"valid"``). Each
+  entry is a Lean source string ending in ``sorry``, ready to feed to
+  ``proof_from_sorry``. If ``lean_version`` is given, filter via the
+  matching on-disk whitelist.
 
 CLI: see ``python -m nanoproof.data.rl.deepseek_prover --help``.
 
@@ -23,7 +23,7 @@ import json
 import os
 
 from nanoproof.common import get_base_dir
-from nanoproof.data.bench.common import BenchTheorem, MINIF2F_HEADER
+from nanoproof.data.bench.common import BenchTheorem, DEEPSEEK_PROVER_PREAMBLE
 from nanoproof.data.check_init import (
     add_check_init_args,
     filter_by_whitelist,
@@ -64,6 +64,7 @@ def _load_sources() -> list[str]:
         raise FileNotFoundError(
             f"DeepSeek-Prover-V1 dataset not found at {JSONL_PATH}. Run with `download` first."
         )
+
     with open(JSONL_PATH, "r") as f:
         rows = [json.loads(line) for line in f]
 
@@ -94,7 +95,7 @@ def list_theorems(split: str, lean_version: str | None = None) -> list[BenchTheo
     assert split in ("train", "valid"), f"Invalid split: {split!r}"
     sources = _load_sources()
     split_sources = shuffle_train_valid_split(sources, valid_size=500, seed=0)[split]
-    theorems = [BenchTheorem(source=s, header=MINIF2F_HEADER) for s in split_sources]
+    theorems = [BenchTheorem(source=DEEPSEEK_PROVER_PREAMBLE + s) for s in split_sources]
 
     if lean_version is not None:
         theorems = filter_by_whitelist(
@@ -107,7 +108,7 @@ def list_theorems(split: str, lean_version: str | None = None) -> list[BenchTheo
 
 def _all_theorems() -> list[BenchTheorem]:
     """Every theorem across both splits, for whitelist generation."""
-    return [BenchTheorem(source=s, header=MINIF2F_HEADER) for s in _load_sources()]
+    return [BenchTheorem(source=DEEPSEEK_PROVER_PREAMBLE + s) for s in _load_sources()]
 
 
 # -----------------------------------------------------------------------------

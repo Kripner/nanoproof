@@ -31,7 +31,7 @@ from nanoproof.checkpoints import (
 )
 from nanoproof.common import active_barrier, autodetect_device_type, broadcast_value, compute_cleanup, compute_init, enable_memory_profiling, print0
 from nanoproof.data.bench import minif2f, proofnet
-from nanoproof.data.bench.common import BenchTheorem, MINIF2F_HEADER
+from nanoproof.data.bench.common import BenchTheorem
 from nanoproof.data.check_init import read_lean_version
 from nanoproof.data.rl import leanworkbook
 from nanoproof.inference import BlockingTacticModel, TacticModel, compute_max_batch_prompt_tokens
@@ -74,7 +74,7 @@ def main():
                         help="Path to the Lean project directory (contains lean-toolchain). The Lean version is read from this file and used to select per-dataset whitelists.")
     parser.add_argument("--lean-servers", type=str, nargs="+", required=True,
                         help="Lean server addresses (e.g., 10.10.25.33:8000 10.10.25.34); port defaults to 8000")
-    parser.add_argument("--datasets", type=str, default="minif2f,proofnet",
+    parser.add_argument("--datasets", type=str, default="minif2f",
                         help="comma-separated datasets (minif2f, leanworkbook, proofnet)")
     parser.add_argument("--split", type=str, default="valid", choices=["valid", "test"])
     parser.add_argument("--max-theorems", type=int, default=None)
@@ -140,13 +140,9 @@ def main():
             else:
                 for dataset_name, eval_path in existing_results:
                     successful, errors = load_existing_eval_results(eval_path)
-                    # Reconstruct BenchTheorem from stored records. Older JSONL
-                    # files may predate the header field; default to MINIF2F_HEADER
-                    # in that case (what prover.py implicitly used before).
                     error_theorems = [
                         BenchTheorem(
                             source=e["theorem"],
-                            header=e.get("header") or MINIF2F_HEADER,
                             name=e.get("name"),
                         )
                         for e in errors

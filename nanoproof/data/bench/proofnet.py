@@ -3,10 +3,9 @@
 Public interface:
 - ``download_dataset()`` - fetch the .jsonl file.
 - ``list_theorems(split)`` - return the parsed theorems for the requested
-  split (``"valid"`` or ``"test"``) as ``BenchTheorem``. Each carries its own
-  ``header`` (opens + any auxiliary ``def``s) taken from the upstream record;
-  the dataset uses 25 distinct headers across 371 theorems, so a single
-  shared preamble is not workable.
+  split (``"valid"`` or ``"test"``) as ``BenchTheorem``. Each theorem's
+  ``source`` includes per-theorem opens / auxiliary ``def``s from the
+  upstream record (25 distinct preambles across 371 theorems).
 
 CLI: see ``python -m nanoproof.data.bench.proofnet --help``.
 """
@@ -28,9 +27,6 @@ FILE_PATH = os.path.join(DATA_DIR, FILENAME)
 
 _SPLITS = ("valid", "test")
 
-_IMPORT_PREFIX = "import Mathlib"
-
-
 def download_dataset() -> None:
     """Download proofnet.jsonl from the DeepSeek-Prover-V1.5 GitHub repo."""
     download_hf_file(SOURCE_URL, FILE_PATH, desc=FILENAME)
@@ -46,18 +42,14 @@ def _load_records() -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
-def _strip_import_mathlib(header: str) -> str:
-    """Remove the `import Mathlib` line from a raw proofnet header.
+def _strip_imports(header: str) -> str:
+    """Remove ``import`` lines from a raw proofnet header.
 
     Imports are applied server-side once per process. The remaining body
-    (opens, open scoped, and any auxiliary defs) becomes BenchTheorem.header.
+    (opens, open scoped, and any auxiliary defs) becomes part of the source.
     """
     lines = header.split("\n")
-    out = []
-    for line in lines:
-        if line.strip() == _IMPORT_PREFIX:
-            continue
-        out.append(line)
+    out = [line for line in lines if not line.strip().startswith("import ")]
     return "\n".join(out).strip()
 
 
@@ -77,8 +69,10 @@ def list_theorems(split: str) -> list[BenchTheorem]:
             source = stmt + " by\n  sorry"
         else:
             raise ValueError(f"unexpected suffix in formal_statement for {r.get('name')!r}: {stmt!r}")
-        header = _strip_import_mathlib(r["header"])
-        theorems.append(BenchTheorem(source=source, header=header, name=r.get("name")))
+        preamble = _strip_imports(r["header"])
+        if preamble:
+            source = preamble + "\n\n" + source
+        theorems.append(BenchTheorem(source=source, name=r.get("name")))
     assert all(t.source.count("sorry") == 1 for t in theorems), "Found a theorem with no or multiple `sorry`."
     return theorems
 
@@ -108,7 +102,6 @@ def _main():
     elif args.action == "show":
         for thm in list_theorems(args.split)[:args.n]:
             print(f"# {thm.name}")
-            print(f"# header:\n{thm.header}")
             print(thm.source)
             print("-" * 80)
     elif args.action == "stats":

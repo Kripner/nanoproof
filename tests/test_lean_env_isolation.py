@@ -1,9 +1,8 @@
 """Verify LeanProcessPool isolates per-session commands across acquisitions.
 
-The per-theorem header refactor (Prover.prove sends ``theorem.header`` via
-``env.send_command(...)`` before ``proof_from_sorry``) only works if the pool
-restores each process to its post-``import Mathlib`` checkpoint on release,
-so that ``open``s / ``def``s from one proof don't leak into the next.
+Each theorem's source may contain ``open`` / ``def`` preambles that are
+processed by ``proof_from_sorry``. The pool must restore each process to
+its post-``import Mathlib`` checkpoint on release so these don't leak.
 
 Requires a live Lean REPL server. Skipped unless ``NANOPROOF_LEAN_SERVER``
 is set (e.g. ``NANOPROOF_LEAN_SERVER=10.10.25.33:8000 pytest -k isolation``).

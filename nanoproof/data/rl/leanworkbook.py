@@ -14,7 +14,7 @@ import json
 import os
 
 from nanoproof.common import get_base_dir
-from nanoproof.data.bench.common import BenchTheorem, LEANWORKBOOK_HEADER
+from nanoproof.data.bench.common import BenchTheorem, LEANWORKBOOK_PREAMBLE
 from nanoproof.data.check_init import (
     add_check_init_args,
     filter_by_whitelist,
@@ -48,7 +48,7 @@ def list_theorems(split: str, lean_version: str | None = None) -> list[BenchTheo
     assert split in ("train", "valid"), f"Invalid split: {split!r}"
     sources = _load_sources()
     split_sources = shuffle_train_valid_split(sources, valid_size=500, seed=0)[split]
-    theorems = [BenchTheorem(source=s, header=LEANWORKBOOK_HEADER) for s in split_sources]
+    theorems = [BenchTheorem(source=LEANWORKBOOK_PREAMBLE + s) for s in split_sources]
 
     if lean_version is not None:
         theorems = filter_by_whitelist(
@@ -61,7 +61,7 @@ def list_theorems(split: str, lean_version: str | None = None) -> list[BenchTheo
 
 def _all_theorems() -> list[BenchTheorem]:
     """Every theorem across both splits, for whitelist generation."""
-    return [BenchTheorem(source=s, header=LEANWORKBOOK_HEADER) for s in _load_sources()]
+    return [BenchTheorem(source=LEANWORKBOOK_PREAMBLE + s) for s in _load_sources()]
 
 
 # -----------------------------------------------------------------------------

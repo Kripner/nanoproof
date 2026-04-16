@@ -1,12 +1,13 @@
 """Shared types for benchmark / RL theorem datasets.
 
-``BenchTheorem`` bundles a theorem source with the Lean REPL preamble it
-needs (``open``s, ``open scoped``s, and any auxiliary ``def``s). The
-preamble is sent via ``env.send_command(theorem.header)`` before
-``env.proof_from_sorry(theorem.source)`` inside :class:`nanoproof.prover.Prover`.
+``BenchTheorem`` wraps a Lean source string that is ready to feed to
+``proof_from_sorry`` via the leantree REPL. The ``source`` contains
+everything needed to initialize the proof -- ``open`` / ``open scoped``
+directives, auxiliary ``def``s, and the theorem/example declaration ending
+in ``sorry``.
 
-The ``header`` must NOT contain ``import`` directives. Imports are applied
-once per Lean process at server startup via ``leanserver --imports Mathlib``.
+Imports (``import Mathlib``, etc.) are applied once per Lean process at
+server startup and must NOT appear in ``source``.
 """
 
 from dataclasses import dataclass
@@ -15,30 +16,31 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class BenchTheorem:
     source: str
-    header: str
     name: str | None = None
 
 
-# miniF2F preamble. Mirrors the upstream Valid.lean header exactly. Uses
-# ``open scoped`` so e.g. ``Nat.gcd`` is not pulled in as top-level ``gcd``
-# (which would conflict with ``GCDMonoid.gcd`` from Mathlib and produce
-# "Ambiguous term: gcd" init failures).
-MINIF2F_HEADER = (
+# Per-dataset preambles (open statements). These are prepended to each
+# theorem's source by the respective dataset loader.
+
+# miniF2F preamble. Mirrors upstream Valid.lean. Uses ``open scoped`` so
+# e.g. ``Nat.gcd`` is not pulled in as top-level ``gcd``.
+MINIF2F_PREAMBLE = (
     "open scoped Real\n"
     "open scoped Nat\n"
     "open scoped Topology\n"
-    "open scoped Polynomial"
+    "open scoped Polynomial\n\n"
 )
 
 # LeanWorkBook preamble. Matches InternLM's upstream header at
 # https://github.com/InternLM/InternLM-Math/blob/main/leanworkbook/header.lean
-# - unscoped opens for Nat/Real/Rat so bare identifiers like ``choose``,
-# ``factorial``, ``gcd``, ``log`` resolve without qualification. The
-# ``open scoped`` variant used by MINIF2F_HEADER would reject most of these
-# since LeanWorkBook theorems were generated against this header.
-LEANWORKBOOK_HEADER = (
+LEANWORKBOOK_PREAMBLE = (
     "open BigOperators\n"
     "open Nat\n"
     "open Real\n"
-    "open Rat"
+    "open Rat\n\n"
+)
+
+# DeepSeek-Prover-V1 preamble. All 27k rows share the same header upstream.
+DEEPSEEK_PROVER_PREAMBLE = (
+    "open BigOperators Real Nat Topology Rat\n\n"
 )

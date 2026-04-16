@@ -3,8 +3,7 @@
 Public interface:
 - ``download_dataset()`` - fetch the .lean files from the GitHub repo.
 - ``list_theorems(split)`` - return the parsed theorems for the requested
-  split (``"valid"`` or ``"test"``), each wrapped as a ``BenchTheorem`` with
-  the shared ``MINIF2F_HEADER``. The dataset has no train split.
+  split (``"valid"`` or ``"test"``), each wrapped as a ``BenchTheorem``.
 
 CLI: see ``python -m nanoproof.data.bench.minif2f --help``.
 """
@@ -14,7 +13,7 @@ import os
 from pathlib import Path
 
 from nanoproof.common import get_base_dir
-from nanoproof.data.bench.common import BenchTheorem, MINIF2F_HEADER
+from nanoproof.data.bench.common import BenchTheorem, MINIF2F_PREAMBLE
 from nanoproof.data.check_init import add_check_init_args, run_check_init_cli
 from nanoproof.data.rl.common import download_hf_file
 
@@ -78,7 +77,7 @@ def list_theorems(split: str) -> list[BenchTheorem]:
     assert all(s.count("sorry") == 1 for s in sources), "Found a theorem with no or multiple `sorry`."
     expected_count = 256 if split == "valid" else 244
     assert len(sources) == expected_count, f"minif2f: expected {expected_count} theorems, got {len(sources)}"
-    return [BenchTheorem(source=s, header=MINIF2F_HEADER) for s in sources]
+    return [BenchTheorem(source=MINIF2F_PREAMBLE + s) for s in sources]
 
 
 # -----------------------------------------------------------------------------

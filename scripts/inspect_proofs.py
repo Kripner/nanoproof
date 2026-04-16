@@ -10,7 +10,6 @@ from pathlib import Path
 from leantree.repl_adapter.server import LeanClient
 
 from nanoproof.common import linearize_proof, format_linearized_proof
-from nanoproof.data.bench.common import MINIF2F_HEADER
 from nanoproof.search import Node, revive_tree_states
 from nanoproof.experience_collection import prune_redundant_nodes, compute_value_target
 
@@ -27,10 +26,12 @@ import FormalConjectures.Util.Answer
 def _record_header(item: dict) -> str:
     """Return the header to send to the REPL for a stored proof record.
 
-    Older JSONL records predate the header field - default to the shared
-    miniF2F preamble in that case.
+    Older JSONL records have a separate ``header`` field. Newer records
+    embed the preamble in ``theorem`` directly, so this returns an empty
+    string. Falls back to the miniF2F preamble for the oldest records
+    that have neither.
     """
-    return item.get("header") or MINIF2F_HEADER
+    return item.get("header") or ""
 
 
 def load_proofs(path: str) -> list[dict]:
@@ -425,7 +426,10 @@ def cmd_gather_lean(args):
                     theorem = theorem_body + proof_lines
 
             header = _record_header(item)
-            lean_blocks.append(f"section\n{header}\n\n{theorem}\n\nend")
+            if header:
+                lean_blocks.append(f"section\n{header}\n\n{theorem}\n\nend")
+            else:
+                lean_blocks.append(f"section\n\n{theorem}\n\nend")
 
         # Write the Lean file
         output_path = output_base / f"{step}-minif2f.lean"

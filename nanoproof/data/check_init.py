@@ -28,12 +28,11 @@ from nanoproof.data.bench.common import BenchTheorem
 
 
 def theorem_hash(theorem: BenchTheorem) -> str:
-    """16-hex-char content hash over ``header + "\\n" + source``.
+    """16-hex-char content hash of ``source``.
 
     Hash-keyed whitelists survive upstream dataset growth and reshuffles.
     """
-    payload = (theorem.header + "\n" + theorem.source).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()[:16]
+    return hashlib.sha256(theorem.source.encode("utf-8")).hexdigest()[:16]
 
 
 # -----------------------------------------------------------------------------
@@ -172,7 +171,6 @@ def _check_one(client: LeanClient, theorem: BenchTheorem) -> tuple[bool, str | N
         return False, "could not acquire Lean process"
     try:
         with process as env:
-            env.send_command(theorem.header)
             example = theorem_to_example(theorem.source)
             init_branch = env.proof_from_sorry(example)
             if not init_branch.is_success():
@@ -223,8 +221,7 @@ def run_check_init(
                 name = f" {theorem.name}" if theorem.name else ""
                 print(
                     f"[{n}/{total}]{name} FAILED ({h}): {err}\n"
-                    f"--- header ---\n{theorem.header}\n"
-                    f"--- theorem ---\n{theorem.source}\n",
+                    f"--- source ---\n{theorem.source}\n",
                     flush=True,
                 )
             elif verbose:

@@ -17,7 +17,7 @@ import re
 import pyarrow.parquet as pq
 
 from nanoproof.common import get_base_dir
-from nanoproof.data.bench.common import BenchTheorem, MINIF2F_HEADER
+from nanoproof.data.bench.common import BenchTheorem
 from nanoproof.data.check_init import (
     add_check_init_args,
     filter_by_whitelist,
@@ -30,19 +30,31 @@ DATA_DIR = os.path.join(get_base_dir(), "data", "numinamath")
 PARQUET_PATH = os.path.join(DATA_DIR, "numinamath.parquet")
 HF_URL = "https://huggingface.co/datasets/AI-MO/NuminaMath-LEAN/resolve/main/data/train-00000-of-00001.parquet"
 
+# Lines starting with these prefixes are stripped from the raw
+# ``formal_statement``. Imports are server-side; ``set_option`` values
+# (heartbeats, recursion depth) are server defaults and per-problem
+# overrides would be unsafe.
+_STRIP_PREFIXES = ("import ", "set_option ", "#check ")
+
 
 def _process_statement(statement: str) -> str | None:
-    """Strip leading directive lines and append a `sorry` placeholder.
-    Returns None if the statement doesn't end with `:=`, `:= by`, or
-    `:=` followed by whitespace and ``by``.
+    """Strip import / set_option / #check lines and append a ``sorry``
+    placeholder. Returns None if the statement doesn't end with ``:=``,
+    ``:= by``, or ``:=`` followed by whitespace and ``by``.
+
+    ``open`` lines are kept - they are per-theorem preamble that stays in
+    ``source`` alongside the theorem declaration.
     """
     statement = statement.strip()
 
-    # Drop leading import / set_option / #check lines
     lines = statement.split("\n")
-    while lines and (lines[0].startswith("import ") or lines[0].startswith("set_option ") or lines[0].startswith("#check ")):
-        lines.pop(0)
-    statement = "\n".join(lines).rstrip()
+    kept = []
+    for line in lines:
+        stripped = line.lstrip()
+        if any(stripped.startswith(p) for p in _STRIP_PREFIXES):
+            continue
+        kept.append(line)
+    statement = "\n".join(kept).strip()
 
     if re.search(r":=\s*by\s*$", statement):
         return statement + " sorry"
@@ -87,7 +99,7 @@ def list_theorems(split: str, lean_version: str | None = None) -> list[BenchTheo
     assert split in ("train", "valid"), f"Invalid split: {split!r}"
     sources = _load_sources()
     split_sources = shuffle_train_valid_split(sources, valid_size=500, seed=0)[split]
-    theorems = [BenchTheorem(source=s, header=MINIF2F_HEADER) for s in split_sources]
+    theorems = [BenchTheorem(source=s) for s in split_sources]
 
     if lean_version is not None:
         theorems = filter_by_whitelist(
@@ -100,7 +112,7 @@ def list_theorems(split: str, lean_version: str | None = None) -> list[BenchTheo
 
 def _all_theorems() -> list[BenchTheorem]:
     """Every theorem across both splits, for whitelist generation."""
-    return [BenchTheorem(source=s, header=MINIF2F_HEADER) for s in _load_sources()]
+    return [BenchTheorem(source=s) for s in _load_sources()]
 
 
 # -----------------------------------------------------------------------------
