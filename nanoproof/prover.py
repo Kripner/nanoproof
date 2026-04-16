@@ -95,17 +95,20 @@ class Prover:
                 abort_check=abort_check,
             )
             if game.root.is_solved:
-                try:
-                    verify_node(game.root)
-                except AssertionError as e:
-                    log(f"FAILED: Verification failed after {game.num_iterations} iterations: '{e}'\nTheorem: '{theorem.source}'\nProof tree:\n{game.root.pp_tree()}", component="Prover")
+                verify_err = verify_node(game.root, timeout=self.config.verify_timeout)
+                if verify_err:
+                    log(f"FAILED: Verification failed after {game.num_iterations} iterations: '{verify_err}'\nTheorem: '{theorem.source}'\nProof tree:\n{game.root.pp_tree()}", component="Prover")
                     game.root.is_solved = False
                     return game
                 game.unsimplified_root = game.root.clone()
                 prune_redundant_nodes(game.root)
                 compute_value_target(game.root)
 
-                verify_node(game.root)
+                verify_err = verify_node(game.root, timeout=self.config.verify_timeout)
+                if verify_err:
+                    log(f"FAILED: Post-prune verification failed after {game.num_iterations} iterations: '{verify_err}'\nTheorem: '{theorem.source}'\nProof tree:\n{game.root.pp_tree()}", component="Prover")
+                    game.root.is_solved = False
+                    return game
 
                 # Verify the linearized proof compiles correctly
                 tactics = linearize_proof(game.root)
@@ -220,7 +223,8 @@ class ProverWorker:
 
     @torch.no_grad()
     def evaluate(self, theorems: list[BenchTheorem], dataset_name: str, num_simulations: int,
-                 progress_callback: Callable[[int, int, int, int], None] | None = None) -> dict:
+                 progress_callback: Callable[[int, int, int, int], None] | None = None,
+                 verify_timeout: int = 5000) -> dict:
         """Evaluate theorems using MCTS. Returns metrics dict.
 
         *progress_callback*, if given, is called as
@@ -297,7 +301,7 @@ class ProverWorker:
             with results_lock:
                 return len(results) >= len(theorems)
 
-        prover = Prover(SearchConfig(num_simulations=num_simulations), self.tactic_model)
+        prover = Prover(SearchConfig(num_simulations=num_simulations, verify_timeout=verify_timeout), self.tactic_model)
         self._run_pool(prover, get_theorem, on_result, done_check)
 
         total = len(results)

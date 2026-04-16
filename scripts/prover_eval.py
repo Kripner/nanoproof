@@ -258,7 +258,7 @@ def main():
 
             dataset_start = time.monotonic()
             results = prover.evaluate(theorems, dataset_name=dataset_name, num_simulations=args.num_simulations,
-                                      progress_callback=progress_callback)
+                                      progress_callback=progress_callback, verify_timeout=30000)
             dataset_elapsed = time.monotonic() - dataset_start
             done.set()
             printer.join()

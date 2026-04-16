@@ -27,6 +27,7 @@ class SearchConfig:
     no_legal_actions_value: float = -40.0
     ps_c: float = 0.01
     ps_alpha: float = 0.6
+    verify_timeout: int = 5000  # ms timeout for tactic re-check in verify_node
 
 
 Action = str | int
@@ -235,7 +236,7 @@ class MockProofBranch:
 
 
 # TODO: deduplicate with execute_tree (just execute & check that all states equal to the expected values)
-def verify_node(node: Node):
+def verify_node(node: Node, timeout: int = 5000):
     assert node.to_play == Player.OR, f"verify_node: Expected OR root, got {node.to_play}"
     assert len(node.state) == 1, f"verify_node: Expected 1 branch at root, got {len(node.state)}"
     init_branch = node.state[0]
@@ -257,8 +258,9 @@ def verify_node(node: Node):
             for action in solved_actions:
                 child = node.children[action]
 
-                result = branch.try_apply_tactic(action, timeout=5000)
-                assert result.is_success(), f"verify_node: Tactic application error: '{result.error}'; state: '{branch.state}'; action: `{action}`"
+                result = branch.try_apply_tactic(action, timeout=timeout)
+                if not result.is_success():
+                    return f"verify_node: Tactic application error: '{result.error}'; state: '{branch.state}'; action: `{action}`"
                 
                 new_branches = result.value
                 if len(new_branches) != len(child.state):
