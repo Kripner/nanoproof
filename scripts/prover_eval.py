@@ -7,7 +7,7 @@ Usage:
     python scripts/prover_eval.py \\
         --model-path sft/.../model_005000.pt \\
         --lean-servers 10.10.25.33:8000 \\
-        --datasets minif2f,leanworkbook
+        --datasets minif2f,proofnet
 """
 
 import argparse
@@ -74,7 +74,7 @@ def main():
                         help="Path to the Lean project directory (contains lean-toolchain). The Lean version is read from this file and used to select per-dataset whitelists.")
     parser.add_argument("--lean-servers", type=str, nargs="+", required=True,
                         help="Lean server addresses (e.g., 10.10.25.33:8000 10.10.25.34); port defaults to 8000")
-    parser.add_argument("--datasets", type=str, default="minif2f",
+    parser.add_argument("--datasets", type=str, default="minif2f,proofnet",
                         help="comma-separated datasets (minif2f, leanworkbook, proofnet)")
     parser.add_argument("--split", type=str, default="valid", choices=["valid", "test"])
     parser.add_argument("--max-theorems", type=int, default=None)

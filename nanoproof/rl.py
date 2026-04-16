@@ -30,7 +30,7 @@ from nanoproof.inference import TacticModel, BlockingTacticModel, compute_max_ba
 from nanoproof.optim import optimizer_to_cpu, optimizer_to_gpu
 from nanoproof.data.bench import minif2f
 from nanoproof.data.check_init import read_lean_version
-from nanoproof.data.rl import leanworkbook
+from nanoproof.data.bench import proofnet
 from nanoproof.cli import create_monitor, configure_logging, log, log0, set_ddp_info
 from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
 from nanoproof.data.sft.leantree_dataloader import sft_data_generator
@@ -266,7 +266,7 @@ if ddp:
 # Go!
 step = 0
 minif2f_results = None
-leanworkbook_results = None
+proofnet_results = None
 
 def cleanup():
     """Cleanup function to ensure resources are released on shutdown."""
@@ -298,22 +298,22 @@ while True:
         # Worker ranks poll via active_barrier so their inference servers stay responsive.
         if master_process:
             minif2f_theorems = minif2f.list_theorems(split="valid")
-            leanworkbook_theorems = leanworkbook.list_theorems(split="valid", lean_version=lean_version)[:128]
+            proofnet_theorems = proofnet.list_theorems(split="valid")
 
             log(f"Evaluating on {len(minif2f_theorems)} theorems from MiniF2F", component="Eval")
             minif2f_results = prover.evaluate(minif2f_theorems, dataset_name="MiniF2F", num_simulations=args.num_simulations_eval)
-            log(f"Evaluating on {len(leanworkbook_theorems)} theorems from LeanWorkBook", component="Eval")
-            leanworkbook_results = prover.evaluate(leanworkbook_theorems, dataset_name="LeanWorkBook", num_simulations=args.num_simulations_eval)
+            log(f"Evaluating on {len(proofnet_theorems)} theorems from ProofNet", component="Eval")
+            proofnet_results = prover.evaluate(proofnet_theorems, dataset_name="ProofNet", num_simulations=args.num_simulations_eval)
 
             rl_monitor.record_eval(step, "MiniF2F", minif2f_results['success_rate'],
                                    minif2f_results['solved'], minif2f_results['total'], minif2f_results['errors'])
-            rl_monitor.record_eval(step, "LeanWorkBook", leanworkbook_results['success_rate'],
-                                   leanworkbook_results['solved'], leanworkbook_results['total'],
-                                   leanworkbook_results['errors'])
+            rl_monitor.record_eval(step, "ProofNet", proofnet_results['success_rate'],
+                                   proofnet_results['solved'], proofnet_results['total'],
+                                   proofnet_results['errors'])
 
             minif2f_status = f"minif2f: {minif2f_results['success_rate']:.4%} ({minif2f_results['solved']}/{minif2f_results['total']}, errors={minif2f_results['errors']})"
-            leanworkbook_status = f"leanworkbook: {leanworkbook_results['success_rate']:.4%} ({leanworkbook_results['solved']}/{leanworkbook_results['total']}, errors={leanworkbook_results['errors']})"
-            log(f"Step {step:05d} | {minif2f_status} | {leanworkbook_status}", component="Eval")
+            proofnet_status = f"proofnet: {proofnet_results['success_rate']:.4%} ({proofnet_results['solved']}/{proofnet_results['total']}, errors={proofnet_results['errors']})"
+            log(f"Step {step:05d} | {minif2f_status} | {proofnet_status}", component="Eval")
 
             wandb_data = {
                 "step": step,
@@ -325,16 +325,16 @@ while True:
                 "val_critic_soft_mse": critic_results["soft_mse"],
                 "val_critic_entropy": critic_results["entropy"],
                 "minif2f_val": minif2f_results['success_rate'],
-                "leanworkbook_val": leanworkbook_results['success_rate'],
+                "proofnet_val": proofnet_results['success_rate'],
             }
             if minif2f_results['errors'] > 0:
                 wandb_data["minif2f_errors"] = minif2f_results['errors']
-            if leanworkbook_results['errors'] > 0:
-                wandb_data["leanworkbook_errors"] = leanworkbook_results['errors']
+            if proofnet_results['errors'] > 0:
+                wandb_data["proofnet_errors"] = proofnet_results['errors']
             wandb_run.log(wandb_data)
 
             save_eval_results_to_run_dir(output_dir, step, "minif2f", minif2f_results)
-            save_eval_results_to_run_dir(output_dir, step, "leanworkbook", leanworkbook_results)
+            save_eval_results_to_run_dir(output_dir, step, "proofnet", proofnet_results)
 
         # Prover eval can take many minutes; no timeout (use SIGUSR1 to debug).
         active_barrier(f"prover_eval_{step}", timeout=None)
@@ -396,8 +396,8 @@ while True:
         }
         if minif2f_results:
             checkpoint_meta["minif2f_val"] = minif2f_results['success_rate']
-        if leanworkbook_results:
-            checkpoint_meta["leanworkbook_val"] = leanworkbook_results['success_rate']
+        if proofnet_results:
+            checkpoint_meta["proofnet_val"] = proofnet_results['success_rate']
         save_checkpoint(
             model_dir,
             step,
