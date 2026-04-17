@@ -409,7 +409,7 @@ class ProverWorker:
                                             timeline=timeline)
                         consecutive_errors = 0
                         break
-                    except (ConnectionResetError, ConnectionRefusedError, BrokenPipeError, LeanProcessException, RemoteException) as e:
+                    except (ConnectionError, LeanProcessException, RemoteException) as e:
                         if attempt < max_retries - 1:
                             set_thread_state(actor_id, "retry")
                             log(f"[Actor {actor_id}] Connection error (attempt {attempt + 1}/{max_retries}): '{e}', reconnecting...", component="Prover")
