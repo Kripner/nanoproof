@@ -17,6 +17,7 @@ from typing import Callable, Optional
 import torch
 from leantree.repl_adapter.server import LeanClient
 from leantree.repl_adapter.interaction import LeanProcessException
+from leantree.utils import RemoteException
 
 from nanoproof.common import (
     Player,
@@ -408,7 +409,7 @@ class ProverWorker:
                                             timeline=timeline)
                         consecutive_errors = 0
                         break
-                    except (ConnectionResetError, ConnectionRefusedError, BrokenPipeError, LeanProcessException) as e:
+                    except (ConnectionResetError, ConnectionRefusedError, BrokenPipeError, LeanProcessException, RemoteException) as e:
                         if attempt < max_retries - 1:
                             set_thread_state(actor_id, "retry")
                             log(f"[Actor {actor_id}] Connection error (attempt {attempt + 1}/{max_retries}): '{e}', reconnecting...", component="Prover")
