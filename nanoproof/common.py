@@ -761,7 +761,7 @@ def construct_proof_source(theorem: str, tactics: list[str]) -> str:
 
 
 _THEOREM_NAME_RE = re.compile(
-    r'(^|\n)(\s*)(?:theorem|def|lemma)\s+\S+',
+    r'(^|\n)(\s*(?:noncomputable\s+|private\s+|protected\s+)*)(?:theorem|def|lemma)\s+\S+',
 )
 
 def theorem_to_example(source: str) -> str:
