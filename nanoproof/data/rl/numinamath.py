@@ -57,10 +57,18 @@ def _process_statement(statement: str) -> str | None:
     statement = "\n".join(kept).strip()
 
     if re.search(r":=\s*by\s*$", statement):
-        return statement + " sorry"
-    if statement.endswith(":="):
-        return statement + " by sorry"
-    return None
+        result = statement + " sorry"
+    elif statement.endswith(":="):
+        result = statement + " by sorry"
+    else:
+        return None
+
+    # Skip statements that already contain sorry (e.g. auxiliary lemmas
+    # with sorry proofs). The prover expects exactly one sorry -- the one
+    # we just appended for the main theorem.
+    if result.count("sorry") > 1:
+        return None
+    return result
 
 
 def download_dataset() -> None:
@@ -119,7 +127,7 @@ def _all_theorems() -> list[BenchTheorem]:
 # CLI: download / show / stats / check-init
 
 def _main():
-    parser = argparse.ArgumentParser(description="NuminaMath-LEAN dataset")
+    parser = argparse.ArgumentParser(description="NuminaMath-LEAN dataset", allow_abbrev=False)
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("download", help="Download the source parquet from HuggingFace")
     show = sub.add_parser("show", help="Print the first N theorems from a split")
