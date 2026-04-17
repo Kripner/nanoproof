@@ -441,7 +441,8 @@ def cmd_gather_lean(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Inspect proofs found during evaluation."
+        description="Inspect proofs found during evaluation.",
+        allow_abbrev=False,
     )
     
     subparsers = parser.add_subparsers(dest="command", required=True)

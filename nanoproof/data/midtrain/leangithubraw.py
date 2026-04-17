@@ -433,7 +433,7 @@ def _dataset_stats():
     print(f"{'Bytes:':<20} {total_bytes:,} ({total_bytes / 1024 / 1024:.2f} MB)")
 
 def main():
-    parser = argparse.ArgumentParser(description="Manage Lean GitHub Raw Dataset")
+    parser = argparse.ArgumentParser(description="Manage Lean GitHub Raw Dataset", allow_abbrev=False)
     subparsers = parser.add_subparsers(dest="action", required=True)
     
     # Build

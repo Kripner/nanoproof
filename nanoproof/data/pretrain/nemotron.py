@@ -159,7 +159,7 @@ def _download_single_file(index):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Manage Nemotron-CC-Math-v1 dataset")
+    parser = argparse.ArgumentParser(description="Manage Nemotron-CC-Math-v1 dataset", allow_abbrev=False)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     parser_download = subparsers.add_parser("download", help="Download dataset shards")

@@ -109,7 +109,7 @@ def analyze(path):
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(allow_abbrev=False)
     ap.add_argument("path")
     args = ap.parse_args()
     analyze(args.path)

@@ -1296,7 +1296,7 @@ def run_standalone(run_dir: str, port: int = 5050):
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Launch nanoproof web monitor on a run directory")
+    parser = argparse.ArgumentParser(description="Launch nanoproof web monitor on a run directory", allow_abbrev=False)
     parser.add_argument("run_dir", help="Path to the RL run output directory")
     parser.add_argument("--port", type=int, default=5050, help="Port for the web server (default: 5050)")
     args = parser.parse_args()

@@ -29,7 +29,7 @@ from nanoproof.data.midtrain.leangithubraw import leangithubraw_batches
 
 # -----------------------------------------------------------------------------
 # CLI arguments
-parser = argparse.ArgumentParser(description="Midtrain the model")
+parser = argparse.ArgumentParser(description="Midtrain the model", allow_abbrev=False)
 # Logging
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
 # Runtime

@@ -14,7 +14,7 @@ from nanoproof.data.midtrain.leangithubraw import iter_texts_batched
 # -----------------------------------------------------------------------------
 # Parse command line arguments
 
-parser = argparse.ArgumentParser(description='Train a BPE tokenizer')
+parser = argparse.ArgumentParser(description='Train a BPE tokenizer', allow_abbrev=False)
 # parser.add_argument('--max_chars', type=int, default=10_000_000_000, help='Maximum characters to train on (default: 10B)')
 parser.add_argument('--max_chars', type=int, default=1_000_000_000, help='Maximum characters to train on (default: 1B)')
 parser.add_argument('--doc_cap', type=int, default=10_000, help='Maximum characters per document (default: 10,000)')

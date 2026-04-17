@@ -38,7 +38,7 @@ print_banner()
 
 # -----------------------------------------------------------------------------
 # CLI arguments
-parser = argparse.ArgumentParser(description="Pretrain base model")
+parser = argparse.ArgumentParser(description="Pretrain base model", allow_abbrev=False)
 # Logging
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
 # Runtime

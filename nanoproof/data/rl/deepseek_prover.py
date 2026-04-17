@@ -115,7 +115,7 @@ def _all_theorems() -> list[BenchTheorem]:
 # CLI: download / show / stats / check-init
 
 def _main():
-    parser = argparse.ArgumentParser(description="DeepSeek-Prover-V1 dataset")
+    parser = argparse.ArgumentParser(description="DeepSeek-Prover-V1 dataset", allow_abbrev=False)
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("download", help="Download the source JSONL from HuggingFace")
     show = sub.add_parser("show", help="Print the first N theorems from a split")

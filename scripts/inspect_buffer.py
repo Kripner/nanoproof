@@ -135,7 +135,8 @@ def cmd_stats(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Inspect a saved replay buffer file."
+        description="Inspect a saved replay buffer file.",
+        allow_abbrev=False,
     )
     parser.add_argument("path", help="Path to the replay buffer JSONL file")
     

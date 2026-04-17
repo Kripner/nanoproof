@@ -142,7 +142,7 @@ def __print_stats():
         print()
 
 def main():
-    parser = argparse.ArgumentParser(description="Download LeanTree dataset from HuggingFace.")
+    parser = argparse.ArgumentParser(description="Download LeanTree dataset from HuggingFace.", allow_abbrev=False)
     subparsers = parser.add_subparsers(dest="action")
 
     download_parser = subparsers.add_parser("download")

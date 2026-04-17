@@ -31,7 +31,7 @@ from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
 
 # -----------------------------------------------------------------------------
 # CLI arguments
-parser = argparse.ArgumentParser(description="Finetune a base model to be a prover model")
+parser = argparse.ArgumentParser(description="Finetune a base model to be a prover model", allow_abbrev=False)
 # Logging
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
 parser.add_argument("--seed", type=int, default=0, help="random seed")

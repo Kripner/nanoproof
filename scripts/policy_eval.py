@@ -238,7 +238,7 @@ def eval_tactic_accuracy(model, tokenizer, leantree_batches, eval_steps=None):
 
 
 def _main():
-    parser = argparse.ArgumentParser(description="Evaluate a model's tactic and critic accuracy on the leantree validation set")
+    parser = argparse.ArgumentParser(description="Evaluate a model's tactic and critic accuracy on the leantree validation set", allow_abbrev=False)
     parser.add_argument("--model-path", type=str, required=True, help="path to model_NNNNNN.pt (relative to models/ or absolute)")
     parser.add_argument("--split", type=str, default="valid", help="dataset split to evaluate on")
     parser.add_argument("--batch-size", type=int, default=32, help="evaluation batch size")

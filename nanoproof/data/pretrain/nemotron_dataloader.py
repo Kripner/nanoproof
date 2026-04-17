@@ -151,7 +151,7 @@ def nemotron_batches(*args, **kwargs):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Inspect the Nemotron BOS-bestfit dataloader")
+    parser = argparse.ArgumentParser(description="Inspect the Nemotron BOS-bestfit dataloader", allow_abbrev=False)
     parser.add_argument("--split", choices=["train", "valid"], default="train")
     parser.add_argument("-B", type=int, default=128, help="batch size")
     parser.add_argument("-T", type=int, default=1024, help="sequence length")

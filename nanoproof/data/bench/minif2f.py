@@ -84,7 +84,7 @@ def list_theorems(split: str) -> list[BenchTheorem]:
 # CLI: download / show / stats / check-init
 
 def _main():
-    parser = argparse.ArgumentParser(description="miniF2F benchmark dataset")
+    parser = argparse.ArgumentParser(description="miniF2F benchmark dataset", allow_abbrev=False)
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("download", help="Download Valid.lean and Test.lean from GitHub")
     show = sub.add_parser("show", help="Print the first N theorems from a split")

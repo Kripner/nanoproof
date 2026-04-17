@@ -67,7 +67,7 @@ def print_results(results, name, num_simulations):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate a prover model on theorem proving benchmarks")
+    parser = argparse.ArgumentParser(description="Evaluate a prover model on theorem proving benchmarks", allow_abbrev=False)
 
     parser.add_argument("--model-path", type=str, required=True)
     parser.add_argument("--lean-project", type=str, required=True,

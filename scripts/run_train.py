@@ -93,7 +93,7 @@ def link_into_train_dir(train_log_dir: Path, link_name: str, target: str) -> Non
 
 
 def main():
-    parser = argparse.ArgumentParser(description="End-to-end nanoproof training pipeline")
+    parser = argparse.ArgumentParser(description="End-to-end nanoproof training pipeline", allow_abbrev=False)
     parser.add_argument("--run", type=str, default="dummy", help="run name (used as wandb run name in each stage)")
     parser.add_argument("--stages", type=str, default=",".join(ALL_STAGES),
                         help=f"comma-separated subset of {ALL_STAGES} to run, in order")

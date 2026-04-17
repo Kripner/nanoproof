@@ -116,7 +116,7 @@ def sft_data_generator(dataset, batch_size, device="cuda"):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Inspect SFT/RL tokenized batches from leantree")
+    parser = argparse.ArgumentParser(description="Inspect SFT/RL tokenized batches from leantree", allow_abbrev=False)
     parser.add_argument("--split", choices=["train", "valid"], default="train")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-batches", type=int, default=10)
