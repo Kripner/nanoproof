@@ -6,6 +6,7 @@ import { GPUPanel } from './components/GPUPanel'
 import { LogViewer } from './components/LogViewer'
 import { ReplayBufferPanel } from './components/ReplayBufferPanel'
 import { LeanServerPanel } from './components/LeanServerPanel'
+import { ProfilerPanel } from './components/ProfilerPanel'
 
 const POLL_INTERVAL = 1000;
 
@@ -16,6 +17,14 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [selectedActor, setSelectedActor] = useState<string | null>(null);
+  const [tab, setTab] = useState<'monitor' | 'profiler'>('monitor');
+
+  // Default to profiler tab in standalone mode
+  useEffect(() => {
+    if (state?.mode === 'standalone') {
+      setTab('profiler');
+    }
+  }, [state?.mode]);
 
   const copyOutputDir = useCallback(() => {
     if (state?.output_dir) {
@@ -113,66 +122,84 @@ function App() {
     <div className="app">
       <div className="header">
         <h1>nanoproof</h1>
-        <span className={phaseClass}>{state.phase}</span>
-        <span style={{ color: 'var(--text-secondary)' }}>Step {state.step}</span>
+        <div className="tab-bar">
+          {state.mode !== 'standalone' && (
+            <button className={`tab-btn ${tab === 'monitor' ? 'active' : ''}`}
+                    onClick={() => setTab('monitor')}>Monitor</button>
+          )}
+          <button className={`tab-btn ${tab === 'profiler' ? 'active' : ''}`}
+                  onClick={() => setTab('profiler')}>Profiler</button>
+        </div>
+        {tab === 'monitor' && (
+          <>
+            <span className={phaseClass}>{state.phase}</span>
+            <span style={{ color: 'var(--text-secondary)' }}>Step {state.step}</span>
+          </>
+        )}
         <div className="header-right">
           {state.output_dir && (
-            <button 
-              className={`output-dir-badge ${copied ? 'copied' : ''}`} 
+            <button
+              className={`output-dir-badge ${copied ? 'copied' : ''}`}
               title={`Click to copy: ${state.output_dir}`}
               onClick={copyOutputDir}
             >
-              {copied ? '✓ Copied!' : `📁 ${state.output_dir.split('/').slice(-2).join('/')}`}
+              {copied ? '✓ Copied!' : state.output_dir.split('/').slice(-2).join('/')}
             </button>
           )}
         </div>
       </div>
 
-      <div className="main">
-        {/* Row 1: Stats + Provers + Lean Servers */}
-        <div className="row row-top">
-          <StatsPanel 
-            collection={state.collection} 
-            training={state.training} 
-            phase={state.phase}
-            replayBufferSize={state.replay_buffer_size}
-            evalProgress={state.eval_progress}
-            evalHistory={state.eval_history}
-          />
-          
-          {Object.keys(state.local_actors).length > 0 && (
-            <div className="card">
-              <div className="card-title">Provers</div>
-              <ProverGrid
-                localActors={state.local_actors}
-                onActorClick={handleActorClick}
-              />
-            </div>
-          )}
+      {tab === 'monitor' && (
+        <div className="main">
+          {/* Row 1: Stats + Provers + Lean Servers */}
+          <div className="row row-top">
+            <StatsPanel
+              collection={state.collection}
+              training={state.training}
+              phase={state.phase}
+              replayBufferSize={state.replay_buffer_size}
+              evalProgress={state.eval_progress}
+              evalHistory={state.eval_history}
+            />
 
-          <LeanServerPanel server={state.lean_server} servers={state.lean_servers} />
-        </div>
+            {Object.keys(state.local_actors).length > 0 && (
+              <div className="card">
+                <div className="card-title">Provers</div>
+                <ProverGrid
+                  localActors={state.local_actors}
+                  onActorClick={handleActorClick}
+                />
+              </div>
+            )}
 
-        {/* Row 2: GPUs */}
-        <div className="row">
-          <GPUPanel gpus={state.gpus} />
-        </div>
+            <LeanServerPanel server={state.lean_server} servers={state.lean_servers} />
+          </div>
 
-        {/* Row 3: Data */}
-        <div className="row">
-          <ReplayBufferPanel />
-        </div>
+          {/* Row 2: GPUs */}
+          <div className="row">
+            <GPUPanel gpus={state.gpus} />
+          </div>
 
-        {/* Row 4: Logs */}
-        <div className="row row-logs">
-          <LogViewer 
-            logs={logs} 
-            components={logComponents}
-            selectedActor={selectedActor}
-            onActorSelect={setSelectedActor}
-          />
+          {/* Row 3: Data */}
+          <div className="row">
+            <ReplayBufferPanel />
+          </div>
+
+          {/* Row 4: Logs */}
+          <div className="row row-logs">
+            <LogViewer
+              logs={logs}
+              components={logComponents}
+              selectedActor={selectedActor}
+              onActorSelect={setSelectedActor}
+            />
+          </div>
         </div>
-      </div>
+      )}
+
+      {tab === 'profiler' && (
+        <ProfilerPanel mode={state.mode} />
+      )}
     </div>
   );
 }

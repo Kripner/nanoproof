@@ -12,6 +12,7 @@ import math
 import urllib.request
 import gc
 import faulthandler
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from collections import Counter
@@ -608,6 +609,39 @@ class DummyTimer(SimpleTimer):
     def get_times(self) -> dict[str, float]: return {}
     def log_times(self): pass
     def gather(self) -> Self: return DummyTimer()
+
+
+# ---------------------------------------------------------------------------
+# Timeline instrumentation
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TimelineEvent:
+    """A single timed event in a prover's timeline."""
+    type: str     # "llm" or "lean"
+    start: float  # absolute time.time()
+    end: float
+
+    def to_dict(self) -> dict:
+        return {"type": self.type, "start": self.start, "end": self.end}
+
+
+class TimelineRecorder:
+    """Records timeline events for a single prove() call.
+
+    Create one per proof attempt, pass it through run_mcts / expand_node,
+    then flush the collected events to the monitor.
+    """
+
+    def __init__(self):
+        self.events: list[TimelineEvent] = []
+
+    @contextmanager
+    def record(self, event_type: str):
+        start = time.time()
+        yield
+        end = time.time()
+        self.events.append(TimelineEvent(event_type, start, end))
 
 
 def active_barrier(key: str, timeout: float | None = 300.0, poll_interval: float = 0.5) -> None:

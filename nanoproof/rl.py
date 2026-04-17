@@ -281,6 +281,7 @@ while True:
 
     if step % args.eval_every == 0 and step >= args.eval_start:
         timer.start("eval")
+        rl_monitor.record_phase_event("eval", "start")
         model.eval()
         rl_monitor.set_phase("evaluating")
 
@@ -341,6 +342,7 @@ while True:
 
         model.train()
         timer.end("eval")
+        rl_monitor.record_phase_event("eval", "end")
         flush()
 
     if step % args.collect_every == 0:
@@ -364,6 +366,7 @@ while True:
         else:
             # Collect proofs (rank 0 only, worker ranks serve inference)
             timer.start("collect")
+            rl_monitor.record_phase_event("collect", "start")
             model.eval()
             rl_monitor.set_step(step)
 
@@ -372,6 +375,7 @@ while True:
 
             model.train()
             timer.end("collect")
+            rl_monitor.record_phase_event("collect", "end")
             flush()
 
             # Park workers in a Python-level wait while master collects, so they
@@ -408,6 +412,7 @@ while True:
         )
 
     timer.start("train")
+    rl_monitor.record_phase_event("train", "start")
     rl_monitor.set_phase("training")
 
     # Pause inference across all ranks before touching the model for training.
@@ -448,6 +453,7 @@ while True:
     tactic_model.resume()
 
     timer.end("train")
+    rl_monitor.record_phase_event("train", "end")
 
     # Logging
     train_loss_item = train_loss.item()

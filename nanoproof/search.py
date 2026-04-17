@@ -8,7 +8,7 @@ import uuid
 from leantree.repl_adapter.server import LeanProofBranch, LeanClient
 from leantree.repl_adapter.interaction import LeanProcess
 
-from nanoproof.common import pretty_print_tree, ValueOrError, theorem_to_example, Player
+from nanoproof.common import pretty_print_tree, ValueOrError, theorem_to_example, Player, TimelineRecorder
 from nanoproof.cli import get_monitor, log_tactic
 from nanoproof.inference import TacticModel, BlockingTacticModel
 
@@ -344,7 +344,7 @@ class MCTSAbortedError(Exception):
     pass
 
 
-def run_mcts(config: SearchConfig, game: Game, model: "TacticModel | BlockingTacticModel", expansion_callback=None, tactic_callback=None, abort_check=None) -> int:
+def run_mcts(config: SearchConfig, game: Game, model: "TacticModel | BlockingTacticModel", expansion_callback=None, tactic_callback=None, abort_check=None, timeline: TimelineRecorder | None = None) -> int:
     """
     Run MCTS to find a proof.
     
@@ -381,7 +381,11 @@ def run_mcts(config: SearchConfig, game: Game, model: "TacticModel | BlockingTac
             search_path.append(node)
 
         assert node.state is not None, f"run_mcts: node.state is None, node.id={node.id}"
-        result = model.sample_tactic(node.state)
+        if timeline:
+            with timeline.record("llm"):
+                result = model.sample_tactic(node.state)
+        else:
+            result = model.sample_tactic(node.state)
         if not result.is_success():
             if "State too long for model's rotary cache" in str(result.error):
                 continue
@@ -390,7 +394,7 @@ def run_mcts(config: SearchConfig, game: Game, model: "TacticModel | BlockingTac
         tactic_logprobs = [1.0] * len(tactics)  # TODO (!): use the actual action logprobs
         value = -value  # convert to MCTS value scale (negative proof depth)
 
-        expand_node(node, tactics, tactic_logprobs, config.prior_temperature)
+        expand_node(node, tactics, tactic_logprobs, config.prior_temperature, timeline=timeline)
 
         # Record expansion for monitoring
         monitor = get_monitor()
@@ -479,6 +483,7 @@ def expand_node(
         actions: list[str],
         action_logprobs: list[float],
         temperature: float,
+        timeline: TimelineRecorder | None = None,
 ):
     node.evaluations += 1
     policy = {
@@ -496,7 +501,11 @@ def expand_node(
         assert len(node.state) == 1
         branch = node.state[0]
         # TODO (!): investigate how often this times out; log timeout errors differently
-        new_branches = branch.try_apply_tactic(action)
+        if timeline:
+            with timeline.record("lean"):
+                new_branches = branch.try_apply_tactic(action)
+        else:
+            new_branches = branch.try_apply_tactic(action)
         if not new_branches.is_success():
             # Invalid action encountered.
             log_tactic(state_str, action, status="error")

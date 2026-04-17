@@ -30,6 +30,8 @@ from queue import Queue
 
 from flask import Flask, jsonify, Response, send_from_directory
 
+from nanoproof.common import TimelineEvent
+
 # -----------------------------------------------------------------------------
 # Logging utilities
 # -----------------------------------------------------------------------------
@@ -428,6 +430,13 @@ class WebMonitor:
         # Multiple lean servers (for distributed mode monitoring)
         self.lean_servers: list[LeanServerStatus] = []
 
+        # Timeline instrumentation
+        self.actor_timelines: dict[int, deque] = {}  # actor_id -> deque of event dicts
+        self.phase_events: list[dict] = []  # global phase start/end markers
+        self._timeline_file: TextIO | None = None
+        self.mode: str = "live"  # "live" or "standalone"
+        self._max_timeline_events_per_actor = 10000
+
         # Server thread
         self._server_thread: threading.Thread | None = None
         self._gpu_monitor_thread: threading.Thread | None = None
@@ -768,6 +777,58 @@ class WebMonitor:
                 transitions = list(self.live_transitions)
             return jsonify({"transitions": transitions})
 
+        @app.route("/api/instrumentation")
+        def get_instrumentation():
+            """Get live timeline instrumentation data."""
+            with self._lock:
+                actors = {}
+                for actor_id, events in self.actor_timelines.items():
+                    actors[str(actor_id)] = {"events": list(events)}
+                phases = list(self.phase_events)
+                mode = self.mode
+            return jsonify({"actors": actors, "phases": phases, "mode": mode})
+
+        @app.route("/api/instrumentation/file")
+        def get_instrumentation_file():
+            """Read timeline data from timeline.jsonl on disk (for post-hoc viewing)."""
+            with self._lock:
+                output_dir = self.output_dir
+            if not output_dir:
+                return jsonify({"error": "No output directory"}), 404
+
+            timeline_path = os.path.join(output_dir, "timeline.jsonl")
+            if not os.path.exists(timeline_path):
+                return jsonify({"actors": {}, "phases": [], "mode": self.mode})
+
+            actors: dict[str, list] = {}
+            phases: list[dict] = []
+            try:
+                with open(timeline_path, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        entry = json.loads(line)
+                        if entry.get("type") == "phase":
+                            phases.append(entry)
+                        elif entry.get("type") == "actor":
+                            aid = str(entry["actor"])
+                            if aid not in actors:
+                                actors[aid] = []
+                            actors[aid].append({
+                                "type": entry["event"],
+                                "start": entry["start"],
+                                "end": entry["end"],
+                            })
+            except Exception as e:
+                return jsonify({"error": str(e)}), 500
+
+            return jsonify({
+                "actors": {k: {"events": v} for k, v in actors.items()},
+                "phases": phases,
+                "mode": self.mode,
+            })
+
         return app
 
     def _fallback_html(self) -> str:
@@ -904,6 +965,7 @@ class WebMonitor:
         """Get the current state as a JSON-serializable dict."""
         with self._lock:
             return {
+                "mode": self.mode,
                 "phase": self.phase,
                 "step": self.step,
                 # During collection, show live count (base + collected)
@@ -1008,6 +1070,11 @@ class WebMonitor:
     def set_output_dir(self, output_dir: str):
         with self._lock:
             self.output_dir = output_dir
+            # Open timeline file for append
+            if self._timeline_file is not None:
+                self._timeline_file.close()
+            timeline_path = os.path.join(output_dir, "timeline.jsonl")
+            self._timeline_file = open(timeline_path, "a")
 
     def start_collection(self, target_samples: int, num_actors: int):
         with self._lock:
@@ -1127,6 +1194,33 @@ class WebMonitor:
         with self._lock:
             self.local_actors.clear()
 
+    # --- Timeline instrumentation ---
+
+    def record_timeline_events(self, actor_id: int, events: list[TimelineEvent]):
+        """Record timeline events from a completed proof attempt."""
+        with self._lock:
+            if actor_id not in self.actor_timelines:
+                self.actor_timelines[actor_id] = deque(maxlen=self._max_timeline_events_per_actor)
+            buf = self.actor_timelines[actor_id]
+            for ev in events:
+                d = ev.to_dict()
+                buf.append(d)
+                if self._timeline_file is not None:
+                    self._timeline_file.write(
+                        json.dumps({"type": "actor", "actor": actor_id, "event": d["type"],
+                                    "start": d["start"], "end": d["end"]}) + "\n")
+            if self._timeline_file is not None:
+                self._timeline_file.flush()
+
+    def record_phase_event(self, name: str, action: str):
+        """Record a global phase event (start/end of collect, eval, train)."""
+        with self._lock:
+            entry = {"type": "phase", "name": name, "action": action, "time": time.time()}
+            self.phase_events.append(entry)
+            if self._timeline_file is not None:
+                self._timeline_file.write(json.dumps(entry) + "\n")
+                self._timeline_file.flush()
+
     # --- GPU updates ---
 
     def update_gpu(self, gpu_id: int, name: str = "", utilization: float = 0.0,
@@ -1176,3 +1270,34 @@ def create_monitor(num_actors: int = 0, enabled: bool = True, port: int = 5050) 
     monitor = WebMonitor(num_actors=num_actors, enabled=enabled, port=port)
     set_monitor(monitor)
     return monitor
+
+
+def run_standalone(run_dir: str, port: int = 5050):
+    """Launch the web monitor in standalone mode on a finished run directory.
+
+    Only the Profiler tab is shown (no live monitor data).
+    """
+    if not os.path.isdir(run_dir):
+        print(f"Error: {run_dir} is not a directory")
+        sys.exit(1)
+
+    monitor = WebMonitor(enabled=True, port=port)
+    monitor.mode = "standalone"
+    monitor.output_dir = run_dir
+    set_monitor(monitor)
+
+    print(f"Serving profiler for: {run_dir}")
+    # Block forever (the Flask server runs in a daemon thread)
+    try:
+        threading.Event().wait()
+    except KeyboardInterrupt:
+        print("\nShutting down.")
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Launch nanoproof web monitor on a run directory")
+    parser.add_argument("run_dir", help="Path to the RL run output directory")
+    parser.add_argument("--port", type=int, default=5050, help="Port for the web server (default: 5050)")
+    args = parser.parse_args()
+    run_standalone(args.run_dir, args.port)

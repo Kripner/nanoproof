@@ -20,6 +20,7 @@ from leantree.repl_adapter.interaction import LeanProcessException
 
 from nanoproof.common import (
     Player,
+    TimelineRecorder,
     construct_proof_source,
     linearize_proof,
     theorem_to_example,
@@ -79,7 +80,8 @@ class Prover:
                 return process
 
     def prove(self, client: LeanClient, theorem: BenchTheorem, expansion_callback: Callable[[], None] | None = None,
-              abort_check: Callable[[], bool] | None = None) -> Game | None:
+              abort_check: Callable[[], bool] | None = None,
+              timeline: TimelineRecorder | None = None) -> Game | None:
         """Run a single MCTS proof game.
 
         Returns a :class:`Game` with results, or ``None`` if Lean setup fails.
@@ -113,6 +115,7 @@ class Prover:
                 self.config, game, self.tactic_model,
                 expansion_callback=expansion_callback,
                 abort_check=abort_check,
+                timeline=timeline,
             )
             if game.root.is_solved:
                 verify_err = verify_node(game.root, timeout=self.config.verify_timeout)
@@ -232,7 +235,8 @@ class ProverWorker:
                     component="Collection")
 
         prover = Prover(SearchConfig(num_simulations=num_simulations), self.tactic_model)
-        self._run_pool(prover, get_theorem, on_result, done_check, poll_callback)
+        self._run_pool(prover, get_theorem, on_result, done_check, poll_callback,
+                       record_timeline=True)
 
         if monitor is not None:
             monitor.clear_local_actors()
@@ -321,7 +325,8 @@ class ProverWorker:
                 return len(results) >= len(theorems)
 
         prover = Prover(SearchConfig(num_simulations=num_simulations, verify_timeout=verify_timeout), self.tactic_model)
-        self._run_pool(prover, get_theorem, on_result, done_check)
+        self._run_pool(prover, get_theorem, on_result, done_check,
+                       record_timeline=True)
 
         total = len(results)
         solved = sum(1 for r in results if r["is_solved"])
@@ -341,6 +346,7 @@ class ProverWorker:
         on_result: Callable[[str, BenchTheorem, Optional[Game], Optional[str]], None],
         done_check: Callable[[], bool],
         poll_callback: Callable[[list[str]], None] | None = None,
+        record_timeline: bool = False,
     ):
         """Run actor threads until *done_check* returns ``True``.
 
@@ -394,10 +400,12 @@ class ProverWorker:
                 game = None
                 error = None
                 skip_report = False
+                timeline = TimelineRecorder() if record_timeline else None
                 for attempt in range(max_retries):
                     try:
                         game = prover.prove(client, theorem, expansion_callback=on_expansion,
-                                            abort_check=stop_flag.is_set)
+                                            abort_check=stop_flag.is_set,
+                                            timeline=timeline)
                         consecutive_errors = 0
                         break
                     except (ConnectionResetError, ConnectionRefusedError, BrokenPipeError, LeanProcessException) as e:
@@ -438,6 +446,13 @@ class ProverWorker:
                         set_thread_state(actor_id, "error")
 
                     on_result(theorem_id, theorem, game, error)
+
+                    # Flush timeline events to the monitor
+                    if timeline and timeline.events:
+                        monitor = get_monitor()
+                        if monitor is not None:
+                            monitor.record_timeline_events(actor_id, timeline.events)
+                        timeline.events.clear()
 
                 if consecutive_errors >= max_consecutive_errors:
                     log(f"[Actor {actor_id}] Too many consecutive errors, exiting", component="Prover")

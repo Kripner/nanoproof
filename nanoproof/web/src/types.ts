@@ -58,6 +58,7 @@ export interface LogEntry {
 }
 
 export interface MonitorState {
+  mode: 'live' | 'standalone';
   phase: 'idle' | 'collecting' | 'evaluating' | 'training';
   step: number;
   replay_buffer_size: number;
@@ -110,5 +111,30 @@ export interface LeanServerStatus {
   ram_used_gb: number;
   ram_total_gb: number;
   error: string;
+}
+
+// Timeline instrumentation types
+
+export interface TimelineEvent {
+  type: "llm" | "lean";
+  start: number;
+  end: number;
+}
+
+export interface PhaseEvent {
+  type: "phase";
+  name: string;
+  action: "start" | "end";
+  time: number;
+}
+
+export interface ActorTimeline {
+  events: TimelineEvent[];
+}
+
+export interface InstrumentationData {
+  actors: Record<string, ActorTimeline>;
+  phases: PhaseEvent[];
+  mode?: "live" | "standalone";
 }
 

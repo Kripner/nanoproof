@@ -60,6 +60,33 @@ body {
 }
 
 
+.tab-bar {
+  display: flex;
+  gap: 4px;
+  margin-left: 8px;
+}
+
+.tab-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  padding: 4px 12px;
+  cursor: pointer;
+  font-size: var(--font-sm);
+  font-family: inherit;
+}
+
+.tab-btn.active {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border-color: var(--accent-cyan);
+}
+
+.tab-btn:hover:not(.active) {
+  background: var(--bg-tertiary);
+}
+
 .phase-badge {
   padding: 4px 12px;
   border-radius: 16px;
