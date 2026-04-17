@@ -761,23 +761,29 @@ def construct_proof_source(theorem: str, tactics: list[str]) -> str:
 
 
 _THEOREM_NAME_RE = re.compile(
-    r'(^|\n)(\s*)theorem\s+\S+',
+    r'(^|\n)(\s*)(?:theorem|def|lemma)\s+\S+',
 )
 
 def theorem_to_example(source: str) -> str:
-    """Convert a Lean theorem statement to an example statement.
+    """Convert a Lean theorem/def/lemma statement to an example statement.
 
-    Finds ``theorem <name>`` (possibly spanning whitespace / newlines between
-    ``theorem`` and the name) and replaces it with ``example``, preserving
-    leading whitespace and everything after the name.
+    Finds ``theorem <name>`` (or ``def``/``lemma``, possibly spanning
+    whitespace / newlines between the keyword and the name) and replaces it
+    with ``example``, preserving leading whitespace and everything after the
+    name.
 
     Works on the raw source string rather than splitting by lines, so it
     handles multi-line declarations where the name sits alone on one line
     and the ``:`` / body continue on the next.
     """
+    sorry_count = source.count("sorry")
+    if sorry_count > 1:
+        raise ValueError(
+            f"Expected at most one 'sorry' but found {sorry_count} in: {source[:200]!r}"
+        )
     m = _THEOREM_NAME_RE.search(source)
     if m is None:
-        raise ValueError(f"No 'theorem <name>' found in: {source[:200]!r}")
+        raise ValueError(f"No 'theorem/def/lemma <name>' found in: {source[:200]!r}")
     # m.group(0) is e.g. "\n  theorem lean_workbook_50099"
     # We want to replace "theorem <name>" part with "example", keeping
     # the leading newline + whitespace (groups 1 and 2).
