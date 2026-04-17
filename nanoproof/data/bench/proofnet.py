@@ -88,6 +88,9 @@ def _main():
     show.add_argument("--split", choices=list(_SPLITS), default="valid")
     show.add_argument("--n", type=int, default=5)
     sub.add_parser("stats", help="Print theorem counts per split")
+    export = sub.add_parser("export", help="Export theorems to a standalone .lean file")
+    export.add_argument("--split", choices=list(_SPLITS), default="valid")
+    export.add_argument("output", help="Path to the output .lean file")
     check = sub.add_parser(
         "check-init",
         help="Try to initialize each theorem's proof in a Lean REPL and report failures "
@@ -107,6 +110,13 @@ def _main():
     elif args.action == "stats":
         for split in _SPLITS:
             print(f"{split}: {len(list_theorems(split))} theorems")
+    elif args.action == "export":
+        theorems = list_theorems(args.split)
+        with open(args.output, "w") as f:
+            f.write("import Mathlib\n")
+            for thm in theorems:
+                f.write("\n" + thm.source + "\n")
+        print(f"Exported {len(theorems)} theorems to {args.output}")
     elif args.action == "check-init":
         run_check_init_cli(
             theorems=list_theorems(args.split),
