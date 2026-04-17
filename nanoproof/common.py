@@ -781,9 +781,12 @@ def theorem_to_example(source: str) -> str:
         raise ValueError(
             f"Expected at most one 'sorry' but found {sorry_count} in: {source[:200]!r}"
         )
-    m = _THEOREM_NAME_RE.search(source)
-    if m is None:
+    matches = list(_THEOREM_NAME_RE.finditer(source))
+    if not matches:
         raise ValueError(f"No 'theorem/def/lemma <name>' found in: {source[:200]!r}")
+    # Use the *last* match - the actual theorem/exercise is always the final
+    # declaration; earlier matches are auxiliary defs in the preamble.
+    m = matches[-1]
     # m.group(0) is e.g. "\n  theorem lean_workbook_50099"
     # We want to replace "theorem <name>" part with "example", keeping
     # the leading newline + whitespace (groups 1 and 2).
