@@ -48,7 +48,7 @@ from nanoproof.data.sft.leantree_dataloader import sft_data_generator
 
 # -----------------------------------------------------------------------------
 # RL Hyperparameters
-parser = argparse.ArgumentParser(description="RL training for nanoproof")
+parser = argparse.ArgumentParser(description="RL training for nanoproof", allow_abbrev=False)
 
 # General
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb)")
@@ -175,7 +175,8 @@ else:
 max_prompt_tokens = args.batch_max_prompt_tokens
 if max_prompt_tokens is None:
     max_prompt_tokens = compute_max_batch_prompt_tokens(model.config, args.num_sampled_tactics, device)
-    log0(f"Batch max prompt tokens: {max_prompt_tokens} (auto from {torch.cuda.get_device_properties(device).total_memory / 1024**3:.1f} GiB VRAM, {torch.cuda.memory_allocated(device) / 1024**3:.1f} GiB used)", component="Config")
+    free_driver, _ = torch.cuda.mem_get_info(device)
+    log0(f"Batch max prompt tokens: {max_prompt_tokens} (auto from {free_driver / 1024**3:.1f} GiB free, {torch.cuda.memory_allocated(device) / 1024**3:.1f} GiB allocated)", component="Config")
 else:
     log0(f"Batch max prompt tokens: {max_prompt_tokens} (manual)", component="Config")
 tactic_model.max_batch_prompt_tokens = max_prompt_tokens

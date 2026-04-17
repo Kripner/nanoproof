@@ -216,11 +216,17 @@ def compute_max_batch_prompt_tokens(model_config, num_samples: int, device: torc
     We approximate total memory as proportional to sum_of_prompt_tokens * num_samples,
     and set the limit so the KV cache fits in available VRAM with headroom for activations.
     """
-    total_vram = torch.cuda.get_device_properties(device).total_memory
-    already_used = torch.cuda.memory_allocated(device)
+    # mem_get_info returns (free, total) at the CUDA driver level, which
+    # accounts for memory consumed by ALL processes on this GPU (e.g. NCCL
+    # buffers from DDP peers).  get_device_properties().total_memory is the
+    # raw physical VRAM and would over-estimate available space.
+    free_driver, _ = torch.cuda.mem_get_info(device)
+    # free_driver excludes PyTorch's caching-allocator reserved-but-unused
+    # blocks, which are available for new allocations.  Add them back.
+    reserved_unused = torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
     # Use 80% of remaining VRAM for KV cache; the rest covers activations,
     # prefill/decode KV cache overlap, and allocator fragmentation.
-    available = (total_vram - already_used) * 0.80
+    available = (free_driver + reserved_unused) * 0.80
     dtype_bytes = 2  # bf16/fp16
     head_dim = model_config.n_embd // model_config.n_head
     kv_bytes_per_token = 2 * model_config.n_layer * model_config.n_kv_head * head_dim * dtype_bytes
@@ -727,7 +733,7 @@ def _main():
     Interactive tactic model: loads a model and lets you type tactic states
     to see generated tactics and value predictions.
     """
-    parser = argparse.ArgumentParser(description="Interactive tactic model")
+    parser = argparse.ArgumentParser(description="Interactive tactic model", allow_abbrev=False)
     parser.add_argument("--model-path", required=True, help="path to model_NNNNNN.pt (relative to models/ or absolute)")
     parser.add_argument("--num-samples", type=int, default=6, help="Tactics to sample per state")
     args = parser.parse_args()
