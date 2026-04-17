@@ -726,24 +726,37 @@ def format_linearized_proof(tactics: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _ensure_block_arrow(tactic: str) -> str:
+    """Ensure that block-opening tactics like ``case`` and ``next`` end with ``=>``.
+
+    The Lean REPL accepts these without ``=>`` in step-by-step mode, but Lean's
+    file parser requires the arrow.
+    """
+    stripped = tactic.rstrip()
+    if stripped.endswith("=>"):
+        return tactic
+    if stripped.startswith("case ") or stripped == "next" or stripped.startswith("next "):
+        return stripped + " =>"
+    return tactic
+
 def construct_proof_source(theorem: str, tactics: list[str]) -> str:
     """Construct the full Lean source by replacing 'sorry' in the theorem with the proof tactics.
-    
+
     Args:
         theorem: The theorem statement ending with 'sorry'
         tactics: List of tactics from linearize_proof
-        
+
     Returns:
         The complete Lean source with the proof filled in
     """
     assert len(tactics) > 0, f"construct_proof_source: No tactics provided"
     assert theorem.strip().endswith("sorry"), f"construct_proof_source: Theorem should end with 'sorry': {theorem}"
-    
+
     # Remove "sorry" from the end
     theorem_body = theorem.rstrip()[:-len("sorry")].rstrip()
-    
+
     # Multi-line proof with indentation
-    proof_lines = "\n".join(f"  {tactic.strip()}" for tactic in tactics)
+    proof_lines = "\n".join(f"  {_ensure_block_arrow(tactic.strip())}" for tactic in tactics)
     return theorem_body + "\n" + proof_lines
 
 
