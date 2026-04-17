@@ -22,7 +22,7 @@ from urllib.request import urlopen
 
 from leantree.repl_adapter.server import LeanClient
 
-from nanoproof.cli import log
+from nanoproof.cli import log, log0
 from nanoproof.common import theorem_to_example
 from nanoproof.data.bench.common import BenchTheorem
 
@@ -130,13 +130,13 @@ def filter_by_whitelist(
 
     if unknown:
         example = unknown[0].source[:200].replace("\n", " ")
-        log(
+        log0(
             f"{dataset_name}: {len(unknown)} theorems not in whitelist {whitelist_file} "
             f"(stale whitelist?). Example: {example!r}",
             component="Whitelist",
         )
 
-    log(
+    log0(
         f"{dataset_name}: {num_passing} passing + {len(unknown)} unknown kept, "
         f"{num_failing} dropped (whitelist {wl['lean_version']})",
         component="Whitelist",

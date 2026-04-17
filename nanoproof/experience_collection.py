@@ -17,7 +17,7 @@ import threading
 
 import torch.distributed as dist
 
-from nanoproof.cli import log
+from nanoproof.cli import log, log0
 from nanoproof.common import get_dist_info, Player, GLOBAL_CONFIG
 from nanoproof.data.bench.common import BenchTheorem
 from nanoproof.data.rl import deepseek_prover, leanworkbook, numinamath
@@ -50,7 +50,7 @@ class TheoremsSampler:
         self._lock = threading.Lock()
 
         for name, theorems in self.datasets.items():
-            log(f"Loaded {len(theorems)} theorems from {name}", component="Sampler")
+            log0(f"Loaded {len(theorems)} theorems from {name}", component="Sampler")
 
     def sample_theorem(self) -> BenchTheorem:
         with self._lock:
