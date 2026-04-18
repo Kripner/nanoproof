@@ -39,6 +39,7 @@ from nanoproof.common import TimelineEvent
 _log_lock = threading.Lock()
 _log_file: TextIO | None = None
 _tactics_file: TextIO | None = None
+_errors_file: TextIO | None = None
 _is_master_process: bool = True  # Default to True for non-DDP usage
 _ddp_rank: int = 0  # DDP rank for logging
 
@@ -85,13 +86,13 @@ def set_ddp_info(is_master: bool, rank: int = 0):
 def configure_logging(output_dir: str | None):
     """
     Configure logging to write to files in the output directory.
-    
+
     Args:
         output_dir: Directory where log files will be written.
                    If None, logging goes to console only.
     """
-    global _log_file, _tactics_file
-    
+    global _log_file, _tactics_file, _errors_file
+
     with _log_lock:
         # Close any existing files
         if _log_file is not None:
@@ -100,10 +101,14 @@ def configure_logging(output_dir: str | None):
         if _tactics_file is not None:
             _tactics_file.close()
             _tactics_file = None
-        
+        if _errors_file is not None:
+            _errors_file.close()
+            _errors_file = None
+
         if output_dir is not None:
             _log_file = open(os.path.join(output_dir, "logs.txt"), "a")
             _tactics_file = open(os.path.join(output_dir, "tactics.txt"), "a")
+            _errors_file = open(os.path.join(output_dir, "errors.jsonl"), "a")
 
 
 def log(msg: str, component: str | None = None, actor_id: int | None = None):
@@ -176,6 +181,26 @@ def log_error(msg: str, exception: Exception | None = None, component: str | Non
                 traceback.print_exc(file=_log_file)
                 _log_file.flush()
             traceback.print_exc()
+
+
+def log_actionable_error(component: str, error: str, **extra):
+    """Append a structured error to errors.jsonl in the run directory.
+
+    Use this for errors that may need human attention (OOM, repeated actor
+    failures, etc.) -- not for routine per-theorem failures.
+    """
+    with _log_lock:
+        if _errors_file is None:
+            return
+        entry = {
+            "time": datetime.now().isoformat(timespec="seconds"),
+            "rank": _ddp_rank,
+            "component": component,
+            "error": error,
+            **extra,
+        }
+        _errors_file.write(json.dumps(entry) + "\n")
+        _errors_file.flush()
 
 
 def log_tactic(state: str, tactic: str, status: str):

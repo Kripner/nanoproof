@@ -27,7 +27,7 @@ import torch
 from flask import Flask, request, jsonify
 
 from nanoproof.checkpoints import load_model
-from nanoproof.cli import log, log0
+from nanoproof.cli import log, log0, log_actionable_error
 
 logger = logging.getLogger(__name__)
 from nanoproof.common import ValueOrError, GLOBAL_CONFIG, get_dist_info
@@ -224,9 +224,11 @@ def compute_max_batch_prompt_tokens(model_config, num_samples: int, device: torc
     # free_driver excludes PyTorch's caching-allocator reserved-but-unused
     # blocks, which are available for new allocations.  Add them back.
     reserved_unused = torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
-    # Use 80% of remaining VRAM for KV cache; the rest covers activations,
-    # prefill/decode KV cache overlap, and allocator fragmentation.
-    available = (free_driver + reserved_unused) * 0.80
+    # Use 70% of remaining VRAM for the KV cache.  The remaining 30% covers
+    # per-prompt prefill KV caches, forward-pass activations, allocator
+    # fragmentation, and NCCL communication buffers that may appear after
+    # this measurement (lazily allocated on the first large all_reduce).
+    available = (free_driver + reserved_unused) * 0.70
     dtype_bytes = 2  # bf16/fp16
     head_dim = model_config.n_embd // model_config.n_head
     kv_bytes_per_token = 2 * model_config.n_layer * model_config.n_kv_head * head_dim * dtype_bytes
@@ -424,10 +426,18 @@ class BlockingTacticModel:
             GEN_OVERHEAD = 64
             max_tokens = 0
             cut = len(batch)
+            # Recompute the token limit from actual free VRAM rather than
+            # relying on the init-time budget.  After training, persistent
+            # allocations (NCCL buffers, weight casts, etc.) can reduce
+            # available VRAM well below what was measured at init.
+            device = self.inner_model.network.get_device()
+            live_limit = compute_max_batch_prompt_tokens(
+                self.inner_model.network.config, self.inner_model.num_samples, device)
+            token_limit = min(self.max_batch_prompt_tokens, live_limit)
             for i, (_, tc, _, _) in enumerate(batch):
                 max_tokens = max(max_tokens, tc + GEN_OVERHEAD)
                 effective = (i + 1) * max_tokens
-                if effective > self.max_batch_prompt_tokens:
+                if effective > token_limit:
                     cut = max(1, i)
                     break
             batch = batch[:cut]
@@ -463,6 +473,8 @@ class BlockingTacticModel:
 
         except Exception as e:
             log(f"Batch #{batch_num}: FAILED - {e}", component="BlockingTacticModel")
+            log_actionable_error("BlockingTacticModel", str(e),
+                                batch=batch_num, states=len(batch), max_tokens=max_tc)
             # Note: OOM snapshots are dumped deeper in Engine.generate so the
             # snapshot captures the state *before* the finally-block cleanup.
             for _, _, event, slot in batch:

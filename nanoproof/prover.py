@@ -26,7 +26,7 @@ from nanoproof.common import (
     linearize_proof,
     theorem_to_example,
 )
-from nanoproof.cli import get_monitor, log
+from nanoproof.cli import get_monitor, log, log_actionable_error
 from nanoproof.data.bench.common import BenchTheorem
 from nanoproof.experience_collection import (
     TheoremsSampler,
@@ -419,6 +419,9 @@ class ProverWorker:
                             error = str(e)
                             consecutive_errors += 1
                             log(f"[Actor {actor_id}] Error (lean={lean_address}:{lean_port}): {e}", component="Prover")
+                            log_actionable_error("Prover", str(e),
+                                                 actor=actor_id, lean=f"{lean_address}:{lean_port}",
+                                                 retries_exhausted=True)
                             traceback.print_exc()
                     except MCTSAbortedError:
                         skip_report = True
@@ -432,6 +435,8 @@ class ProverWorker:
                         error = str(e)
                         consecutive_errors += 1
                         log(f"[Actor {actor_id}] Error (lean={lean_address}:{lean_port}): {e}", component="Prover")
+                        log_actionable_error("Prover", str(e),
+                                             actor=actor_id, lean=f"{lean_address}:{lean_port}")
                         traceback.print_exc()
                         break
 

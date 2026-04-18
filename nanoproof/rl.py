@@ -171,16 +171,11 @@ if balancer:
 else:
     prover = None
 
-# Force NCCL to allocate its communication buffers before measuring free
-# VRAM.  Without this, compute_max_batch_prompt_tokens over-estimates
-# available memory because the ~414 MiB per peer process (e.g. ~2.9 GiB
-# with 8 GPUs) hasn't been allocated yet.
-if ddp:
-    dummy = torch.zeros(1, device=device)
-    dist.all_reduce(dummy)
-    del dummy
-
-# Prompt token limit for inference batches (prevents OOM on long prompts)
+# Prompt token limit for inference batches (prevents OOM on long prompts).
+# Each rank computes its own limit based on its GPU's free VRAM rather than
+# broadcasting from rank 0.  This is important because NCCL lazily allocates
+# ~414 MiB per peer on some GPUs (topology-dependent), so different ranks
+# can have different amounts of usable memory.
 max_prompt_tokens = args.batch_max_prompt_tokens
 if max_prompt_tokens is None:
     max_prompt_tokens = compute_max_batch_prompt_tokens(model.config, args.num_sampled_tactics, device)
@@ -190,12 +185,10 @@ else:
     log0(f"Batch max prompt tokens: {max_prompt_tokens} (manual)", component="Config")
 tactic_model.max_batch_prompt_tokens = max_prompt_tokens
 
-# Broadcast max_gen_samples and max_batch_prompt_tokens from master to worker
-# ranks so their Flask servers can batch correctly (workers don't have a
-# ProverWorker to compute it from).
+# Broadcast max_gen_samples from master to worker ranks (workers don't have
+# a ProverWorker to compute it from).
 if ddp:
     tactic_model.max_gen_samples = broadcast_value(tactic_model.max_gen_samples)
-    tactic_model.max_batch_prompt_tokens = broadcast_value(tactic_model.max_batch_prompt_tokens)
 
 # Create the RL monitor (master only)
 rl_monitor = create_monitor(num_actors=0, enabled=master_process)
