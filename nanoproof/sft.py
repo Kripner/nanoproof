@@ -21,7 +21,7 @@ import torch
 import torch.distributed as dist
 import leantree.augmentations
 
-from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, autodetect_device_type, create_run_dirs, get_lr_multiplier
+from nanoproof.common import compute_init, compute_cleanup, print0, create_metrics_logger, add_logging_args, autodetect_device_type, create_run_dirs, get_lr_multiplier
 from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.engine import Engine
 from nanoproof.data.sft.leantree import leantree_transitions
@@ -33,7 +33,7 @@ from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
 # CLI arguments
 parser = argparse.ArgumentParser(description="Finetune a base model to be a prover model", allow_abbrev=False)
 # Logging
-parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
+add_logging_args(parser)
 parser.add_argument("--seed", type=int, default=0, help="random seed")
 # Model source
 parser.add_argument("--model-path", type=str, required=True, help="path to model_NNNNNN.pt to load from (relative to models/ or absolute)")
@@ -74,9 +74,8 @@ master_process = ddp_rank == 0
 # Run directories
 log_dir, model_dir = create_run_dirs("sft", args.run, args_dict=user_config)
 
-# wandb logging init
-use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-sft", name=args.run, dir=log_dir, config={**user_config, "log_dir": log_dir, "model_dir": model_dir}, save_code=True)
+# metrics logging init
+wandb_run = create_metrics_logger("nanoproof-sft", args, master_process, {**user_config, "log_dir": log_dir, "model_dir": model_dir}, log_dir=log_dir, save_code=True)
 
 # Load the model and tokenizer
 if args.resume_from is not None:

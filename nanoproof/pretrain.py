@@ -21,14 +21,13 @@ import argparse
 from dataclasses import asdict
 from contextlib import contextmanager
 
-import wandb
 import torch
 import torch.nn as nn
 import torch.distributed as dist
 
 from nanoproof.model import Transformer, NetworkConfig, Linear
 from nanoproof.data.pretrain.nemotron_dataloader import nemotron_batches, nemotron_batches_with_state
-from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized, create_run_dirs, GLOBAL_CONFIG, get_lr_multiplier
+from nanoproof.common import compute_init, compute_cleanup, print0, create_metrics_logger, add_logging_args, print_banner, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized, create_run_dirs, GLOBAL_CONFIG, get_lr_multiplier
 from nanoproof.tokenizer import get_tokenizer, get_token_bytes
 from nanoproof.checkpoints import save_checkpoint, load_checkpoint, parse_checkpoint_path
 from nanoproof.engine import Engine
@@ -40,7 +39,7 @@ print_banner()
 # CLI arguments
 parser = argparse.ArgumentParser(description="Pretrain base model", allow_abbrev=False)
 # Logging
-parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
+add_logging_args(parser)
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 # FP8 training
@@ -232,9 +231,8 @@ if total_batch_size % world_tokens_per_fwdbwd != 0:
 # Run directories (now that user_config reflects the resolved total_batch_size)
 log_dir, model_dir = create_run_dirs("pretrain", args.run, args_dict=user_config)
 
-# wandb logging init
-use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof", name=args.run, dir=log_dir, config={**user_config, "log_dir": log_dir, "model_dir": model_dir})
+# metrics logging init
+wandb_run = create_metrics_logger("nanoproof", args, master_process, {**user_config, "log_dir": log_dir, "model_dir": model_dir}, log_dir=log_dir)
 
 # LR scaling for batch size
 batch_lr_scale = 1.0

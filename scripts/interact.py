@@ -1,6 +1,6 @@
 import torch
 
-from nanoproof.common import compute_init, compute_cleanup, print0, DummyWandb, autodetect_device_type
+from nanoproof.common import compute_init, compute_cleanup, print0, autodetect_device_type
 from nanoproof.checkpoints import load_model
 from nanoproof.engine import Engine
 from nanoproof.inference import TacticModel

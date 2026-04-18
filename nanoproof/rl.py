@@ -12,13 +12,12 @@ from dataclasses import asdict
 
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
-import wandb
 import torch
 import torch.distributed as dist
 import leantree.augmentations
 from leantree.core.lean import LeanGoal
 
-from nanoproof.common import compute_init, compute_cleanup, get_base_dir, DummyWandb, autodetect_device_type, SimpleTimer, flush, create_run_dirs, active_barrier, broadcast_value, enable_memory_profiling
+from nanoproof.common import compute_init, compute_cleanup, get_base_dir, create_metrics_logger, add_logging_args, autodetect_device_type, SimpleTimer, flush, create_run_dirs, active_barrier, broadcast_value, enable_memory_profiling
 from nanoproof.checkpoints import load_model, save_checkpoint, save_eval_results_to_run_dir
 from nanoproof.engine import Engine
 from nanoproof.data.sft.leantree import leantree_transitions
@@ -51,7 +50,7 @@ from nanoproof.data.sft.leantree_dataloader import sft_data_generator
 parser = argparse.ArgumentParser(description="RL training for nanoproof", allow_abbrev=False)
 
 # General
-parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb)")
+add_logging_args(parser)
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--model-path", type=str, required=True, help="path to model_NNNNNN.pt to load from (relative to models/ or absolute)")
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
@@ -125,9 +124,8 @@ user_config["model_dir"] = model_dir
 if master_process:
     configure_logging(output_dir)
 
-# wandb logging init
-use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanoproof-rl", name=args.run, dir=log_dir, config=user_config, save_code=True)
+# metrics logging init
+wandb_run = create_metrics_logger("nanoproof-rl", args, master_process, user_config, log_dir=log_dir, save_code=True)
 
 # Enable memory profiling before model load so model weight allocations are captured.
 if args.memory_profile:

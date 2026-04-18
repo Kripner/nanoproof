@@ -22,6 +22,8 @@ from typing import Callable, Generic, TypeVar, Self
 import torch
 import torch.distributed as dist
 import numpy as np
+import wandb
+import goodseed
 
 # The dtype used for compute (matmuls, activations). Master weights stay fp32 for optimizer precision.
 # Linear layers cast their weights to this dtype in forward, replacing torch.amp.autocast.
@@ -398,14 +400,58 @@ def get_peak_flops(device_name: str) -> float:
     logger.warning(f"Peak flops undefined for: {device_name}, MFU will show as 0%")
     return float('inf')
 
-class DummyWandb:
-    """Useful if we wish to not use wandb but have all the same signatures"""
-    def __init__(self):
-        pass
-    def log(self, *args, **kwargs):
-        pass
+class MetricsLogger:
+    """Logs metrics to wandb, goodseed, or both."""
+
+    def __init__(self, loggers, project, name, config, log_dir=None, save_code=False):
+        self._wandb_run = None
+        self._goodseed_run = None
+
+        if "wandb" in loggers:
+            kwargs = dict(project=project, name=name, config=config)
+            if log_dir:
+                kwargs["dir"] = log_dir
+            if save_code:
+                kwargs["save_code"] = True
+            self._wandb_run = wandb.init(**kwargs)
+
+        if "goodseed" in loggers:
+            self._goodseed_run = goodseed.Run(name=f"{project}/{name}", tags=[project])
+            self._goodseed_run.log_configs(config)
+
+    def log(self, metrics, **kwargs):
+        if self._wandb_run is not None:
+            self._wandb_run.log(metrics, **kwargs)
+        if self._goodseed_run is not None:
+            step = metrics.get("step")
+            # Filter to numeric/string scalars (excludes wandb-specific objects like confusion matrices)
+            safe = {k: v for k, v in metrics.items() if isinstance(v, (int, float, bool, str))}
+            if safe:
+                self._goodseed_run.log_metrics(safe, step=step)
+
     def finish(self):
-        pass
+        if self._wandb_run is not None:
+            self._wandb_run.finish()
+        if self._goodseed_run is not None:
+            self._goodseed_run.close()
+
+
+def add_logging_args(parser):
+    """Add --run and --loggers arguments to an argparse parser."""
+    parser.add_argument("--run", type=str, default="dummy",
+                        help="Run name ('dummy' disables logging)")
+    parser.add_argument("--loggers", nargs="*", default=["wandb", "goodseed"],
+                        help="Logging backends to use (default: wandb goodseed)")
+
+
+def create_metrics_logger(project, args, master_process, config, log_dir=None, save_code=False):
+    """Create a MetricsLogger. Returns no-op logger if run=='dummy' or not master."""
+    if args.run == "dummy" or not master_process:
+        return MetricsLogger(loggers=[], project=project, name=args.run, config=config)
+    return MetricsLogger(
+        loggers=args.loggers, project=project, name=args.run,
+        config=config, log_dir=log_dir, save_code=save_code,
+    )
 
 def format_distribution(bins: list[float], hist_height: int = 10, bin_labels: list[str] = None) -> str:
     bar_char = '❚'  # Heavy vertical bar character.
