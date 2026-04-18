@@ -416,7 +416,7 @@ class MetricsLogger:
             self._wandb_run = wandb.init(**kwargs)
 
         if "goodseed" in loggers:
-            self._goodseed_run = goodseed.Run(name=f"{project}/{name}", tags=[project])
+            self._goodseed_run = goodseed.Run(project="nanoproof", name=name, tags=["nanoproof"])
             self._goodseed_run.log_configs(config)
 
     def log(self, metrics, **kwargs):
