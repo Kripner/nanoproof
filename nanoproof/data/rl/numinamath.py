@@ -97,7 +97,7 @@ def _load_sources() -> list[str]:
         theorems.append(processed)
 
     if skipped > 0:
-        print(f"Skipped {skipped} statements that don't end with `:= by` or `:=`")
+        print(f"Skipped {skipped} statements that could not be parsed (no `:=`, or multiple `sorry`)")
         if skipped_example is not None:
             print(f"Example skipped statement:\n{skipped_example}")
     return theorems
