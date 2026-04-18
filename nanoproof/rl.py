@@ -171,6 +171,15 @@ if balancer:
 else:
     prover = None
 
+# Force NCCL to allocate its communication buffers before measuring free
+# VRAM.  Without this, compute_max_batch_prompt_tokens over-estimates
+# available memory because the ~414 MiB per peer process (e.g. ~2.9 GiB
+# with 8 GPUs) hasn't been allocated yet.
+if ddp:
+    dummy = torch.zeros(1, device=device)
+    dist.all_reduce(dummy)
+    del dummy
+
 # Prompt token limit for inference batches (prevents OOM on long prompts)
 max_prompt_tokens = args.batch_max_prompt_tokens
 if max_prompt_tokens is None:
