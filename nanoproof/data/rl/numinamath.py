@@ -96,7 +96,7 @@ def _load_sources() -> list[str]:
             continue
         theorems.append(processed)
 
-    if skipped > 0:
+    if skipped > 0 and int(os.environ.get("RANK", 0)) == 0:
         print(f"Skipped {skipped} statements that could not be parsed (no `:=`, or multiple `sorry`)")
         if skipped_example is not None:
             print(f"Example skipped statement:\n{skipped_example}")
