@@ -730,11 +730,14 @@ def _ensure_block_arrow(tactic: str) -> str:
     """Ensure that block-opening tactics like ``case`` and ``next`` end with ``=>``.
 
     The Lean REPL accepts these without ``=>`` in step-by-step mode, but Lean's
-    file parser requires the arrow.
+    file parser requires the arrow.  However, ``case tag := expr`` is a
+    term-mode proof assignment and must be left unchanged.
     """
     stripped = tactic.rstrip()
-    if stripped.endswith("=>"):
+    # Already has =>, or is a term-mode proof (case tag := expr).
+    if stripped.endswith("=>") or ":=" in stripped:
         return tactic
+    # Tactic-block openers that need => appended.
     if stripped.startswith("case ") or stripped == "next" or stripped.startswith("next "):
         return stripped + " =>"
     return tactic
