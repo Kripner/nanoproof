@@ -412,11 +412,14 @@ class ProverWorker:
                     except (ConnectionError, LeanProcessException, RemoteException, TimeoutError) as e:
                         if attempt < max_retries - 1:
                             set_thread_state(actor_id, "retry")
-                            log(f"[Actor {actor_id}] Connection error (attempt {attempt + 1}/{max_retries}): '{e}', reconnecting...", component="Prover")
+                            short_err = str(e).split('\n', 1)[0]
+                            log(f"[Actor {actor_id}] Connection error (attempt {attempt + 1}/{max_retries}): '{short_err}', reconnecting...", component="Prover")
                             time.sleep(1.0 * (attempt + 1))
                         else:
                             error = str(e)
                             consecutive_errors += 1
+                            log(f"[Actor {actor_id}] Error (lean={lean_address}:{lean_port}): {e}", component="Prover")
+                            traceback.print_exc()
                     except MCTSAbortedError:
                         skip_report = True
                         break
