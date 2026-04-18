@@ -394,7 +394,8 @@ def run_mcts(config: SearchConfig, game: Game, model: "TacticModel | BlockingTac
         tactic_logprobs = [1.0] * len(tactics)  # TODO (!): use the actual action logprobs
         value = -value  # convert to MCTS value scale (negative proof depth)
 
-        expand_node(node, tactics, tactic_logprobs, config.prior_temperature, timeline=timeline)
+        expand_node(node, tactics, tactic_logprobs, config.prior_temperature,
+                    timeline=timeline, abort_check=abort_check)
 
         # Record expansion for monitoring
         monitor = get_monitor()
@@ -484,6 +485,7 @@ def expand_node(
         action_logprobs: list[float],
         temperature: float,
         timeline: TimelineRecorder | None = None,
+        abort_check=None,
 ):
     node.evaluations += 1
     policy = {
@@ -493,6 +495,8 @@ def expand_node(
     node.children = {}
     state_str = str(node.state[0].state).strip() if len(node.state) == 1 else "<multi-branch>"
     for action, p in policy.items():
+        if abort_check is not None and abort_check():
+            raise MCTSAbortedError("MCTS aborted during node expansion")
         # Check if action is duplicate.
         if action in node.children:
             node.children[action].prior += p  # TODO: wtf is this?
