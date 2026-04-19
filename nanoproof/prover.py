@@ -464,26 +464,43 @@ class ProverWorker:
                         timeline.events.clear()
 
                 if consecutive_errors >= max_consecutive_errors:
-                    log(f"[Actor {actor_id}] Too many consecutive errors, exiting", component="Prover")
+                    log(f"[Actor {actor_id}] CRASHED after {consecutive_errors} consecutive errors, exiting (will be restarted by pool)", component="Prover")
                     break
 
             set_thread_state(actor_id, "idle")
 
-        # Start actor threads
-        threads: list[threading.Thread] = []
-        for i in range(self.num_actors):
-            t = threading.Thread(target=actor_loop, args=(i,), daemon=True)
-            t.start()
-            threads.append(t)
+        # Per-slot thread state. The pool restarts dead actors so a flaky
+        # Lean server cannot cause the whole collect cycle to silently
+        # finish on a partial (or zero) transition count.
+        threads: list[threading.Thread] = [None] * self.num_actors
+        restart_counts: list[int] = [0] * self.num_actors
+        last_start_time: list[float] = [0.0] * self.num_actors
+        min_restart_interval = 5.0
 
-        # Poll until done
+        def start_actor(actor_id: int):
+            t = threading.Thread(target=actor_loop, args=(actor_id,), daemon=True)
+            t.start()
+            threads[actor_id] = t
+            last_start_time[actor_id] = time.time()
+
+        for i in range(self.num_actors):
+            start_actor(i)
+
+        # Poll until done.  The pool exits ONLY when done_check() is true (or
+        # when the outer caller cancels and the finally below sets stop_flag).
+        # Dead actors are respawned in-place; we deliberately do not bail out
+        # on "all actors dead", because that was the silent-failure mode that
+        # caused 6h of training on a stale buffer last run.
         try:
             while True:
                 if done_check():
                     break
-                if all(not t.is_alive() for t in threads):
-                    log("WARNING: All actors have exited unexpectedly", component="Prover")
-                    break
+                now = time.time()
+                for i, t in enumerate(threads):
+                    if not t.is_alive() and (now - last_start_time[i]) >= min_restart_interval:
+                        restart_counts[i] += 1
+                        log(f"[Actor {i}] thread died — restarting (restart #{restart_counts[i]})", component="Prover")
+                        start_actor(i)
                 if poll_callback is not None:
                     poll_callback(get_thread_states())
                 time.sleep(0.1)
@@ -491,8 +508,9 @@ class ProverWorker:
             stop_flag.set()
             deadline = time.time() + 60.0
             for t in threads:
-                t.join(timeout=max(0.0, deadline - time.time()))
-            alive = sum(1 for t in threads if t.is_alive())
+                if t is not None:
+                    t.join(timeout=max(0.0, deadline - time.time()))
+            alive = sum(1 for t in threads if t is not None and t.is_alive())
             if alive:
                 log(f"WARNING: {alive}/{len(threads)} actor threads still alive after 60s", component="Prover")
                 faulthandler.dump_traceback()

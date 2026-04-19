@@ -43,6 +43,12 @@ _errors_file: TextIO | None = None
 _is_master_process: bool = True  # Default to True for non-DDP usage
 _ddp_rank: int = 0  # DDP rank for logging
 
+# Dedup state for log_actionable_error: maps (component, error_first_line) ->
+# (last_write_monotonic, suppressed_count). Without this, a dead Lean server
+# can fill errors.jsonl with hundreds of thousands of identical entries.
+_error_dedup: dict[tuple[str, str], tuple[float, int]] = {}
+_error_dedup_window_seconds: float = 60.0
+
 # In-memory tactics buffer for distributed mode (provers collect and report)
 _tactics_buffer: deque = deque(maxlen=1000)
 _tactics_buffer_lock = threading.Lock()
@@ -188,10 +194,22 @@ def log_actionable_error(component: str, error: str, **extra):
 
     Use this for errors that may need human attention (OOM, repeated actor
     failures, etc.) -- not for routine per-theorem failures.
+
+    Identical errors (same component + first line) are deduplicated within
+    a 60s window so a stuck/dead Lean server cannot fill the file with
+    hundreds of thousands of duplicate entries; the next emitted entry
+    carries `suppressed_since_last` with the count of skipped duplicates.
     """
     with _log_lock:
         if _errors_file is None:
             return
+        key = (component, error.split("\n", 1)[0][:200])
+        now = time.monotonic()
+        last_time, suppressed = _error_dedup.get(key, (0.0, 0))
+        if last_time and (now - last_time) < _error_dedup_window_seconds:
+            _error_dedup[key] = (last_time, suppressed + 1)
+            return
+        _error_dedup[key] = (now, 0)
         entry = {
             "time": datetime.now().isoformat(timespec="seconds"),
             "rank": _ddp_rank,
@@ -199,6 +217,8 @@ def log_actionable_error(component: str, error: str, **extra):
             "error": error,
             **extra,
         }
+        if suppressed > 0:
+            entry["suppressed_since_last"] = suppressed
         _errors_file.write(json.dumps(entry) + "\n")
         _errors_file.flush()
 
