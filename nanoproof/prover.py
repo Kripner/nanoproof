@@ -61,24 +61,26 @@ class Prover:
 
     @staticmethod
     def _get_process_interruptible(client: LeanClient, abort_check: Callable[[], bool] | None,
-                                   poll_interval: float = 10.0, max_wait: float = 300.0):
+                                   poll_interval: float = 10.0, max_wait: float = 300.0) -> tuple:
         """Get a Lean process, polling abort_check between short blocking calls.
 
         Uses short server-side timeouts so that abort_check is tested every
-        *poll_interval* seconds.  Returns None if aborted or *max_wait* is
-        exceeded.
+        *poll_interval* seconds.  Returns ``(process, reason)`` where reason
+        is ``"ok"`` (process is not None), ``"aborted"`` (caller asked to
+        stop — typically end of a collect cycle), or ``"timeout"`` (waited
+        *max_wait* without success — real pool saturation).
         """
         deadline = time.time() + max_wait
         while True:
             if abort_check is not None and abort_check():
-                return None
+                return None, "aborted"
             remaining = deadline - time.time()
             if remaining <= 0:
-                return None
+                return None, "timeout"
             timeout = min(poll_interval, remaining)
             process = client.get_process(timeout=timeout)
             if process is not None:
-                return process
+                return process, "ok"
 
     def prove(self, client: LeanClient, theorem: BenchTheorem, expansion_callback: Callable[[], None] | None = None,
               abort_check: Callable[[], bool] | None = None,
@@ -88,9 +90,12 @@ class Prover:
         Returns a :class:`Game` with results, or ``None`` if Lean setup fails.
         """
         logger.debug(f"Proving: {theorem.source[:80]}...")
-        process = self._get_process_interruptible(client, abort_check)
+        process, reason = self._get_process_interruptible(client, abort_check)
         if process is None:
-            log(f"FAILED: Could not get Lean process for theorem", component="Prover")
+            # "aborted" is the normal cycle-end path (stop_flag set after
+            # done_check); only surface true pool-saturation timeouts.
+            if reason == "timeout":
+                log(f"FAILED: Could not get Lean process for theorem (300s pool timeout)", component="Prover")
             return None
 
         with process as env:
