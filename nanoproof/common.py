@@ -421,13 +421,21 @@ class MetricsLogger:
 
     def log(self, metrics, **kwargs):
         if self._wandb_run is not None:
-            self._wandb_run.log(metrics, **kwargs)
+            try:
+                self._wandb_run.log(metrics, **kwargs)
+            except Exception as e:
+                # Metrics-logger flakes (network blips, sqlite locking, etc.)
+                # must never kill a long training run.
+                logger.warning(f"wandb.log failed (continuing): {e}")
         if self._goodseed_run is not None:
             step = metrics.get("step")
             # Filter to numeric/string scalars (excludes wandb-specific objects like confusion matrices)
             safe = {k: v for k, v in metrics.items() if isinstance(v, (int, float, bool, str))}
             if safe:
-                self._goodseed_run.log_metrics(safe, step=step)
+                try:
+                    self._goodseed_run.log_metrics(safe, step=step)
+                except Exception as e:
+                    logger.warning(f"goodseed.log_metrics failed (continuing): {e}")
 
     def finish(self):
         if self._wandb_run is not None:
