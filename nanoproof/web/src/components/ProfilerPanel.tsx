@@ -290,18 +290,24 @@ export function ProfilerPanel({ mode }: Props) {
     }
 
     // Phase start markers on the header (thin solid lines, no labels;
-    // the legend above the chart explains the color meanings).
+    // the legend above the chart explains the color meanings). Alpha is
+    // attenuated when many lines of the same color are packed into the
+    // viewport, so a dense run of phase transitions doesn't paint over the
+    // whole chart.
+    const phaseAlpha = computePhaseAlphas(data.phases, viewStart, viewEnd, timelineWidth);
     ctx.lineWidth = 1;
     for (const ph of data.phases) {
       if (ph.action !== 'start') continue;
       const x = timeToX(ph.t);
       if (x < LABEL_WIDTH || x > width) continue;
+      ctx.globalAlpha = phaseAlpha[ph.name] ?? 1;
       ctx.strokeStyle = phaseColor(ph.name);
       ctx.beginPath();
       ctx.moveTo(x, 0);
       ctx.lineTo(x, height);
       ctx.stroke();
     }
+    ctx.globalAlpha = 1;
 
     // Left gutter (separator between labels and timeline)
     ctx.fillStyle = COLORS.background;
@@ -381,13 +387,17 @@ export function ProfilerPanel({ mode }: Props) {
     // Phase vertical lines (drawn on top of rows so they're visible).
     // Both starts and ends are thin (1px); starts are solid, ends are dashed.
     // Draw ends first so the solid starts always paint on top of any
-    // overlapping dashed end at the same x coordinate.
+    // overlapping dashed end at the same x coordinate. Alpha is attenuated
+    // when many same-color lines pack into the viewport so they don't fully
+    // overpower the underlying actor bars.
+    const bodyPhaseAlpha = computePhaseAlphas(data.phases, viewStart, viewEnd, timelineWidth);
     ctx.lineWidth = 1;
     ctx.setLineDash([3, 3]);
     for (const ph of data.phases) {
       if (ph.action !== 'end') continue;
       const x = timeToX(ph.t);
       if (x < LABEL_WIDTH || x > width) continue;
+      ctx.globalAlpha = bodyPhaseAlpha[ph.name] ?? 1;
       ctx.strokeStyle = phaseColor(ph.name);
       ctx.beginPath();
       ctx.moveTo(x, 0);
@@ -399,12 +409,14 @@ export function ProfilerPanel({ mode }: Props) {
       if (ph.action !== 'start') continue;
       const x = timeToX(ph.t);
       if (x < LABEL_WIDTH || x > width) continue;
+      ctx.globalAlpha = bodyPhaseAlpha[ph.name] ?? 1;
       ctx.strokeStyle = phaseColor(ph.name);
       ctx.beginPath();
       ctx.moveTo(x, 0);
       ctx.lineTo(x, height);
       ctx.stroke();
     }
+    ctx.globalAlpha = 1;
   }, [data, viewStart, viewEnd, dataOrigin, viewportWidth, bodyHeight, actorIds]);
 
   // Wheel handler: ctrl/meta + wheel = zoom; plain wheel = native vertical scroll.
@@ -615,6 +627,33 @@ function paintDominant(
     else if (isA !== runIsA) { flush(p); runStart = p; runIsA = isA; }
   }
   flush(w);
+}
+
+// Pixel spacing at which a color is considered "comfortably sparse" and
+// rendered at full opacity. Below this, alpha tapers down so dense bands of
+// phase lines fade instead of painting a solid wall over the actor rows.
+const PHASE_TARGET_SPACING_PX = 25;
+const PHASE_MIN_ALPHA = 0.15;
+
+// For each phase name, return the alpha to use for vertical markers in the
+// current viewport, attenuated by how densely they're packed.
+function computePhaseAlphas(
+  phases: WirePhase[],
+  viewStart: number,
+  viewEnd: number,
+  timelineWidth: number,
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const ph of phases) {
+    if (ph.t < viewStart || ph.t > viewEnd) continue;
+    counts[ph.name] = (counts[ph.name] ?? 0) + 1;
+  }
+  const out: Record<string, number> = {};
+  for (const name in counts) {
+    const avgSpacing = timelineWidth / counts[name];
+    out[name] = Math.max(PHASE_MIN_ALPHA, Math.min(1, avgSpacing / PHASE_TARGET_SPACING_PX));
+  }
+  return out;
 }
 
 function phaseColor(name: string): string {
