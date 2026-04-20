@@ -12,6 +12,7 @@ The monitor runs a Flask server in a background thread. The web app polls
 for state updates every second.
 """
 
+import gzip
 import json
 import logging
 import os
@@ -28,7 +29,7 @@ from statistics import median
 from typing import Literal, TextIO, Any
 from queue import Queue
 
-from flask import Flask, jsonify, Response, send_from_directory
+from flask import Flask, jsonify, Response, send_from_directory, request
 
 from nanoproof.common import TimelineEvent
 
@@ -427,6 +428,93 @@ Phase = Literal["idle", "collecting", "evaluating", "training"]
 
 
 # -----------------------------------------------------------------------------
+# Instrumentation payload helpers
+# -----------------------------------------------------------------------------
+
+# Max wall-clock spread between rank-duplicated phase events for the same
+# (name, action). DDP ranks sit behind a barrier so real transitions fire
+# within a handful of seconds; consecutive real transitions of the same kind
+# are much farther apart (whole phase durations). 10s is comfortably in the gap.
+_PHASE_DEDUP_WINDOW = 10.0
+
+def _compact_instrumentation(
+    actors: dict[Any, list[dict]],
+    phases: list[dict],
+    mode: str,
+    since: float,
+) -> dict:
+    """Encode actor timelines and phase events into a compact, gzip-friendly shape.
+
+    Instead of a list of `{type, start, end}` objects per actor (lots of repeated
+    keys and braces), emit flat typed arrays: for each actor, a `llm` and `lean`
+    array of interleaved [start, end, start, end, ...] floats. This halves the
+    JSON size before gzip and removes most of the parse overhead on the client.
+
+    `since` filters to events that started strictly after that absolute
+    timestamp (for delta fetches). Pass -inf to return everything.
+    """
+    out_actors: dict[str, dict[str, list[float]]] = {}
+    max_cursor = since if since != float("-inf") else 0.0
+    for aid, events in actors.items():
+        llm: list[float] = []
+        lean: list[float] = []
+        for ev in events:
+            start = ev["start"]
+            if start <= since:
+                continue
+            bucket = llm if ev["type"] == "llm" else lean
+            bucket.append(start)
+            bucket.append(ev["end"])
+            if start > max_cursor:
+                max_cursor = start
+        if llm or lean:
+            out_actors[str(aid)] = {"llm": llm, "lean": lean}
+
+    # Phase events are semantically global (all DDP ranks transition together
+    # behind a barrier), but older run logs were written from every rank, so
+    # one transition shows up as N near-duplicate entries. Collapse groups
+    # with the same (name, action) that land within _PHASE_DEDUP_WINDOW of
+    # each other, keeping the earliest timestamp (which is what you'd want
+    # for "start of this phase").
+    out_phases = []
+    sorted_phases = sorted(phases, key=lambda p: p["time"])
+    last_by_key: dict[tuple[str, str], float] = {}
+    for ph in sorted_phases:
+        t = ph["time"]
+        if t <= since:
+            continue
+        key = (ph["name"], ph["action"])
+        last_t = last_by_key.get(key)
+        if last_t is not None and t - last_t < _PHASE_DEDUP_WINDOW:
+            # Extend the dedup window so a slow cascade (rank 7 lagging rank 0
+            # by 15s) still collapses as long as each step is within the window.
+            last_by_key[key] = t
+            continue
+        last_by_key[key] = t
+        out_phases.append({"name": ph["name"], "action": ph["action"], "t": t})
+        if t > max_cursor:
+            max_cursor = t
+
+    return {
+        "actors": out_actors,
+        "phases": out_phases,
+        "mode": mode,
+        "cursor": max_cursor,
+    }
+
+
+def _gzip_json(payload: dict) -> Response:
+    """Serialize payload as compact JSON, gzip, return with Content-Encoding header."""
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    body = gzip.compress(raw, compresslevel=6)
+    return Response(
+        body,
+        mimetype="application/json",
+        headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"},
+    )
+
+
+# -----------------------------------------------------------------------------
 # Web Monitor
 # -----------------------------------------------------------------------------
 
@@ -492,6 +580,10 @@ class WebMonitor:
         self._timeline_file: TextIO | None = None
         self.mode: str = "live"  # "live" or "standalone"
         self._max_timeline_events_per_actor = 10000
+
+        # Cache for standalone (post-hoc) instrumentation reads. Keyed by
+        # timeline.jsonl mtime so we only re-parse when the file changes.
+        self._instr_file_cache: dict[str, Any] = {"mtime": None, "body": None}
 
         # Server thread
         self._server_thread: threading.Thread | None = None
@@ -840,18 +932,30 @@ class WebMonitor:
 
         @app.route("/api/instrumentation")
         def get_instrumentation():
-            """Get live timeline instrumentation data."""
+            """Get live timeline instrumentation data (compact + gzipped).
+
+            Query params:
+              since (float, optional): absolute seconds. Only events with
+                start > since (actors) or t > since (phases) are returned.
+                Clients use this to fetch deltas so long runs don't re-download
+                history on every poll.
+            """
+            try:
+                since = float(request.args.get("since", "-inf"))
+            except ValueError:
+                since = float("-inf")
             with self._lock:
-                actors = {}
-                for actor_id, events in self.actor_timelines.items():
-                    actors[str(actor_id)] = {"events": list(events)}
-                phases = list(self.phase_events)
+                actors_src = {
+                    aid: list(evs) for aid, evs in self.actor_timelines.items()
+                }
+                phases_src = list(self.phase_events)
                 mode = self.mode
-            return jsonify({"actors": actors, "phases": phases, "mode": mode})
+            payload = _compact_instrumentation(actors_src, phases_src, mode, since)
+            return _gzip_json(payload)
 
         @app.route("/api/instrumentation/file")
         def get_instrumentation_file():
-            """Read timeline data from timeline.jsonl on disk (for post-hoc viewing)."""
+            """Serve timeline.jsonl contents in compact+gzipped form, cached by mtime."""
             with self._lock:
                 output_dir = self.output_dir
             if not output_dir:
@@ -859,36 +963,52 @@ class WebMonitor:
 
             timeline_path = os.path.join(output_dir, "timeline.jsonl")
             if not os.path.exists(timeline_path):
-                return jsonify({"actors": {}, "phases": [], "mode": self.mode})
+                return _gzip_json({"actors": {}, "phases": [], "mode": self.mode})
 
-            actors: dict[str, list] = {}
-            phases: list[dict] = []
             try:
-                with open(timeline_path, "r") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        entry = json.loads(line)
-                        if entry.get("type") == "phase":
-                            phases.append(entry)
-                        elif entry.get("type") == "actor":
-                            aid = str(entry["actor"])
-                            if aid not in actors:
-                                actors[aid] = []
-                            actors[aid].append({
-                                "type": entry["event"],
-                                "start": entry["start"],
-                                "end": entry["end"],
-                            })
-            except Exception as e:
+                mtime = os.path.getmtime(timeline_path)
+            except OSError as e:
                 return jsonify({"error": str(e)}), 500
 
-            return jsonify({
-                "actors": {k: {"events": v} for k, v in actors.items()},
-                "phases": phases,
-                "mode": self.mode,
-            })
+            cached_body = None
+            if self._instr_file_cache["mtime"] == mtime:
+                cached_body = self._instr_file_cache["body"]
+
+            if cached_body is None:
+                actors: dict[str, list] = {}
+                phases: list[dict] = []
+                try:
+                    with open(timeline_path, "r") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            entry = json.loads(line)
+                            t = entry.get("type")
+                            if t == "phase":
+                                phases.append(entry)
+                            elif t == "actor":
+                                aid = str(entry["actor"])
+                                actors.setdefault(aid, []).append({
+                                    "type": entry["event"],
+                                    "start": entry["start"],
+                                    "end": entry["end"],
+                                })
+                except Exception as e:
+                    return jsonify({"error": str(e)}), 500
+                payload = _compact_instrumentation(actors, phases, self.mode, float("-inf"))
+                cached_body = gzip.compress(
+                    json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+                    compresslevel=6,
+                )
+                self._instr_file_cache["mtime"] = mtime
+                self._instr_file_cache["body"] = cached_body
+
+            return Response(
+                cached_body,
+                mimetype="application/json",
+                headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"},
+            )
 
         return app
 
@@ -1311,7 +1431,15 @@ class WebMonitor:
                 self._timeline_file.flush()
 
     def record_phase_event(self, name: str, action: str):
-        """Record a global phase event (start/end of collect, eval, train)."""
+        """Record a global phase event (start/end of collect, eval, train).
+
+        Phase transitions are globally synchronized across DDP ranks, so we
+        only log from rank 0. Without this guard, an 8-rank run would write
+        8 near-duplicate entries per transition (one per process) into the
+        shared timeline.jsonl.
+        """
+        if not _is_master_process:
+            return
         with self._lock:
             entry = {"type": "phase", "name": name, "action": action, "time": time.time()}
             self.phase_events.append(entry)
