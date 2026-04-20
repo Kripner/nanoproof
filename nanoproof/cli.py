@@ -301,6 +301,17 @@ class LeanServerStatus:
     ram_percent: float = 0.0
     ram_used_gb: float = 0.0
     ram_total_gb: float = 0.0
+    # Resident memory of the leanserver Python process itself (not the host).
+    # Grow-over-time here is a memory leak in the leanserver; we've seen
+    # one instance grow to 110 GiB in production while its sibling stayed
+    # at 50 MiB on the same workload. Surfaced in /status via commit
+    # leantree/5a4b499. Populated only when the server is new enough to
+    # report it; 0 otherwise (treat as "unknown", not "zero").
+    leanserver_rss_gb: float = 0.0
+    # Currently-tracked proof branches on the server side. Useful to
+    # correlate with rss_gb to distinguish "branches_dict is big" from
+    # "something else in the python heap is big".
+    total_branches: int = 0
     last_update: float = field(default_factory=time.time)
     error: str = ""
 
@@ -637,13 +648,18 @@ class WebMonitor:
                             server.ram_percent = ram.get("percent", 0.0)
                             server.ram_used_gb = ram.get("used_bytes", 0) / (1024**3)
                             server.ram_total_gb = ram.get("total_bytes", 0) / (1024**3)
+                            # 0 when the leanserver is old enough not to report
+                            # this field yet; the metric reader can filter those.
+                            rss_bytes = data.get("leanserver_rss_bytes") or 0
+                            server.leanserver_rss_gb = rss_bytes / (1024**3)
+                            server.total_branches = data.get("total_branches", 0)
                             server.last_update = time.time()
                             server.error = ""
                     except Exception as e:
                         with self._lock:
                             server.connected = False
                             server.error = str(e)
-        
+
         self._lean_servers_monitor_thread = threading.Thread(target=monitor_lean_servers, daemon=True)
         self._lean_servers_monitor_thread.start()
 
@@ -1090,6 +1106,8 @@ class WebMonitor:
                         "ram_percent": s.ram_percent,
                         "ram_used_gb": s.ram_used_gb,
                         "ram_total_gb": s.ram_total_gb,
+                        "leanserver_rss_gb": s.leanserver_rss_gb,
+                        "total_branches": s.total_branches,
                         "error": s.error,
                     }
                     for s in self.lean_servers
@@ -1238,6 +1256,41 @@ class WebMonitor:
         """Clear all local actors (called when collection ends)."""
         with self._lock:
             self.local_actors.clear()
+
+    # --- Metrics exporter for wandb/goodseed ---
+
+    def lean_server_metrics(self) -> dict[str, float]:
+        """Per-leanserver metrics flattened into a wandb-friendly dict.
+
+        Call once per training step and splat into ``wandb_run.log(...)``.
+        Returned keys look like::
+
+            lean/10_10_25_36/leanserver_rss_gb    # Python-process RSS (leak indicator)
+            lean/10_10_25_36/host_ram_percent     # host-wide RAM usage
+            lean/10_10_25_36/used_processes
+            lean/10_10_25_36/total_branches
+            lean/10_10_25_36/connected            # 1 if last poll succeeded
+
+        Dots in IP addresses are replaced with underscores so wandb groups
+        the series sensibly ("lean/<host>/*" in the sidebar rather than
+        being treated as nested fields).  All values are scalars so they
+        pass the safe-filter in MetricsLogger.log.
+        """
+        metrics: dict[str, float] = {}
+        with self._lock:
+            servers = list(self.lean_servers)
+        for s in servers:
+            if not s.address:
+                continue
+            host_key = s.address.replace(".", "_")
+            prefix = f"lean/{host_key}"
+            metrics[f"{prefix}/leanserver_rss_gb"] = float(s.leanserver_rss_gb)
+            metrics[f"{prefix}/host_ram_percent"] = float(s.ram_percent)
+            metrics[f"{prefix}/used_processes"] = float(s.used_processes)
+            metrics[f"{prefix}/available_processes"] = float(s.available_processes)
+            metrics[f"{prefix}/total_branches"] = float(s.total_branches)
+            metrics[f"{prefix}/connected"] = 1.0 if s.connected else 0.0
+        return metrics
 
     # --- Timeline instrumentation ---
 
