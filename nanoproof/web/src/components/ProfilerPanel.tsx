@@ -6,6 +6,11 @@ const LABEL_WIDTH = 80;
 const HEADER_HEIGHT = 40;
 const POLL_INTERVAL_LIVE = 2000;
 const MIN_BAR_PX = 1;
+// Cap how much time can be on screen at once. Rendering 10h of data
+// crushes the browser because phase lines, outcome markers, and the
+// column accumulators all scale with the visible span.
+const MAX_VIEW_DURATION = 3600;
+const NAV_STEP = 1800;
 
 const COLORS = {
   llm: '#58a6ff',
@@ -243,6 +248,7 @@ export function ProfilerPanel({ mode }: Props) {
 
   const dragRef = useRef<{ startX: number; startY: number; viewStart: number; viewEnd: number; scrollTop: number } | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [hoverX, setHoverX] = useState<number | null>(null);
 
   // Fetch data (with delta polling in live mode).
   useEffect(() => {
@@ -320,14 +326,18 @@ export function ProfilerPanel({ mode }: Props) {
     [data, productiveOnly],
   );
 
-  // Auto-follow: keep view fitted to data bounds when new data arrives.
+  // Auto-follow: keep view pinned to the tail of the data as it arrives.
+  // Capped at MAX_VIEW_DURATION so long-running sessions don't dump 10h
+  // of events into a single viewport.
   useEffect(() => {
     const bounds = computeBounds(view);
     if (!bounds || !autoFollow) return;
     const range = bounds.max - bounds.min;
-    const padding = Math.max(range * 0.05, 5);
-    setViewStart(bounds.min);
-    setViewEnd(bounds.max + padding);
+    const padding = Math.min(Math.max(range * 0.05, 5), 60);
+    const end = bounds.max + padding;
+    const start = Math.max(bounds.min, end - MAX_VIEW_DURATION);
+    setViewStart(start);
+    setViewEnd(end);
   }, [view, autoFollow]);
 
   const dataOrigin = useMemo(() => {
@@ -512,11 +522,6 @@ export function ProfilerPanel({ mode }: Props) {
       accumulateColumns(view.actors[aid].llm, viewStart, viewEnd, timeToX, LABEL_WIDTH, timelineWidth, colLlm);
       accumulateColumns(view.actors[aid].lean, viewStart, viewEnd, timeToX, LABEL_WIDTH, timelineWidth, colLean);
       paintDominant(ctx, colLlm, colLean, COLORS.llm, COLORS.lean, LABEL_WIDTH, y + 1, ROW_HEIGHT - 2);
-
-      // Per-attempt outcome markers drawn on top of the bars, so the edge
-      // of the last activity block and its outcome read as one unit.
-      paintOutcomes(ctx, view.actors[aid].outcomes, viewStart, viewEnd,
-                    timeToX, LABEL_WIDTH, width, y, ROW_HEIGHT);
     }
 
     // Phase interval overlays go on top of rows so the tint is visible
@@ -557,6 +562,16 @@ export function ProfilerPanel({ mode }: Props) {
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
+
+    // Outcome markers go last so they sit on top of the phase overlay
+    // tint and the phase vertical lines — the per-attempt verdict should
+    // never be occluded by any background decoration.
+    for (let i = 0; i < actorIds.length; i++) {
+      const aid = actorIds[i];
+      const y = i * (ROW_HEIGHT + ROW_GAP);
+      paintOutcomes(ctx, view.actors[aid].outcomes, viewStart, viewEnd,
+                    timeToX, LABEL_WIDTH, width, y, ROW_HEIGHT);
+    }
   }, [view, viewStart, viewEnd, dataOrigin, viewportWidth, bodyHeight, actorIds, phasePairs]);
 
   // Wheel handler: ctrl/meta + wheel = zoom; plain wheel = native vertical scroll.
@@ -577,7 +592,7 @@ export function ProfilerPanel({ mode }: Props) {
       const clamped = Math.max(0, Math.min(1, fraction));
       const duration = viewEnd - viewStart;
       const zoomFactor = e.deltaY > 0 ? 1.2 : 1 / 1.2;
-      const newDuration = Math.max(duration * zoomFactor, 0.05);
+      const newDuration = Math.max(Math.min(duration * zoomFactor, MAX_VIEW_DURATION), 0.05);
       const pivot = viewStart + clamped * duration;
       setAutoFollow(false);
       setViewStart(pivot - clamped * newDuration);
@@ -586,6 +601,57 @@ export function ProfilerPanel({ mode }: Props) {
     el.addEventListener('wheel', handler, { passive: false });
     return () => el.removeEventListener('wheel', handler);
   }, [viewStart, viewEnd, view]);
+
+  const shiftView = useCallback((delta: number) => {
+    setAutoFollow(false);
+    const bounds = computeBounds(view);
+    const duration = viewEnd - viewStart;
+    let newStart = viewStart + delta;
+    let newEnd = viewEnd + delta;
+    if (bounds) {
+      // Keep at least a sliver of data on screen after clamping so the
+      // user can't shift off into empty space.
+      if (newEnd < bounds.min + duration * 0.1) {
+        newStart = bounds.min;
+        newEnd = bounds.min + duration;
+      }
+      if (newStart > bounds.max - duration * 0.1) {
+        newEnd = bounds.max;
+        newStart = bounds.max - duration;
+      }
+    }
+    setViewStart(newStart);
+    setViewEnd(newEnd);
+  }, [view, viewStart, viewEnd]);
+
+  const goStart = useCallback(() => {
+    const bounds = computeBounds(view);
+    if (!bounds) return;
+    setAutoFollow(false);
+    const duration = Math.min(viewEnd - viewStart, MAX_VIEW_DURATION);
+    setViewStart(bounds.min);
+    setViewEnd(bounds.min + duration);
+  }, [view, viewStart, viewEnd]);
+
+  const goEnd = useCallback(() => {
+    // Re-enabling auto-follow lets the existing effect pin the view to
+    // the tail and keep it there as new data arrives.
+    setAutoFollow(true);
+  }, []);
+
+  const handleHeaderMouseMove = useCallback((e: React.MouseEvent) => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const rect = chart.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    if (x < LABEL_WIDTH || x > rect.width) {
+      setHoverX(null);
+      return;
+    }
+    setHoverX(x);
+  }, []);
+
+  const handleHeaderMouseLeave = useCallback(() => setHoverX(null), []);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     setAutoFollow(false);
@@ -665,6 +731,40 @@ export function ProfilerPanel({ mode }: Props) {
           <div style={{ marginLeft: 'auto', fontSize: 'var(--font-xs)', color: 'var(--text-secondary)' }}>
             Ctrl+wheel to zoom, drag to pan
           </div>
+          <div style={{ display: 'flex', gap: 4 }}>
+            <button
+              className="tab-btn"
+              onClick={goStart}
+              style={{ fontSize: 'var(--font-xs)' }}
+              title="Jump to start of data"
+            >
+              Start
+            </button>
+            <button
+              className="tab-btn"
+              onClick={() => shiftView(-NAV_STEP)}
+              style={{ fontSize: 'var(--font-xs)' }}
+              title="Shift view 30 minutes earlier"
+            >
+              -30m
+            </button>
+            <button
+              className="tab-btn"
+              onClick={() => shiftView(NAV_STEP)}
+              style={{ fontSize: 'var(--font-xs)' }}
+              title="Shift view 30 minutes later"
+            >
+              +30m
+            </button>
+            <button
+              className="tab-btn"
+              onClick={goEnd}
+              style={{ fontSize: 'var(--font-xs)' }}
+              title="Jump to end of data and auto-follow"
+            >
+              End
+            </button>
+          </div>
           <button
             className={`tab-btn ${productiveOnly ? 'active' : ''}`}
             onClick={() => setProductiveOnly(!productiveOnly)}
@@ -694,7 +794,11 @@ export function ProfilerPanel({ mode }: Props) {
             {/* Header lives outside the scroll container so it's always visible
                 without depending on position:sticky (which silently no-ops
                 when the scroll container's height isn't actually constrained). */}
-            <div style={{ flexShrink: 0, borderBottom: `1px solid ${COLORS.grid}`, background: COLORS.background }}>
+            <div
+              style={{ flexShrink: 0, borderBottom: `1px solid ${COLORS.grid}`, background: COLORS.background }}
+              onMouseMove={handleHeaderMouseMove}
+              onMouseLeave={handleHeaderMouseLeave}
+            >
               <canvas ref={headerCanvasRef} style={{ display: 'block' }} />
             </div>
             <div
@@ -713,6 +817,13 @@ export function ProfilerPanel({ mode }: Props) {
               viewStart={viewStart}
               viewEnd={viewEnd}
               viewportWidth={viewportWidth}
+            />
+            <HoverCursor
+              hoverX={hoverX}
+              viewStart={viewStart}
+              viewEnd={viewEnd}
+              viewportWidth={viewportWidth}
+              dataOrigin={dataOrigin}
             />
           </div>
         )}
@@ -954,6 +1065,82 @@ function NowCursor({ mode, now, viewStart, viewEnd, viewportWidth }: NowCursorPr
       }}
     />
   );
+}
+
+interface HoverCursorProps {
+  hoverX: number | null;
+  viewStart: number;
+  viewEnd: number;
+  viewportWidth: number;
+  dataOrigin: number;
+}
+
+// Crosshair line + timestamp label shown while hovering the header. The line
+// spans the full chart height so the user can read which actor row lines up
+// with the hovered time; the label sits in the header so it doesn't cover data.
+function HoverCursor({ hoverX, viewStart, viewEnd, viewportWidth, dataOrigin }: HoverCursorProps) {
+  if (hoverX === null) return null;
+  const duration = viewEnd - viewStart;
+  if (duration <= 0 || viewportWidth <= 0) return null;
+  const timelineWidth = viewportWidth - LABEL_WIDTH;
+  if (timelineWidth <= 0) return null;
+  const t = viewStart + ((hoverX - LABEL_WIDTH) / timelineWidth) * duration;
+  const label = formatHoverTime(t - dataOrigin);
+  // Flip the label to the left of the cursor when it would overflow the right
+  // edge, so it stays fully visible near the end of the viewport.
+  const APPROX_LABEL_WIDTH = 90;
+  const flipLeft = hoverX + 6 + APPROX_LABEL_WIDTH > viewportWidth - 4;
+  return (
+    <>
+      <div
+        style={{
+          position: 'absolute',
+          left: hoverX,
+          top: 0,
+          bottom: 0,
+          width: 1,
+          background: 'rgba(230, 237, 243, 0.35)',
+          pointerEvents: 'none',
+          zIndex: 6,
+        }}
+      />
+      <div
+        style={{
+          position: 'absolute',
+          left: flipLeft ? undefined : hoverX + 6,
+          right: flipLeft ? viewportWidth - hoverX + 6 : undefined,
+          top: 4,
+          fontSize: 10,
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+          background: 'rgba(13, 17, 23, 0.9)',
+          color: 'var(--text-primary, #e6edf3)',
+          padding: '2px 5px',
+          borderRadius: 2,
+          border: `1px solid ${COLORS.grid}`,
+          pointerEvents: 'none',
+          whiteSpace: 'nowrap',
+          zIndex: 6,
+        }}
+      >
+        {label}
+      </div>
+    </>
+  );
+}
+
+// Hover label uses a fixed fine precision independent of the tick interval,
+// so the readout is always more precise than the axis labels around it.
+function formatHoverTime(seconds: number): string {
+  if (seconds < 0) seconds = 0;
+  if (seconds < 60) return `${seconds.toFixed(3)}s`;
+  const mins = Math.floor(seconds / 60);
+  const remSecs = seconds - mins * 60;
+  if (seconds < 3600) {
+    return `${mins}m ${remSecs.toFixed(2)}s`;
+  }
+  const hrs = Math.floor(mins / 60);
+  const remMins = mins - hrs * 60;
+  return `${hrs}h ${remMins}m ${remSecs.toFixed(1)}s`;
 }
 
 function LegendSwatch({ color, label }: { color: string; label: string }) {
