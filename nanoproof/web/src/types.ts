@@ -94,6 +94,8 @@ export interface LeanServerStatus {
   available_processes: number;
   used_processes: number;
   max_processes: number;
+  starting_processes: number;
+  inactive_processes: number;
   cpu_percent: number[];
   ram_percent: number;
   ram_used_gb: number;

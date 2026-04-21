@@ -21,10 +21,6 @@ function SingleLeanServer({ server, compact = false }: { server: LeanServerStatu
     );
   }
 
-  const processUtilization = server.max_processes > 0 
-    ? (server.used_processes / server.max_processes) * 100 
-    : 0;
-  
   const avgCpu = server.cpu_percent.length > 0
     ? server.cpu_percent.reduce((a, b) => a + b, 0) / server.cpu_percent.length
     : 0;
@@ -43,6 +39,14 @@ function SingleLeanServer({ server, compact = false }: { server: LeanServerStatu
             <span className="lean-compact-value">{server.available_processes}/{server.max_processes}</span>
           </div>
           <div className="lean-compact-stat">
+            <span className="lean-compact-label">Start</span>
+            <span className="lean-compact-value">{server.starting_processes}</span>
+          </div>
+          <div className="lean-compact-stat">
+            <span className="lean-compact-label">Idle</span>
+            <span className="lean-compact-value">{server.inactive_processes}</span>
+          </div>
+          <div className="lean-compact-stat">
             <span className="lean-compact-label">CPU</span>
             <span className="lean-compact-value">{avgCpu.toFixed(0)}%</span>
           </div>
@@ -52,15 +56,6 @@ function SingleLeanServer({ server, compact = false }: { server: LeanServerStatu
           </div>
         </div>
         <div className="lean-compact-bars">
-          <div className="lean-bar-row">
-            <span className="lean-bar-label">Proc</span>
-            <div className="lean-bar-tiny">
-              <div
-                className={`lean-bar-fill ${processUtilization > 80 ? 'high' : processUtilization > 50 ? 'medium' : 'low'}`}
-                style={{ width: `${processUtilization}%` }}
-              />
-            </div>
-          </div>
           <div className="lean-bar-row">
             <span className="lean-bar-label">CPU</span>
             <div className="lean-bar-tiny">
@@ -98,12 +93,20 @@ function SingleLeanServer({ server, compact = false }: { server: LeanServerStatu
             {server.available_processes}/{server.max_processes}
           </div>
           <div className="lean-stat-label">Available</div>
-          <div className="lean-bar">
-            <div 
-              className={`lean-bar-fill ${processUtilization > 80 ? 'high' : processUtilization > 50 ? 'medium' : 'low'}`}
-              style={{ width: `${processUtilization}%` }}
-            />
+        </div>
+
+        <div className="lean-stat">
+          <div className="lean-stat-value">
+            {server.starting_processes}
           </div>
+          <div className="lean-stat-label">Starting</div>
+        </div>
+
+        <div className="lean-stat">
+          <div className="lean-stat-value">
+            {server.inactive_processes}
+          </div>
+          <div className="lean-stat-label">Inactive</div>
         </div>
 
         <div className="lean-stat">
