@@ -296,10 +296,13 @@ class LeanServerStatus:
     port: int = 0
     connected: bool = False
     available_processes: int = 0
-    used_processes: int = 0
+    # None when the last poll failed or hasn't run yet; we surface the gap
+    # rather than a misleading 0.  Metrics loggers skip None-valued fields
+    # so wandb shows a gap instead of a spurious zero on disconnected steps.
+    used_processes: int | None = None
     max_processes: int = 0
     cpu_percent: list[float] = field(default_factory=list)
-    ram_percent: float = 0.0
+    ram_percent: float | None = None
     ram_used_gb: float = 0.0
     ram_total_gb: float = 0.0
     # Resident memory of the leanserver Python process itself (not the host).
@@ -699,10 +702,10 @@ class WebMonitor:
                     try:
                         port_int = int(port)
                     except ValueError:
-                        port_int = 8080
+                        port_int = 8000
                 else:
                     host = url
-                    port_int = 8080
+                    port_int = 8000
                 
                 server = LeanServerStatus(address=host, port=port_int)
                 self.lean_servers.append(server)
@@ -751,6 +754,10 @@ class WebMonitor:
                         with self._lock:
                             server.connected = False
                             server.error = str(e)
+                            # Null the observables we surface so callers can
+                            # distinguish "down" from "idle".
+                            server.ram_percent = None
+                            server.used_processes = None
 
         self._lean_servers_monitor_thread = threading.Thread(target=monitor_lean_servers, daemon=True)
         self._lean_servers_monitor_thread.start()
@@ -1385,16 +1392,14 @@ class WebMonitor:
         Call once per training step and splat into ``wandb_run.log(...)``.
         Returned keys look like::
 
-            lean/10_10_25_36/leanserver_rss_gb    # Python-process RSS (leak indicator)
-            lean/10_10_25_36/host_ram_percent     # host-wide RAM usage
-            lean/10_10_25_36/used_processes
-            lean/10_10_25_36/total_branches
-            lean/10_10_25_36/connected            # 1 if last poll succeeded
+            monitoring/lean/10_10_25_36/ram_percent
+            monitoring/lean/10_10_25_36/used_processes
+            monitoring/lean/10_10_25_36/connected   # 1 if last poll succeeded
 
         Dots in IP addresses are replaced with underscores so wandb groups
-        the series sensibly ("lean/<host>/*" in the sidebar rather than
-        being treated as nested fields).  All values are scalars so they
-        pass the safe-filter in MetricsLogger.log.
+        the series sensibly under the "monitoring/" section in the sidebar
+        rather than being treated as nested fields.  All values are scalars
+        so they pass the safe-filter in MetricsLogger.log.
         """
         metrics: dict[str, float] = {}
         with self._lock:
@@ -1403,13 +1408,12 @@ class WebMonitor:
             if not s.address:
                 continue
             host_key = s.address.replace(".", "_")
-            prefix = f"lean/{host_key}"
-            metrics[f"{prefix}/leanserver_rss_gb"] = float(s.leanserver_rss_gb)
-            metrics[f"{prefix}/host_ram_percent"] = float(s.ram_percent)
-            metrics[f"{prefix}/used_processes"] = float(s.used_processes)
-            metrics[f"{prefix}/available_processes"] = float(s.available_processes)
-            metrics[f"{prefix}/total_branches"] = float(s.total_branches)
+            prefix = f"monitoring/lean/{host_key}"
             metrics[f"{prefix}/connected"] = 1.0 if s.connected else 0.0
+            if s.ram_percent is not None:
+                metrics[f"{prefix}/ram_percent"] = float(s.ram_percent)
+            if s.used_processes is not None:
+                metrics[f"{prefix}/used_processes"] = float(s.used_processes)
         return metrics
 
     # --- Timeline instrumentation ---

@@ -468,11 +468,6 @@ while True:
         "num_tokens": num_tokens_item,
         "replay_buffer_size": len(replay_buffer.buffer),
         **{f"time/{k}": v for k, v in timer.get_times().items()},
-        # Leanserver health: lean/<host>/leanserver_rss_gb, total_branches,
-        # used_processes, host_ram_percent, connected.  Watching rss_gb is
-        # how we'll catch the next h5-style leak before it takes a node
-        # offline for hours (rss stayed at ~50 MiB on h4 but grew to 110
-        # GiB on h5 under identical workload — needs investigation).
         **rl_monitor.lean_server_metrics(),
     })
 
