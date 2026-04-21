@@ -201,7 +201,13 @@ def main():
 
     active_barrier("inference_ready")
 
-    atexit.register(lambda: tactic_model.shutdown())
+    def _cleanup():
+        # Shutdown inference first so sample_tactic waiters unblock before
+        # prover.close() tries to join actor threads.
+        tactic_model.shutdown()
+        if prover is not None:
+            prover.close()
+    atexit.register(_cleanup)
 
     # Load theorems
     dataset_theorems = {}

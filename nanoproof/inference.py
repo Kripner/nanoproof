@@ -289,7 +289,7 @@ class BlockingTacticModel:
 
     def _should_process(self) -> bool:
         """Check if batch should be processed based on timeout or sample count."""
-        if not self._pending or self._first_request_time is None:
+        if not self._pending or self._first_request_time is None or self._paused:
             return False
         elapsed = time.time() - self._first_request_time
         if self.max_gen_samples is None:
@@ -308,29 +308,29 @@ class BlockingTacticModel:
             self._batch_ready.notify_all()
 
     def pause(self):
-        """Pause inference, drain pending and in-progress work, free the
-        CUDA allocator.
+        """Pause inference and free the CUDA allocator.
 
-        After this returns, no new batches will be processed until resume()
-        is called, the pending queue is empty (handlers return "paused"
-        errors), and the first subsequent training forward starts with a
-        clean allocator state.
+        Blocks new batches from starting (``_should_process`` returns False
+        while paused) and waits for any in-progress batch to finish, then
+        runs GC + empty_cache so the first subsequent training forward
+        starts with a clean allocator state.
+
+        Pending requests are kept on the queue: ``sample_tactic`` callers
+        that straddle the pause just sit in ``_wait_for_result`` until
+        resume(). This is what lets prover actors preserve their mid-MCTS
+        state across a training step.
         """
         with self._lock:
             self._paused = True
-            for _, _, event, slot in self._pending:
-                slot.append(ValueOrError.from_error("Model paused for training"))
-                event.set()
-            self._pending = []
-            self._first_request_time = None
-            self._batch_ready.notify_all()
             while self._batch_in_progress:
                 self._batch_ready.wait(timeout=0.1)
         gc.collect()
         torch.cuda.empty_cache()
 
     def resume(self):
-        """Resume inference after pause()."""
+        """Resume inference after pause(). Wakes callers waiting in
+        ``_wait_for_result``; their ``_should_process`` re-check will
+        trigger the first post-resume batch if pending is non-empty."""
         with self._lock:
             self._paused = False
             self._batch_ready.notify_all()
@@ -367,8 +367,6 @@ class BlockingTacticModel:
         with self._lock:
             if self._shutdown:
                 return [ValueOrError.from_error("Model shutdown") for _ in state_strs]
-            if self._paused:
-                return [ValueOrError.from_error("Model paused for training") for _ in state_strs]
 
             # Create events and slots for all states
             entries = [(s, tc, threading.Event(), []) for s, tc in zip(state_strs, token_counts)]
@@ -382,17 +380,23 @@ class BlockingTacticModel:
             if not self._batch_in_progress and self._should_process():
                 self._process_batch_locked()
 
-        # Wait for all results (returns early on shutdown/pause)
+        # Wait for all results (returns early on shutdown; pause blocks
+        # until resume, so a paused rank does not short-circuit the caller).
         for _, _, event, _ in entries:
             self._wait_for_result(event)
 
         return [slot[0] if slot else ValueOrError.from_error("No result") for _, _, _, slot in entries]
 
     def _wait_for_result(self, event: threading.Event):
-        """Wait for a result, triggering batch processing if needed."""
+        """Wait for a result, triggering batch processing if needed.
+
+        Pause does NOT break the wait: ``_should_process`` returns False
+        while paused, so the caller simply sits on ``_batch_ready`` until
+        resume() notifies and the first post-resume batch processes them.
+        """
         while not event.is_set():
             with self._lock:
-                if self._shutdown or self._paused or event.is_set():
+                if self._shutdown or event.is_set():
                     return
 
                 # Check if we should trigger processing
@@ -499,7 +503,12 @@ class RemoteTacticModel:
     talks to it over localhost HTTP.
     """
 
-    def __init__(self, server_address: str, timeout: float = 60.0, max_pool_size: int = 512):
+    def __init__(self, server_address: str, timeout: float = 1800.0, max_pool_size: int = 512):
+        # Timeout is deliberately large: during training, BlockingTacticModel
+        # on each rank is paused and holds pending sample_tactic requests
+        # without responding. The HTTP connection must outlast the whole
+        # training step. 1800s (30min) is longer than any sane training
+        # step; a true server hang will still surface, just slower.
         self.server_address = server_address
         self.timeout = timeout
         # Configure session with larger connection pool for many concurrent actors

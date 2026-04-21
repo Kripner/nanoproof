@@ -276,7 +276,12 @@ proofnet_results = None
 def cleanup():
     """Cleanup function to ensure resources are released on shutdown."""
     log0("Shutting down...", component="Main")
+    # Shutdown inference FIRST so any actor blocked in sample_tactic
+    # (e.g. waiting on a paused model after Ctrl+C during training)
+    # unblocks; otherwise prover.close() would time out on those threads.
     tactic_model.shutdown()
+    if prover is not None:
+        prover.close()
     log0("Shutdown complete", component="Main")
 
 atexit.register(cleanup)
@@ -455,10 +460,14 @@ while True:
     flush()
 
     active_barrier(f"train_{step}/exit")
-    tactic_model.resume()
 
+    # Record train/end BEFORE resume so that actors unblocking in
+    # sample_tactic and immediately flushing a timeline see a closed
+    # training interval; otherwise llm-event clipping would treat the
+    # phase as still open and drop the post-resume suffix.
     timer.end("train")
     rl_monitor.record_phase_event("train", "end")
+    tactic_model.resume()
 
     mean_loss = total_loss / args.num_updates_per_step
     rl_monitor.update_training(step, mean_loss, total_tokens)

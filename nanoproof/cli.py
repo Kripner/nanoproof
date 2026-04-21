@@ -298,6 +298,13 @@ class LeanServerStatus:
     # correlate with rss_gb to distinguish "branches_dict is big" from
     # "something else in the python heap is big".
     total_branches: int = 0
+    # Processes the pool is currently spawning (between slot reservation and
+    # REPL readiness). Surfaces startup stalls when they show up as a pile
+    # of "starting" that never transitions to "used".
+    starting_processes: int = 0
+    # Tracked processes that haven't been touched in >60s. Leading indicator
+    # of the reaper firing; growth here means clients are leaking leases.
+    inactive_processes: int = 0
     last_update: float = field(default_factory=time.time)
     error: str = ""
 
@@ -421,6 +428,29 @@ Phase = Literal["idle", "collecting", "evaluating", "training"]
 # within a handful of seconds; consecutive real transitions of the same kind
 # are much farther apart (whole phase durations). 10s is comfortably in the gap.
 _PHASE_DEDUP_WINDOW = 10.0
+
+
+def _clip_against(start: float, end: float,
+                  intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Clip ``(start, end)`` against a sorted list of non-overlapping
+    ``(s, e)`` intervals. Returns the sub-ranges that survive, each
+    strictly positive-length. Used to split an actor's ``llm`` event
+    around a training pause so the blocked-waiting portion is not
+    rendered as work."""
+    out = [(start, end)]
+    for a, b in intervals:
+        next_out: list[tuple[float, float]] = []
+        for s, e in out:
+            if e <= a or s >= b:
+                next_out.append((s, e))
+                continue
+            if s < a:
+                next_out.append((s, a))
+            if e > b:
+                next_out.append((b, e))
+        out = next_out
+    return [(s, e) for s, e in out if e > s]
+
 
 def _compact_instrumentation(
     actors: dict[Any, list[dict]],
@@ -892,6 +922,8 @@ class WebMonitor:
                             rss_bytes = data.get("leanserver_rss_bytes") or 0
                             server.leanserver_rss_gb = rss_bytes / (1024**3)
                             server.total_branches = data.get("total_branches", 0)
+                            server.starting_processes = data.get("starting_processes", 0)
+                            server.inactive_processes = data.get("inactive_processes", 0)
                             server.last_update = time.time()
                             server.error = ""
                     except Exception as e:
@@ -935,6 +967,8 @@ class WebMonitor:
                         self.lean_server.ram_percent = ram.get("percent", 0.0)
                         self.lean_server.ram_used_gb = ram.get("used_bytes", 0) / (1024**3)
                         self.lean_server.ram_total_gb = ram.get("total_bytes", 0) / (1024**3)
+                        self.lean_server.starting_processes = data.get("starting_processes", 0)
+                        self.lean_server.inactive_processes = data.get("inactive_processes", 0)
                         self.lean_server.last_update = time.time()
                         self.lean_server.error = ""
                 except Exception as e:
@@ -1369,6 +1403,8 @@ class WebMonitor:
                     "available_processes": self.lean_server.available_processes,
                     "used_processes": self.lean_server.used_processes,
                     "max_processes": self.lean_server.max_processes,
+                    "starting_processes": self.lean_server.starting_processes,
+                    "inactive_processes": self.lean_server.inactive_processes,
                     "cpu_percent": self.lean_server.cpu_percent,
                     "ram_percent": self.lean_server.ram_percent,
                     "ram_used_gb": self.lean_server.ram_used_gb,
@@ -1389,6 +1425,8 @@ class WebMonitor:
                         "ram_total_gb": s.ram_total_gb,
                         "leanserver_rss_gb": s.leanserver_rss_gb,
                         "total_branches": s.total_branches,
+                        "starting_processes": s.starting_processes,
+                        "inactive_processes": s.inactive_processes,
                         "error": s.error,
                     }
                     for s in self.lean_servers
@@ -1564,22 +1602,55 @@ class WebMonitor:
     # --- Timeline instrumentation ---
 
     def record_timeline_events(self, actor_id: int, events: list[TimelineEvent]):
-        """Record timeline events from a completed proof attempt."""
+        """Record timeline events from a completed proof attempt.
+
+        ``llm`` events are clipped against training intervals. A
+        sample_tactic call that straddles a train pause would otherwise
+        record a single event spanning the whole pause, making the actor
+        look busy in the profiler even though it was blocked waiting on
+        paused inference. The clip splits such events into the
+        pre-pause and post-resume sub-ranges, which is what the actor
+        actually did LLM work for.
+        """
         with self._lock:
             if actor_id not in self.actor_timelines:
                 self.actor_timelines[actor_id] = deque(maxlen=self._max_timeline_events_per_actor)
             buf = self.actor_timelines[actor_id]
+            train_intervals = self._train_intervals_locked()
             for ev in events:
-                d = ev.to_dict()
-                self._instr_seq += 1
-                d["seq"] = self._instr_seq
-                buf.append(d)
-                if self._timeline_file is not None:
-                    self._timeline_file.write(
-                        json.dumps({"type": "actor", "actor": actor_id, "event": d["type"],
-                                    "start": d["start"], "end": d["end"]}) + "\n")
+                subranges = (_clip_against(ev.start, ev.end, train_intervals)
+                             if ev.type == "llm" else [(ev.start, ev.end)])
+                for start, end in subranges:
+                    self._instr_seq += 1
+                    d = {"type": ev.type, "start": start, "end": end, "seq": self._instr_seq}
+                    buf.append(d)
+                    if self._timeline_file is not None:
+                        self._timeline_file.write(
+                            json.dumps({"type": "actor", "actor": actor_id, "event": d["type"],
+                                        "start": d["start"], "end": d["end"]}) + "\n")
             if self._timeline_file is not None:
                 self._timeline_file.flush()
+
+    def _train_intervals_locked(self) -> list[tuple[float, float]]:
+        """Return sorted, non-overlapping ``(start, end)`` ranges for every
+        completed ``train`` phase. Must be called with ``self._lock`` held.
+        A still-open train phase is treated as extending to ``now``, so
+        events recorded exactly at resume/end handoff time are clipped too.
+        """
+        intervals: list[tuple[float, float]] = []
+        start: float | None = None
+        for ev in self.phase_events:
+            if ev.get("name") != "train":
+                continue
+            action = ev.get("action")
+            if action == "start":
+                start = ev["time"]
+            elif action == "end" and start is not None:
+                intervals.append((start, ev["time"]))
+                start = None
+        if start is not None:
+            intervals.append((start, time.time()))
+        return intervals
 
     def record_outcome(self, actor_id: int, kind: str):
         """Record a per-actor proof-attempt outcome.

@@ -13,7 +13,8 @@ import logging
 import threading
 import time
 import traceback
-from typing import Callable, Optional
+from dataclasses import dataclass
+from typing import Callable, Literal, Optional
 import torch
 from leantree.repl_adapter.server import LeanClient
 from leantree.repl_adapter.interaction import LeanProcessException
@@ -129,8 +130,9 @@ class Prover:
         logger.debug(f"Proving: {theorem.source[:80]}...")
         process, reason = self._get_process_interruptible(client, abort_check)
         if process is None:
-            # "aborted" is the normal cycle-end path (stop_flag set after
-            # done_check); only surface true pool-saturation timeouts.
+            # "aborted" is the eval-release path (ProverWorker sets the
+            # release event so mid-proof actors drop their Lean leases);
+            # only surface true pool-saturation timeouts.
             if reason == "timeout":
                 log(f"FAILED: Could not get Lean process for theorem (300s pool timeout)", component="Prover")
             return None
@@ -190,12 +192,49 @@ class Prover:
 # ProverWorker
 # -----------------------------------------------------------------------------
 
-class ProverWorker:
-    """Manages parallel proof search across multiple Lean servers.
+@dataclass
+class _Job:
+    """One unit of work delivered to the actor pool.
 
-    Runs actor threads that each get a dedicated ``LeanClient`` and call
-    :meth:`Prover.prove`. Provides :meth:`collect` and :meth:`evaluate`
-    as the two main modes of operation.
+    Actors read ``get_theorem`` / ``on_result`` from the CURRENTLY installed
+    job at each boundary (before fetching, after a proof completes), not
+    from the job that was current when a proof started. That is what lets a
+    mid-MCTS actor whose proof started in step N deliver its result into
+    step N+1's experience once training is done.
+    """
+    get_theorem: Callable[[], Optional[tuple[str, BenchTheorem]]]
+    on_result: Callable[[str, BenchTheorem, Optional[Game], Optional[str]], None]
+    done_check: Callable[[], bool]
+    poll_callback: Optional[Callable[[list[str]], None]]
+    record_timeline: bool
+    prover: Prover
+
+
+class ProverWorker:
+    """Long-lived actor pool that parallelises MCTS proof search across
+    Lean servers.
+
+    The pool is created once in ``__init__`` and runs until ``close()``.
+    Callers drive it with ``collect()`` and ``evaluate()``; the two differ
+    only in how they park actors on exit:
+
+    - ``collect()`` parks with a *pause*: the installed job stays live, so
+      an actor that is blocked deep inside MCTS (waiting on paused
+      inference during a training step) resumes its proof on the same
+      tree when inference resumes. A completed proof is attributed to
+      whatever job is current at completion time, so mid-proof work from
+      step N naturally lands in step N+1's experience. Lean leases held
+      by mid-proof actors stay held across the training step.
+    - ``evaluate()`` parks with a *release*: the release event is raised,
+      mid-proof actors abort and return their Lean leases, and the job
+      is cleared. This keeps eval-theorem results from leaking into the
+      next collect cycle and ensures leases are not tied to theorems
+      that will never be completed in the new job.
+
+    Actors carry a single abort signal (``_release_event``) and a single
+    blocking point (paused inference inside ``sample_tactic``). There is
+    no per-call stop flag and no "model paused for training" fast-fail
+    path: paused inference simply blocks the caller until resume.
     """
 
     def __init__(
@@ -206,6 +245,30 @@ class ProverWorker:
         self.tactic_model = tactic_model
         self.lean_servers = self._query_lean_servers(lean_addrs)
         self.num_actors = len(self.lean_servers)
+
+        # Pool state. ``_current_job`` is the single source of truth for
+        # what actors do; it is swapped under ``_lock`` and actors wait on
+        # ``_job_cv`` when it is None. ``_release_event`` is the only abort
+        # signal seen by Prover.prove. ``_shutdown_event`` is set in close()
+        # and wakes every waiting actor so they can exit.
+        self._lock = threading.Lock()
+        self._job_cv = threading.Condition(self._lock)
+        self._current_job: Optional[_Job] = None
+        self._release_event = threading.Event()
+        self._shutdown_event = threading.Event()
+        self._actors_mid_proof = 0
+        self._thread_states: dict[int, str] = {i: "idle" for i in range(self.num_actors)}
+
+        self._threads: list[threading.Thread] = []
+        for actor_id in range(self.num_actors):
+            t = threading.Thread(
+                target=self._actor_loop,
+                args=(actor_id,),
+                daemon=True,
+                name=f"prover-actor-{actor_id}",
+            )
+            t.start()
+            self._threads.append(t)
 
     @staticmethod
     def _query_lean_servers(raw_addrs: list[str]) -> list[tuple[str, int]]:
@@ -226,6 +289,21 @@ class ProverWorker:
             servers.extend([(host, port)] * max_procs)
         return servers
 
+    def close(self):
+        """Signal shutdown and join actor threads. Called at process teardown."""
+        self._shutdown_event.set()
+        with self._lock:
+            self._release_event.set()
+            self._current_job = None
+            self._job_cv.notify_all()
+        deadline = time.time() + 60.0
+        for t in self._threads:
+            t.join(timeout=max(0.0, deadline - time.time()))
+        alive = sum(1 for t in self._threads if t.is_alive())
+        if alive:
+            log(f"WARNING: {alive}/{len(self._threads)} actor threads still alive after close", component="Prover")
+            faulthandler.dump_traceback()
+
     @torch.no_grad()
     def collect(
         self,
@@ -235,8 +313,7 @@ class ProverWorker:
         num_simulations: int,
     ) -> int:
         """Record successful proofs into ``experience`` until the target
-        number of transitions is reached.
-        """
+        number of transitions is reached. Parks with *pause* on exit."""
         monitor = get_monitor()
 
         log(f"Starting collection with {self.num_actors} actors, target={target_transitions} transitions",
@@ -273,9 +350,15 @@ class ProverWorker:
                 log(f"Progress: {experience.num_transitions()}/{target_transitions} transitions",
                     component="Collection")
 
-        prover = Prover(SearchConfig(num_simulations=num_simulations), self.tactic_model)
-        self._run_pool(prover, get_theorem, on_result, done_check, poll_callback,
-                       record_timeline=True)
+        job = _Job(
+            get_theorem=get_theorem,
+            on_result=on_result,
+            done_check=done_check,
+            poll_callback=poll_callback,
+            record_timeline=True,
+            prover=Prover(SearchConfig(num_simulations=num_simulations), self.tactic_model),
+        )
+        self._run_job(job, park="pause")
 
         if monitor is not None:
             monitor.clear_local_actors()
@@ -288,7 +371,9 @@ class ProverWorker:
     def evaluate(self, theorems: list[BenchTheorem], dataset_name: str, num_simulations: int,
                  progress_callback: Callable[[int, int, int, int], None] | None = None,
                  verify_timeout: int = 5000) -> dict:
-        """Evaluate theorems using MCTS. Returns metrics dict.
+        """Evaluate theorems using MCTS. Returns metrics dict. Parks with
+        *release* on exit so eval state does not leak into the next job
+        and Lean leases are returned.
 
         *progress_callback*, if given, is called as
         ``progress_callback(started, finished, solved, errors)`` whenever a
@@ -301,6 +386,8 @@ class ProverWorker:
 
         index = [0]
         index_lock = threading.Lock()
+        results: list[dict] = []
+        results_lock = threading.Lock()
 
         def get_theorem():
             with index_lock:
@@ -317,9 +404,6 @@ class ProverWorker:
                     errors = sum(1 for r in results if r["error"])
                 progress_callback(started, finished, solved, errors)
             return (tid, theorem)
-
-        results: list[dict] = []
-        results_lock = threading.Lock()
 
         def on_result(theorem_id, theorem: BenchTheorem, game, error):
             is_solved = bool(game and game.root and game.root.is_solved)
@@ -363,9 +447,15 @@ class ProverWorker:
             with results_lock:
                 return len(results) >= len(theorems)
 
-        prover = Prover(SearchConfig(num_simulations=num_simulations, verify_timeout=verify_timeout), self.tactic_model)
-        self._run_pool(prover, get_theorem, on_result, done_check,
-                       record_timeline=True)
+        job = _Job(
+            get_theorem=get_theorem,
+            on_result=on_result,
+            done_check=done_check,
+            poll_callback=None,
+            record_timeline=True,
+            prover=Prover(SearchConfig(num_simulations=num_simulations, verify_timeout=verify_timeout), self.tactic_model),
+        )
+        self._run_job(job, park="release")
 
         total = len(results)
         solved = sum(1 for r in results if r["is_solved"])
@@ -378,81 +468,119 @@ class ProverWorker:
             "detailed_results": results,
         }
 
-    def _run_pool(
-        self,
-        prover: Prover,
-        get_theorem: Callable[[], Optional[tuple[str, BenchTheorem]]],
-        on_result: Callable[[str, BenchTheorem, Optional[Game], Optional[str]], None],
-        done_check: Callable[[], bool],
-        poll_callback: Callable[[list[str]], None] | None = None,
-        record_timeline: bool = False,
-    ):
-        """Run actor threads until *done_check* returns ``True``.
+    def _run_job(self, job: _Job, *, park: Literal["pause", "release"]):
+        """Install *job*, drive the done-check loop, then park the pool.
 
-        All thread state is local to this call; the ``ProverWorker`` instance
-        remains reusable across multiple ``collect`` / ``evaluate`` invocations.
+        ``park == "pause"`` leaves the job installed on exit so a
+        straggler completing after done_check fires (common for collect)
+        is attributed to whichever job is current when the proof lands.
+        Between ``collect()`` calls this lets step-N mid-proof work
+        become step-N+1 training data.
+
+        ``park == "release"`` raises the release event, waits for
+        mid-proof actors to abort, then clears the job. Eval uses it on
+        *both* ends: a pre-install release drains any collect stragglers
+        so their results do not get mis-attributed to eval's on_result;
+        a post-done release frees Lean leases that would otherwise sit
+        idle tied to eval theorems that will never be resumed.
         """
-        stop_flag = threading.Event()
-        thread_states: dict[int, str] = {}
-        thread_states_lock = threading.Lock()
+        if park == "release":
+            self._release_and_idle()
 
-        games_played = [0]
-        games_solved = [0]
-        expansions = [0]
-        stats_lock = threading.Lock()
+        with self._lock:
+            self._current_job = job
+            self._release_event.clear()
+            self._job_cv.notify_all()
 
-        def set_thread_state(actor_id: int, state: str):
-            with thread_states_lock:
-                thread_states[actor_id] = state
+        while not self._shutdown_event.is_set():
+            if job.done_check():
+                break
+            if job.poll_callback is not None:
+                job.poll_callback(self._snapshot_thread_states())
+            time.sleep(0.1)
 
-        def get_thread_states() -> list[str]:
-            with thread_states_lock:
-                return [thread_states.get(i, "idle") for i in range(self.num_actors)]
+        if park == "release":
+            self._release_and_idle()
 
-        def on_expansion():
-            with stats_lock:
-                expansions[0] += 1
+    def _release_and_idle(self):
+        """Abort mid-proof actors, wait for leases to drop, then clear the job."""
+        with self._lock:
+            self._release_event.set()
+        deadline = time.time() + 60.0
+        while True:
+            with self._lock:
+                mid = self._actors_mid_proof
+            if mid == 0:
+                break
+            if time.time() > deadline:
+                log(f"WARNING: release timed out with {mid} actors still mid-proof",
+                    component="Prover")
+                break
+            time.sleep(0.05)
+        with self._lock:
+            self._current_job = None
+            self._release_event.clear()
 
-        def actor_loop(actor_id: int):
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+    def _set_thread_state(self, actor_id: int, state: str):
+        with self._lock:
+            self._thread_states[actor_id] = state
 
-            lean_address, lean_port = self.lean_servers[actor_id]
-            set_thread_state(actor_id, "blocked")
-            client = LeanClient(lean_address, lean_port)
-            set_thread_state(actor_id, "idle")
+    def _snapshot_thread_states(self) -> list[str]:
+        with self._lock:
+            return [self._thread_states[i] for i in range(self.num_actors)]
 
-            consecutive_errors = 0
-            max_consecutive_errors = 5
-            max_retries = 3
+    def _actor_loop(self, actor_id: int):
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        lean_address, lean_port = self.lean_servers[actor_id]
+        self._set_thread_state(actor_id, "blocked")
+        client = LeanClient(lean_address, lean_port)
+        self._set_thread_state(actor_id, "idle")
 
-            while not stop_flag.is_set():
-                theorem_data = get_theorem()
-                if theorem_data is None:
-                    set_thread_state(actor_id, "idle")
-                    time.sleep(0.5)
-                    continue
+        consecutive_errors = 0
+        max_consecutive_errors = 5
+        max_retries = 3
 
-                theorem_id, theorem = theorem_data
-                set_thread_state(actor_id, "running")
+        while not self._shutdown_event.is_set():
+            with self._job_cv:
+                while self._current_job is None and not self._shutdown_event.is_set():
+                    self._job_cv.wait()
+                if self._shutdown_event.is_set():
+                    break
+                job = self._current_job
 
-                game = None
-                error = None
-                skip_report = False
-                interrupted = False
-                timeline = TimelineRecorder() if record_timeline else None
+            theorem_data = job.get_theorem()
+            if theorem_data is None:
+                self._set_thread_state(actor_id, "idle")
+                time.sleep(0.5)
+                continue
+
+            theorem_id, theorem = theorem_data
+            self._set_thread_state(actor_id, "running")
+
+            game = None
+            error = None
+            skip_report = False
+            interrupted = False
+            timeline = TimelineRecorder() if job.record_timeline else None
+
+            with self._lock:
+                self._actors_mid_proof += 1
+            try:
                 for attempt in range(max_retries):
                     try:
-                        game = prover.prove(client, theorem, expansion_callback=on_expansion,
-                                            abort_check=stop_flag.is_set,
-                                            timeline=timeline)
+                        game = job.prover.prove(
+                            client, theorem,
+                            abort_check=self._release_event.is_set,
+                            timeline=timeline,
+                        )
                         consecutive_errors = 0
                         break
                     except (ConnectionError, LeanProcessException, RemoteException, TimeoutError) as e:
                         if attempt < max_retries - 1:
-                            set_thread_state(actor_id, "retry")
+                            self._set_thread_state(actor_id, "retry")
                             short_err = str(e).split('\n', 1)[0]
-                            log(f"[Actor {actor_id}] Connection error (attempt {attempt + 1}/{max_retries}): '{short_err}', reconnecting...", component="Prover")
+                            log(f"[Actor {actor_id}] Connection error (attempt {attempt + 1}/{max_retries}): '{short_err}', reconnecting...",
+                                component="Prover")
                             time.sleep(1.0 * (attempt + 1))
                         else:
                             error = str(e)
@@ -467,12 +595,6 @@ class ProverWorker:
                         interrupted = True
                         break
                     except Exception as e:
-                        if "Model paused for training" in str(e):
-                            set_thread_state(actor_id, "idle")
-                            time.sleep(0.5)
-                            skip_report = True
-                            interrupted = True
-                            break
                         error = str(e)
                         consecutive_errors += 1
                         log(f"[Actor {actor_id}] Error (lean={lean_address}:{lean_port}): {e}", component="Prover")
@@ -480,80 +602,44 @@ class ProverWorker:
                                              actor=actor_id, lean=f"{lean_address}:{lean_port}")
                         traceback.print_exc()
                         break
+            finally:
+                with self._lock:
+                    self._actors_mid_proof -= 1
 
-                if not skip_report:
-                    is_solved = game and game.root and game.root.is_solved
-                    logger.debug(f"Actor {actor_id}: {theorem_id} {'solved' if is_solved else 'unsolved'} in {game.num_iterations if game else 0} iters")
-                    if is_solved:
-                        logger.debug(f"Actor {actor_id}: proof tree for {theorem_id}:\n{game.root.pp_tree()}")
-                    if game is not None and game.root is not None:
-                        with stats_lock:
-                            games_played[0] += 1
-                            if game.root.is_solved:
-                                games_solved[0] += 1
+            # Route the result to whichever job is current NOW, not the
+            # one this proof started under. For collect->train->collect
+            # that lets step-N mid-proof work land in step-N+1's
+            # experience. For eval, a pre-install release in _run_job
+            # guarantees no collect stragglers are alive at this point,
+            # so same-type attribution still holds. If current_job is
+            # None (released, between jobs) the straggler's result is
+            # dropped, which is the intended release semantic.
+            with self._lock:
+                current_job = self._current_job
 
-                    if error is not None:
-                        set_thread_state(actor_id, "error")
+            if not skip_report and current_job is not None:
+                is_solved = bool(game and game.root and game.root.is_solved)
+                logger.debug(f"Actor {actor_id}: {theorem_id} {'solved' if is_solved else 'unsolved'} in {game.num_iterations if game else 0} iters")
+                if is_solved:
+                    logger.debug(f"Actor {actor_id}: proof tree for {theorem_id}:\n{game.root.pp_tree()}")
+                if error is not None:
+                    self._set_thread_state(actor_id, "error")
+                current_job.on_result(theorem_id, theorem, game, error)
 
-                    on_result(theorem_id, theorem, game, error)
+            # Always flush the timeline, including for aborted proofs:
+            # the LLM/Lean work they did belongs on the profiler, and
+            # the outcome marker classifies what the "productive only"
+            # toggle hides.
+            if timeline is not None:
+                _flush_timeline(actor_id, timeline, game=game, error=error,
+                                interrupted=interrupted)
 
-                # Always flush timeline, even when skip_report is true. Without
-                # this, events from proofs aborted mid-flight (stop flag, pause
-                # for training) are silently dropped, which made collect look
-                # much sparser than eval in the profiler even though the
-                # actors were equally busy.
-                if timeline is not None:
-                    _flush_timeline(actor_id, timeline, game=game, error=error,
-                                    interrupted=interrupted)
+            if consecutive_errors >= max_consecutive_errors:
+                log(f"[Actor {actor_id}] {consecutive_errors} consecutive errors; backing off 60s",
+                    component="Prover")
+                time.sleep(60.0)
+                consecutive_errors = 0
 
-                if consecutive_errors >= max_consecutive_errors:
-                    log(f"[Actor {actor_id}] CRASHED after {consecutive_errors} consecutive errors, exiting (will be restarted by pool)", component="Prover")
-                    break
+            self._set_thread_state(actor_id, "idle")
 
-            set_thread_state(actor_id, "idle")
-
-        # Per-slot thread state. The pool restarts dead actors so a flaky
-        # Lean server cannot cause the whole collect cycle to silently
-        # finish on a partial (or zero) transition count.
-        threads: list[threading.Thread] = [None] * self.num_actors
-        restart_counts: list[int] = [0] * self.num_actors
-        last_start_time: list[float] = [0.0] * self.num_actors
-        min_restart_interval = 5.0
-
-        def start_actor(actor_id: int):
-            t = threading.Thread(target=actor_loop, args=(actor_id,), daemon=True)
-            t.start()
-            threads[actor_id] = t
-            last_start_time[actor_id] = time.time()
-
-        for i in range(self.num_actors):
-            start_actor(i)
-
-        # Poll until done.  The pool exits ONLY when done_check() is true (or
-        # when the outer caller cancels and the finally below sets stop_flag).
-        # Dead actors are respawned in-place; we deliberately do not bail out
-        # on "all actors dead", because that was the silent-failure mode that
-        # caused 6h of training on a stale buffer last run.
-        try:
-            while True:
-                if done_check():
-                    break
-                now = time.time()
-                for i, t in enumerate(threads):
-                    if not t.is_alive() and (now - last_start_time[i]) >= min_restart_interval:
-                        restart_counts[i] += 1
-                        log(f"[Actor {i}] thread died — restarting (restart #{restart_counts[i]})", component="Prover")
-                        start_actor(i)
-                if poll_callback is not None:
-                    poll_callback(get_thread_states())
-                time.sleep(0.1)
-        finally:
-            stop_flag.set()
-            deadline = time.time() + 60.0
-            for t in threads:
-                if t is not None:
-                    t.join(timeout=max(0.0, deadline - time.time()))
-            alive = sum(1 for t in threads if t is not None and t.is_alive())
-            if alive:
-                log(f"WARNING: {alive}/{len(threads)} actor threads still alive after 60s", component="Prover")
-                faulthandler.dump_traceback()
+        self._set_thread_state(actor_id, "idle")
