@@ -1,7 +1,5 @@
 import atexit
-import glob
 import os
-import json
 import logging
 import sys
 import argparse
@@ -23,7 +21,7 @@ from nanoproof.checkpoints import load_model, save_checkpoint, save_eval_results
 from nanoproof.engine import Engine
 from nanoproof.data.sft.leantree import leantree_transitions
 from nanoproof.data.sft.leantree_dataloader import rl_data_generator
-from nanoproof.experience_collection import ReplayBuffer, TheoremsSampler, CollectedExperience
+from nanoproof.experience_collection import ReplayBuffer, TheoremsSampler, CollectedExperience, collection_dir, eval_dir
 from nanoproof.prover import ProverWorker
 from nanoproof.inference import setup_distributed_inference
 from nanoproof.inference import TacticModel, BlockingTacticModel, compute_max_batch_prompt_tokens
@@ -345,7 +343,7 @@ while True:
 
         set_tactic_sink(None)
         if master_process:
-            eval_experience.save(os.path.join(output_dir, "evals", f"{step:05d}"))
+            eval_experience.save(eval_dir(output_dir, step))
 
         model.train()
         timer.end("eval")
@@ -354,32 +352,9 @@ while True:
 
     if step % args.collect_every == 0:
         # Check if we can resume from a previous run's collected proofs.
-        resume_dir = os.path.join(args.resume_from, f"collection_{step:05d}") if args.resume_from else None
-        if resume_dir and os.path.isdir(resume_dir):
-            if master_process:
-                log(f"Loading replay buffer at step {step} from {args.resume_from}", component="Main")
-            shard_paths: list[tuple[int, str]] = []
-            for shard_path in glob.glob(os.path.join(args.resume_from, "collection_*", "collected.jsonl")):
-                shard_step = int(os.path.basename(os.path.dirname(shard_path))[len("collection_"):])
-                if shard_step <= step:
-                    shard_paths.append((shard_step, shard_path))
-            shard_paths.sort()
-            transitions: list[tuple[str, str, float]] = []
-            for _, shard_path in shard_paths:
-                with open(shard_path, "r") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        obj = json.loads(line)
-                        for t in obj.get("transitions", []):
-                            transitions.append((t[0], t[1], t[2]))
-            if len(transitions) > replay_buffer.window_size:
-                transitions = transitions[-replay_buffer.window_size:]
-            replay_buffer.buffer = transitions
+        if args.resume_from and os.path.isdir(collection_dir(args.resume_from, step)):
+            replay_buffer.resume_from(args.resume_from, step)
             rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
-            if master_process:
-                log(f"Loaded {len(replay_buffer.buffer)} transitions at step {step} from previous run", component="Main")
             flush()
             if ddp:
                 dist.barrier()
@@ -412,7 +387,7 @@ while True:
 
             if master_process:
                 rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
-                experience.save(os.path.join(output_dir, f"collection_{step:05d}"))
+                experience.save(collection_dir(output_dir, step))
 
     if step % args.save_every == 0 and step > 0 and master_process:
         checkpoint_meta = {

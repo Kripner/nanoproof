@@ -18,6 +18,7 @@ This module owns:
 Tree-walking helpers depend on Node / Player / execute_tree from search.py.
 """
 
+import glob
 import json
 import os
 import random
@@ -31,6 +32,48 @@ from nanoproof.common import get_dist_info, Player, GLOBAL_CONFIG
 from nanoproof.data.bench.common import BenchTheorem
 from nanoproof.data.rl import deepseek_prover, leanworkbook, numinamath
 from nanoproof.search import Node, execute_tree
+
+
+# -----------------------------------------------------------------------------
+# On-disk layout helpers (one place that knows about the collection_/evals/ dirs)
+# -----------------------------------------------------------------------------
+
+_COLLECTION_PREFIX = "collection_"
+COLLECTED_FILENAME = "collected.jsonl"
+
+
+def collection_dir(run_dir: str, step: int) -> str:
+    """Path to the per-step collection directory under ``run_dir``."""
+    return os.path.join(run_dir, f"{_COLLECTION_PREFIX}{step:05d}")
+
+
+def eval_dir(run_dir: str, step: int) -> str:
+    """Path to the per-step eval directory under ``run_dir``."""
+    return os.path.join(run_dir, "evals", f"{step:05d}")
+
+
+def load_collected_transitions(run_dir: str, up_to_step: int) -> list[tuple[str, str, float]]:
+    """Concatenate transitions from every ``collection_<s>/collected.jsonl`` in
+    ``run_dir`` with ``s <= up_to_step``, preserving collection order. Returns
+    the raw (context, tactic, value_target) tuples; callers apply any FIFO
+    truncation or length filtering themselves."""
+    shards: list[tuple[int, str]] = []
+    for shard_path in glob.glob(os.path.join(run_dir, f"{_COLLECTION_PREFIX}*", COLLECTED_FILENAME)):
+        shard_step = int(os.path.basename(os.path.dirname(shard_path))[len(_COLLECTION_PREFIX):])
+        if shard_step <= up_to_step:
+            shards.append((shard_step, shard_path))
+    shards.sort()
+    transitions: list[tuple[str, str, float]] = []
+    for _, shard_path in shards:
+        with open(shard_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                for t in obj.get("transitions", []):
+                    transitions.append((t[0], t[1], t[2]))
+    return transitions
 
 
 # -----------------------------------------------------------------------------
@@ -93,6 +136,20 @@ class ReplayBuffer:
             buffer_list = [self.buffer]
             dist.broadcast_object_list(buffer_list, src=0)
             self.buffer = buffer_list[0]
+
+    def resume_from(self, run_dir: str, up_to_step: int) -> None:
+        """Repopulate ``self.buffer`` from a previous run's collection shards.
+
+        Each rank reads the same files independently, so no broadcast is
+        needed. FIFO-truncates to ``window_size`` to match the eviction
+        policy of the live buffer.
+        """
+        log0(f"Loading replay buffer at step {up_to_step} from {run_dir}", component="ReplayBuffer")
+        transitions = load_collected_transitions(run_dir, up_to_step)
+        if len(transitions) > self.window_size:
+            transitions = transitions[-self.window_size:]
+        self.buffer = transitions
+        log0(f"Loaded {len(self.buffer)} transitions at step {up_to_step}", component="ReplayBuffer")
 
     def sample_transition(self) -> tuple[str, str, float]:
         return self.rng.choice(self.buffer)
