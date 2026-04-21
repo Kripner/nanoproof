@@ -52,15 +52,17 @@ def eval_dir(run_dir: str, step: int) -> str:
     return os.path.join(run_dir, "evals", f"{step:05d}")
 
 
-def load_collected_transitions(run_dir: str, up_to_step: int) -> list[tuple[str, str, float]]:
+def load_collected_transitions(run_dir: str, up_to_step: int | None = None) -> list[tuple[str, str, float]]:
     """Concatenate transitions from every ``collection_<s>/collected.jsonl`` in
-    ``run_dir`` with ``s <= up_to_step``, preserving collection order. Returns
-    the raw (context, tactic, value_target) tuples; callers apply any FIFO
-    truncation or length filtering themselves."""
+    ``run_dir``, preserving collection order. If ``up_to_step`` is given, only
+    shards with ``s <= up_to_step`` are included; otherwise every shard in the
+    directory contributes. Returns the raw (context, tactic, value_target)
+    tuples; callers apply any FIFO truncation or length filtering themselves.
+    """
     shards: list[tuple[int, str]] = []
     for shard_path in glob.glob(os.path.join(run_dir, f"{_COLLECTION_PREFIX}*", COLLECTED_FILENAME)):
         shard_step = int(os.path.basename(os.path.dirname(shard_path))[len(_COLLECTION_PREFIX):])
-        if shard_step <= up_to_step:
+        if up_to_step is None or shard_step <= up_to_step:
             shards.append((shard_step, shard_path))
     shards.sort()
     transitions: list[tuple[str, str, float]] = []
@@ -137,19 +139,19 @@ class ReplayBuffer:
             dist.broadcast_object_list(buffer_list, src=0)
             self.buffer = buffer_list[0]
 
-    def resume_from(self, run_dir: str, up_to_step: int) -> None:
-        """Repopulate ``self.buffer`` from a previous run's collection shards.
+    def load_from(self, run_dir: str) -> None:
+        """Repopulate ``self.buffer`` from every collection shard in ``run_dir``.
 
         Each rank reads the same files independently, so no broadcast is
         needed. FIFO-truncates to ``window_size`` to match the eviction
         policy of the live buffer.
         """
-        log0(f"Loading replay buffer at step {up_to_step} from {run_dir}", component="ReplayBuffer")
-        transitions = load_collected_transitions(run_dir, up_to_step)
+        log0(f"Loading replay buffer from {run_dir}", component="ReplayBuffer")
+        transitions = load_collected_transitions(run_dir)
         if len(transitions) > self.window_size:
             transitions = transitions[-self.window_size:]
         self.buffer = transitions
-        log0(f"Loaded {len(self.buffer)} transitions at step {up_to_step}", component="ReplayBuffer")
+        log0(f"Loaded {len(self.buffer)} transitions from {run_dir}", component="ReplayBuffer")
 
     def sample_transition(self) -> tuple[str, str, float]:
         return self.rng.choice(self.buffer)

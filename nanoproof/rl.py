@@ -53,7 +53,7 @@ add_logging_args(parser)
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--model-path", type=str, required=True, help="path to model_NNNNNN.pt to load from (relative to models/ or absolute)")
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
-parser.add_argument("--resume-from", type=str, default="")
+parser.add_argument("--load-buffer", type=str, default="", help="path to a previous RL run dir; at startup, seed the replay buffer with every transition found in its collection_*/collected.jsonl shards (FIFO-truncated to --replay-buffer-window-size). Independent of training resumption - does not affect the step counter or model checkpoint.")
 
 # Infrastructure
 parser.add_argument("--lean-servers", type=str, nargs="+", required=True, help="Lean server addresses (e.g., 10.10.25.33:8000 10.10.25.34); port defaults to 8000")
@@ -155,6 +155,8 @@ lean_version = read_lean_version(args.lean_project)
 log0(f"Lean version: {lean_version} (from {args.lean_project}/lean-toolchain)", component="Config")
 
 replay_buffer = ReplayBuffer(window_size=args.replay_buffer_window_size, seed=rank_seed)
+if args.load_buffer:
+    replay_buffer.load_from(args.load_buffer)
 theorems_sampler = TheoremsSampler(seed=rank_seed, datasets=args.datasets, lean_version=lean_version)
 
 # Set up distributed inference (starts servers on worker ranks, builds balancer on master)
@@ -190,6 +192,7 @@ if ddp:
 rl_monitor = create_monitor(num_actors=0, enabled=master_process)
 rl_monitor.set_output_dir(output_dir)
 rl_monitor.set_lean_servers(args.lean_servers)
+rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
 
 # Augmentations
 shuffle_goals_and_hypotheses = leantree.augmentations.ShuffleGoalsAndHypotheses(seed=args.seed)
@@ -351,43 +354,35 @@ while True:
         flush()
 
     if step % args.collect_every == 0:
-        # Check if we can resume from a previous run's collected proofs.
-        if args.resume_from and os.path.isdir(collection_dir(args.resume_from, step)):
-            replay_buffer.resume_from(args.resume_from, step)
+        # Collect proofs (rank 0 only, worker ranks serve inference)
+        timer.start("collect")
+        rl_monitor.record_phase_event("collect", "start")
+        experience = CollectedExperience()
+        set_tactic_sink(experience.record_tactic)
+        model.eval()
+        rl_monitor.set_step(step)
+
+        if master_process:
+            prover.collect(theorems_sampler, args.collect_transitions, experience, num_simulations=args.num_simulations_collect)
+
+        model.train()
+        timer.end("collect")
+        rl_monitor.record_phase_event("collect", "end")
+        flush()
+
+        # Park workers in a Python-level wait while master collects, so they
+        # do not enter the NCCL broadcast below until master is also there.
+        # Without this, workers block in NCCL for the entire collect duration
+        # and trip the 10-min watchdog if collect ever takes longer.
+        active_barrier(f"collect_{step}", timeout=None)
+
+        # Rank 0 contributes its experience's transitions; workers pass [].
+        replay_buffer.extend_and_sync(experience.transitions() if master_process else [])
+        set_tactic_sink(None)
+
+        if master_process:
             rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
-            flush()
-            if ddp:
-                dist.barrier()
-        else:
-            # Collect proofs (rank 0 only, worker ranks serve inference)
-            timer.start("collect")
-            rl_monitor.record_phase_event("collect", "start")
-            experience = CollectedExperience()
-            set_tactic_sink(experience.record_tactic)
-            model.eval()
-            rl_monitor.set_step(step)
-
-            if master_process:
-                prover.collect(theorems_sampler, args.collect_transitions, experience, num_simulations=args.num_simulations_collect)
-
-            model.train()
-            timer.end("collect")
-            rl_monitor.record_phase_event("collect", "end")
-            flush()
-
-            # Park workers in a Python-level wait while master collects, so they
-            # do not enter the NCCL broadcast below until master is also there.
-            # Without this, workers block in NCCL for the entire collect duration
-            # and trip the 10-min watchdog if collect ever takes longer.
-            active_barrier(f"collect_{step}", timeout=None)
-
-            # Rank 0 contributes its experience's transitions; workers pass [].
-            replay_buffer.extend_and_sync(experience.transitions() if master_process else [])
-            set_tactic_sink(None)
-
-            if master_process:
-                rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
-                experience.save(collection_dir(output_dir, step))
+            experience.save(collection_dir(output_dir, step))
 
     if step % args.save_every == 0 and step > 0 and master_process:
         checkpoint_meta = {
