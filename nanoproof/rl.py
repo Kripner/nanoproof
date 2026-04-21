@@ -80,6 +80,7 @@ parser.add_argument("--memory-profile", type=str, default=None,
 # Training
 parser.add_argument("--device-batch-size", type=int, default=8)
 parser.add_argument("--target-examples-per-step", type=int, default=512)
+parser.add_argument("--num-updates-per-step", type=int, default=1, help="number of optimizer updates per training step (i.e. per collection cycle)")
 parser.add_argument("--fraction-sft", type=float, default=0.2)
 parser.add_argument("--augment-data", type=bool, default=True)
 parser.add_argument("--value-weight", type=float, default=0.01)
@@ -414,28 +415,34 @@ while True:
 
     optimizer_to_gpu(optimizer, device)
 
-    num_tokens = torch.tensor(0, device=device)
-    for micro_step in range(grad_accum_steps):
-        train_inputs, train_targets = next(train_loader)
-        per_token_loss = model(train_inputs, train_targets, loss_reduction='none')  # (B*T,)
-        per_token_loss = per_token_loss.view(train_inputs.shape)  # (B, T)
+    total_loss = 0.0
+    total_tokens = 0
+    for _ in range(args.num_updates_per_step):
+        num_tokens = torch.tensor(0, device=device)
+        for micro_step in range(grad_accum_steps):
+            train_inputs, train_targets = next(train_loader)
+            per_token_loss = model(train_inputs, train_targets, loss_reduction='none')  # (B*T,)
+            per_token_loss = per_token_loss.view(train_inputs.shape)  # (B, T)
 
-        is_value_sample = (train_inputs == value_delim_tok).any(dim=1)  # (B,)
-        sample_weights = torch.where(is_value_sample, args.value_weight, 1.0)  # (B,)
+            is_value_sample = (train_inputs == value_delim_tok).any(dim=1)  # (B,)
+            sample_weights = torch.where(is_value_sample, args.value_weight, 1.0)  # (B,)
 
-        token_mask = (train_targets >= 0)  # (B, T)
-        weighted_token_loss = per_token_loss * sample_weights.unsqueeze(1)  # (B, T)
+            token_mask = (train_targets >= 0)  # (B, T)
+            weighted_token_loss = per_token_loss * sample_weights.unsqueeze(1)  # (B, T)
 
-        loss = (weighted_token_loss * token_mask).sum() / token_mask.sum()
-        train_loss = loss.detach()
-        loss = loss / grad_accum_steps
-        loss.backward()
-        num_tokens += (train_targets >= 0).sum()
-    if ddp:
-        dist.all_reduce(num_tokens, op=dist.ReduceOp.SUM)
+            loss = (weighted_token_loss * token_mask).sum() / token_mask.sum()
+            train_loss = loss.detach()
+            loss = loss / grad_accum_steps
+            loss.backward()
+            num_tokens += (train_targets >= 0).sum()
+        if ddp:
+            dist.all_reduce(num_tokens, op=dist.ReduceOp.SUM)
 
-    optimizer.step()
-    model.zero_grad(set_to_none=True)
+        optimizer.step()
+        model.zero_grad(set_to_none=True)
+
+        total_loss += train_loss.item()
+        total_tokens += num_tokens.item()
 
     optimizer_to_cpu(optimizer)
     flush()
@@ -446,16 +453,14 @@ while True:
     timer.end("train")
     rl_monitor.record_phase_event("train", "end")
 
-    # Logging
-    train_loss_item = train_loss.item()
-    num_tokens_item = num_tokens.item()
-    rl_monitor.update_training(step, train_loss_item, num_tokens_item)
+    mean_loss = total_loss / args.num_updates_per_step
+    rl_monitor.update_training(step, mean_loss, total_tokens)
     if master_process:
-        log(f"Step {step:05d} | Training loss: {train_loss_item:.6f} | num_tokens: {num_tokens_item:,} | replay_buffer_size: {len(replay_buffer.buffer)}", component="Train")
+        log(f"Step {step:05d} | Training loss: {mean_loss:.6f} | num_tokens: {total_tokens:,} | replay_buffer_size: {len(replay_buffer.buffer)}", component="Train")
     wandb_run.log({
         "step": step,
-        "train_loss": train_loss_item,
-        "num_tokens": num_tokens_item,
+        "train_loss": mean_loss,
+        "num_tokens": total_tokens,
         "replay_buffer_size": len(replay_buffer.buffer),
         **{f"time/{k}": v for k, v in timer.get_times().items()},
         **rl_monitor.lean_server_metrics(),
