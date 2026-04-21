@@ -30,9 +30,8 @@ from nanoproof.cli import get_monitor, log, log_actionable_error
 from nanoproof.data.bench.common import BenchTheorem
 from nanoproof.experience_collection import (
     TheoremsSampler,
-    ReplayBuffer,
+    CollectedExperience,
     compute_value_target,
-    extract_transitions,
     prune_redundant_nodes,
 )
 from nanoproof.search import Game, MCTSAbortedError, Node, SearchConfig, run_mcts, verify_node
@@ -194,12 +193,11 @@ class ProverWorker:
         self,
         sampler: TheoremsSampler,
         target_transitions: int,
-        replay_buffer: ReplayBuffer,
+        experience: CollectedExperience,
         num_simulations: int,
     ) -> int:
-        """Collect transitions into replay_buffer.local_buffer.
-
-        Runs actor threads until the target number of transitions is reached.
+        """Record successful proofs into ``experience`` until the target
+        number of transitions is reached.
         """
         monitor = get_monitor()
 
@@ -218,14 +216,13 @@ class ProverWorker:
                 return
             if not game.root.is_solved:
                 return
-            transitions = extract_transitions(game.root)
-            replay_buffer.add_transitions(transitions)
+            transitions_before = experience.num_transitions()
+            experience.record_proof(theorem, game)
             if monitor is not None:
-                monitor.record_transitions(transitions)
+                monitor.add_collected_samples(experience.num_transitions() - transitions_before)
 
         def done_check():
-            with replay_buffer._lock:
-                return len(replay_buffer.local_buffer) >= target_transitions
+            return experience.num_transitions() >= target_transitions
 
         loop_count = [0]
 
@@ -235,9 +232,7 @@ class ProverWorker:
                     monitor.update_local_actor(i, state=state)
             loop_count[0] += 1
             if loop_count[0] % 50 == 0:
-                with replay_buffer._lock:
-                    collected = len(replay_buffer.local_buffer)
-                log(f"Progress: {collected}/{target_transitions} transitions",
+                log(f"Progress: {experience.num_transitions()}/{target_transitions} transitions",
                     component="Collection")
 
         prover = Prover(SearchConfig(num_simulations=num_simulations), self.tactic_model)
@@ -247,9 +242,9 @@ class ProverWorker:
         if monitor is not None:
             monitor.clear_local_actors()
 
-        log(f"Collection complete: {len(replay_buffer.local_buffer)} transitions",
-            component="Collection")
-        return len(replay_buffer.local_buffer)
+        total = experience.num_transitions()
+        log(f"Collection complete: {total} transitions", component="Collection")
+        return total
 
     @torch.no_grad()
     def evaluate(self, theorems: list[BenchTheorem], dataset_name: str, num_simulations: int,

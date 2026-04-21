@@ -23,7 +23,7 @@ from nanoproof.checkpoints import load_model, save_checkpoint, save_eval_results
 from nanoproof.engine import Engine
 from nanoproof.data.sft.leantree import leantree_transitions
 from nanoproof.data.sft.leantree_dataloader import rl_data_generator
-from nanoproof.experience_collection import ReplayBuffer, TheoremsSampler
+from nanoproof.experience_collection import ReplayBuffer, TheoremsSampler, CollectedExperience
 from nanoproof.prover import ProverWorker
 from nanoproof.inference import setup_distributed_inference
 from nanoproof.inference import TacticModel, BlockingTacticModel, compute_max_batch_prompt_tokens
@@ -31,7 +31,7 @@ from nanoproof.optim import optimizer_to_cpu, optimizer_to_gpu
 from nanoproof.data.bench import minif2f
 from nanoproof.data.check_init import read_lean_version
 from nanoproof.data.bench import proofnet
-from nanoproof.cli import create_monitor, configure_logging, log, log0, set_ddp_info, reset_generated_buffer, flush_generated
+from nanoproof.cli import create_monitor, configure_logging, log, log0, set_ddp_info, set_tactic_sink
 from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
 from nanoproof.data.sft.leantree_dataloader import sft_data_generator
 
@@ -285,7 +285,8 @@ while True:
         rl_monitor.record_phase_event("eval", "start")
         model.eval()
         rl_monitor.set_phase("evaluating")
-        reset_generated_buffer()
+        eval_experience = CollectedExperience()
+        set_tactic_sink(eval_experience.record_tactic)
 
         # Policy evaluation (all ranks, uses DDP collectives internally)
         eval_steps = 200
@@ -342,11 +343,9 @@ while True:
         # Prover eval can take many minutes; no timeout (use SIGUSR1 to debug).
         active_barrier(f"prover_eval_{step}", timeout=None)
 
+        set_tactic_sink(None)
         if master_process:
-            flush_generated(
-                os.path.join(output_dir, "evals", f"{step:05d}", "generated_tactics.jsonl"),
-                reset_generated_buffer(),
-            )
+            eval_experience.save(os.path.join(output_dir, "evals", f"{step:05d}"))
 
         model.train()
         timer.end("eval")
@@ -354,13 +353,13 @@ while True:
         flush()
 
     if step % args.collect_every == 0:
-        # Check if we can resume from a previous run's replay buffer.
+        # Check if we can resume from a previous run's collected proofs.
         resume_dir = os.path.join(args.resume_from, f"collection_{step:05d}") if args.resume_from else None
         if resume_dir and os.path.isdir(resume_dir):
             if master_process:
                 log(f"Loading replay buffer at step {step} from {args.resume_from}", component="Main")
             shard_paths: list[tuple[int, str]] = []
-            for shard_path in glob.glob(os.path.join(args.resume_from, "collection_*", "replay_buffer.jsonl")):
+            for shard_path in glob.glob(os.path.join(args.resume_from, "collection_*", "collected.jsonl")):
                 shard_step = int(os.path.basename(os.path.dirname(shard_path))[len("collection_"):])
                 if shard_step <= step:
                     shard_paths.append((shard_step, shard_path))
@@ -373,7 +372,8 @@ while True:
                         if not line:
                             continue
                         obj = json.loads(line)
-                        transitions.append((obj["context"], obj["tactic"], obj["value_target"]))
+                        for t in obj.get("transitions", []):
+                            transitions.append((t[0], t[1], t[2]))
             if len(transitions) > replay_buffer.window_size:
                 transitions = transitions[-replay_buffer.window_size:]
             replay_buffer.buffer = transitions
@@ -387,12 +387,13 @@ while True:
             # Collect proofs (rank 0 only, worker ranks serve inference)
             timer.start("collect")
             rl_monitor.record_phase_event("collect", "start")
-            reset_generated_buffer()
+            experience = CollectedExperience()
+            set_tactic_sink(experience.record_tactic)
             model.eval()
             rl_monitor.set_step(step)
 
             if master_process:
-                prover.collect(theorems_sampler, args.collect_transitions, replay_buffer, num_simulations=args.num_simulations_collect)
+                prover.collect(theorems_sampler, args.collect_transitions, experience, num_simulations=args.num_simulations_collect)
 
             model.train()
             timer.end("collect")
@@ -405,21 +406,13 @@ while True:
             # and trip the 10-min watchdog if collect ever takes longer.
             active_barrier(f"collect_{step}", timeout=None)
 
-            # Broadcast replay buffer from rank 0 to all ranks; rank 0 gets
-            # back the transitions it just collected as a delta to persist.
-            new_transitions = replay_buffer.synchronize()
+            # Rank 0 contributes its experience's transitions; workers pass [].
+            replay_buffer.extend_and_sync(experience.transitions() if master_process else [])
+            set_tactic_sink(None)
 
             if master_process:
                 rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
-                collection_dir = os.path.join(output_dir, f"collection_{step:05d}")
-                os.makedirs(collection_dir, exist_ok=True)
-                with open(os.path.join(collection_dir, "replay_buffer.jsonl"), "w") as f:
-                    for context, tactic, value_target in new_transitions:
-                        f.write(json.dumps({"context": context, "tactic": tactic, "value_target": value_target}) + "\n")
-                flush_generated(
-                    os.path.join(collection_dir, "generated_tactics.jsonl"),
-                    reset_generated_buffer(),
-                )
+                experience.save(os.path.join(output_dir, f"collection_{step:05d}"))
 
     if step % args.save_every == 0 and step > 0 and master_process:
         checkpoint_meta = {

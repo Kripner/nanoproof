@@ -26,7 +26,7 @@ from collections import deque
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from statistics import median
-from typing import Literal, TextIO, Any
+from typing import Callable, Literal, TextIO, Any
 from queue import Queue
 
 from flask import Flask, jsonify, Response, send_from_directory, request
@@ -49,12 +49,28 @@ _ddp_rank: int = 0  # DDP rank for logging
 _error_dedup: dict[tuple[str, str], tuple[float, int]] = {}
 _error_dedup_window_seconds: float = 60.0
 
-# In-memory buffer for tactics generated during the current phase (collect or
-# eval). log_tactic appends here from inside parallel MCTS expansion; the RL
-# loop swaps and flushes this list to disk once per phase via
-# reset_generated_buffer() / flush_generated(). list.append is atomic under
-# the GIL, so no lock is needed on the hot path.
-_generated_buffer: list[dict] = []
+# Tactic-attempt sink. MCTS (``nanoproof.search``) calls ``log_tactic`` from
+# inside ``expand_node``; a higher-level owner (typically a
+# ``CollectedExperience``) registers its receiver via ``set_tactic_sink`` at
+# phase start, and unregisters with ``set_tactic_sink(None)`` at phase end.
+# Stray writes outside a phase are dropped.
+_tactic_sink: "Callable[[str, str, str], None] | None" = None
+
+
+def set_tactic_sink(sink: "Callable[[str, str, str], None] | None") -> None:
+    """Register (or clear) the receiver of :func:`log_tactic` events."""
+    global _tactic_sink
+    _tactic_sink = sink
+
+
+def log_tactic(state: str, tactic: str, status: str) -> None:
+    """Forward a tactic attempt to the registered sink, or drop it.
+
+    Lock-free: the sink is responsible for thread safety on its end.
+    """
+    sink = _tactic_sink
+    if sink is not None:
+        sink(state, tactic, status)
 
 # In-memory log buffers for web streaming
 _log_buffers: dict[str, deque] = {}
@@ -226,51 +242,6 @@ def log_actionable_error(component: str, error: str, **extra):
             entry["suppressed_since_last"] = suppressed
         _errors_file.write(json.dumps(entry) + "\n")
         _errors_file.flush()
-
-
-def log_tactic(state: str, tactic: str, status: str):
-    """Record a generated tactic in the in-memory per-phase buffer.
-
-    Called from inside parallel MCTS expansion. Relies on ``list.append``
-    being atomic under the GIL so the hot path does not take a lock.
-    The buffer is drained to disk once per phase by
-    :func:`reset_generated_buffer` / :func:`flush_generated`.
-
-    Args:
-        state: The proof state (goal)
-        tactic: The tactic that was attempted
-        status: One of "success", "error", or "cycle"
-    """
-    _generated_buffer.append({
-        "status": status,
-        "state": state.replace("\n", "\\n"),
-        "tactic": tactic,
-    })
-
-
-def reset_generated_buffer() -> list[dict]:
-    """Atomically swap the generated-tactics buffer for a fresh list.
-
-    Returns the drained list so the caller can flush it to disk.
-    """
-    global _generated_buffer
-    old = _generated_buffer
-    _generated_buffer = []
-    return old
-
-
-def flush_generated(path: str, tactics: list[dict]) -> None:
-    """Write a list of tactic dicts to ``path`` as JSONL in one bulk write."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        for t in tactics:
-            f.write(json.dumps(t) + "\n")
-
-
-def get_and_clear_tactics_buffer() -> list[dict]:
-    """Drain the generated-tactics buffer. Used by distributed prover servers
-    to ship tactics back to the coordinator."""
-    return reset_generated_buffer()
 
 
 # -----------------------------------------------------------------------------
@@ -571,6 +542,46 @@ def _serve_jsonl_slice(path: str | None, args, key: str) -> Response:
                 items.append(json.loads(line))
             total += 1
     return jsonify({key: items, "total": total})
+
+
+def _serve_collected_summary(path: str | None) -> Response:
+    """Return lightweight proof summaries from a ``collected.jsonl`` file.
+
+    Full trees are expensive (50-200KB each) so we only return per-proof
+    metadata here; clients fetch trees via :func:`_serve_collected_entry`.
+    """
+    if not path or not os.path.exists(path):
+        return jsonify({"error": "Not found"}), 404
+    proofs: list[dict] = []
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            proofs.append({
+                "name": obj.get("name"),
+                "theorem": obj.get("theorem"),
+                "num_iterations": obj.get("num_iterations", 0),
+                "num_transitions": len(obj.get("transitions", [])),
+            })
+    return jsonify({"proofs": proofs, "total": len(proofs)})
+
+
+def _serve_collected_entry(path: str | None, index: int) -> Response:
+    """Return the full record (trees + transitions) for one proof."""
+    if not path or not os.path.exists(path):
+        return jsonify({"error": "Not found"}), 404
+    i = 0
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if i == index:
+                return jsonify(json.loads(line))
+            i += 1
+    return jsonify({"error": "Index out of range"}), 404
 
 
 # -----------------------------------------------------------------------------
@@ -926,12 +937,19 @@ class WebMonitor:
             steps.sort()
             return jsonify({"steps": steps})
 
-        @app.route("/api/collections/<int:step>/replay_buffer")
-        def get_collection_replay_buffer(step: int):
-            return _serve_jsonl_slice(
-                self._phase_file(f"collection_{step:05d}", "replay_buffer.jsonl"),
-                request.args,
-                "transitions",
+        @app.route("/api/collections/<int:step>/collected")
+        def list_collected_proofs(step: int):
+            """Proof summaries for a collection step (no trees - fetch detail separately)."""
+            return _serve_collected_summary(
+                self._phase_file(f"collection_{step:05d}", "collected.jsonl"),
+            )
+
+        @app.route("/api/collections/<int:step>/collected/<int:index>")
+        def get_collected_proof(step: int, index: int):
+            """Full detail (trees + transitions) for one proof in a collection step."""
+            return _serve_collected_entry(
+                self._phase_file(f"collection_{step:05d}", "collected.jsonl"),
+                index,
             )
 
         @app.route("/api/collections/<int:step>/generated_tactics")
@@ -1302,10 +1320,10 @@ class WebMonitor:
                 self.collection.proofs_successful += 1
                 self.collection.samples_collected += transitions
 
-    def record_transitions(self, transitions: list):
-        """Update samples_collected count for the progress bar."""
+    def add_collected_samples(self, count: int):
+        """Bump the samples_collected counter (for the progress bar)."""
         with self._lock:
-            self.collection.samples_collected += len(transitions)
+            self.collection.samples_collected += count
 
     def record_expansion(self):
         with self._lock:

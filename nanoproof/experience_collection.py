@@ -3,7 +3,13 @@ Experience collection: replay buffer, theorem sampling, and proof-tree → trans
 
 This module owns:
 - TheoremsSampler: weighted sampler over configured training datasets.
-- ReplayBuffer: thread-safe DDP-aware buffer of (context, tactic, value_target) transitions
+- ReplayBuffer: DDP-aware buffer of (context, tactic, value_target) transitions
+  sampled during training.
+- CollectedExperience: per-phase accumulator of full proof trees (plus their
+  simplified versions and extracted transitions) and generated tactics.
+  ``record_tactic`` is the receiver side of :mod:`nanoproof.tactic_sink`;
+  the RL loop calls ``set_tactic_sink(exp.record_tactic)`` at phase start.
+  Also owns the disk-save of ``collected.jsonl`` / ``generated_tactics.jsonl``.
 - compute_value_target: assigns regression targets to nodes of a solved proof tree
 - extract_transitions: walks a solved proof tree and yields training transitions
 - prune_redundant_nodes / prune_redundant_node: tree-editing pass that removes
@@ -12,8 +18,11 @@ This module owns:
 Tree-walking helpers depend on Node / Player / execute_tree from search.py.
 """
 
+import json
+import os
 import random
 import threading
+from dataclasses import dataclass, asdict
 
 import torch.distributed as dist
 
@@ -59,62 +68,130 @@ class TheoremsSampler:
 
 
 class ReplayBuffer:
-    """
-    Replay buffer for storing proof transitions.
+    """DDP-aware FIFO replay buffer of (context, tactic, value_target) transitions.
 
-    Supports DDP synchronization across multiple ranks.
+    Rank 0 is the only rank that collects new transitions. At the end of each
+    collection phase, :meth:`extend_and_sync` merges in the new transitions
+    (rank 0 passes the real list, other ranks pass ``[]``), truncates to
+    ``window_size``, and broadcasts the result so all ranks sample from the
+    same buffer during training.
     """
     def __init__(self, window_size: int, seed: int):
         self.window_size = window_size
-        self.local_buffer = []
-        self.buffer = []
+        self.buffer: list[tuple[str, str, float]] = []
         self.rng = random.Random(seed)
-        self._lock = threading.Lock()  # Thread-safe access to local_buffer
 
-    def add_transitions(self, transitions: list[tuple[str, str, float]]):
-        with self._lock:
-            transitions = [
-                (context.strip(), tactic.strip(), value_target)
-                for context, tactic, value_target in transitions
-                if len(context.strip()) <= GLOBAL_CONFIG.state_max_len and len(tactic.strip()) <= GLOBAL_CONFIG.tactic_max_len
-            ]
-            # log(f"Adding {len(transitions)}/{received_count} transitions to replay buffer:" + "\n".join(f"  {context} {tactic} {value_target}" for context, tactic, value_target in transitions), component="Collection")
-            for context, tactic, value_target in transitions:
-                assert len(context) != 0, f"Empty context in transition: tactic={tactic}, value_target={value_target}"
-                assert len(tactic) != 0, f"Empty tactic in transition: context={context}, value_target={value_target}"
-                assert value_target is not None, f"None value_target in transition: context={context}, tactic={tactic}"
-            self.local_buffer.extend(transitions)
-
-    def synchronize(self) -> list[tuple[str, str, float]]:
-        """Merge local_buffer into buffer and broadcast to all DDP ranks.
-
-        Only rank 0 collects transitions (into local_buffer). This method
-        moves them into the shared buffer and broadcasts the result so all
-        ranks can sample from it during training.
-
-        Returns the list of transitions that were drained from local_buffer
-        so rank 0 can persist them to disk as the step's delta (other ranks
-        get [] since only rank 0 collects).
-        """
+    def extend_and_sync(self, new_transitions: list[tuple[str, str, float]]) -> None:
+        """Append newly-collected transitions (rank 0 only), FIFO-truncate, broadcast."""
         ddp, _, _, _ = get_dist_info()
 
-        # Move local_buffer → buffer (only rank 0 has data, others are empty)
-        drained = self.local_buffer
-        self.buffer.extend(drained)
-        self.local_buffer = []
+        self.buffer.extend(new_transitions)
         if len(self.buffer) > self.window_size:
             self.buffer = self.buffer[-self.window_size:]
 
-        # Broadcast from rank 0 so all ranks have the same buffer
         if ddp:
             buffer_list = [self.buffer]
             dist.broadcast_object_list(buffer_list, src=0)
             self.buffer = buffer_list[0]
 
-        return drained
-
     def sample_transition(self) -> tuple[str, str, float]:
         return self.rng.choice(self.buffer)
+
+
+# -----------------------------------------------------------------------------
+# CollectedExperience: per-phase artifacts (proofs + generated tactics)
+# -----------------------------------------------------------------------------
+
+
+@dataclass
+class CollectedProof:
+    """One successful proof from a collection phase, with enough data to
+    reproduce the training transitions and inspect the search tree in the UI.
+    """
+    theorem: str                                    # BenchTheorem.source
+    name: str | None                                # theorem name if any
+    num_iterations: int                             # MCTS iterations run
+    full_tree: dict                                 # pre-prune tree (game.unsimplified_root.serialize())
+    simplified_tree: dict                           # post-prune tree (game.root.serialize())
+    transitions: list[tuple[str, str, float]]      # (state, tactic, value_target)
+
+
+class CollectedExperience:
+    """Per-phase accumulator used during collection and evaluation.
+
+    Proofs and tactics are populated by worker threads during the phase:
+    :meth:`record_proof` is called once per successful proof from the prover
+    callback; :meth:`record_tactic` is called from inside parallel MCTS
+    expansion for every attempted tactic. At the end of the phase the RL
+    loop pulls :meth:`transitions` into :class:`ReplayBuffer` and calls
+    :meth:`save` to write ``collected.jsonl`` and ``generated_tactics.jsonl``.
+    """
+
+    def __init__(self):
+        self.proofs: list[CollectedProof] = []
+        self.tactics: list[dict] = []
+        self._lock = threading.Lock()
+
+    def record_proof(self, theorem: BenchTheorem, game) -> None:
+        """Snapshot a solved game as a :class:`CollectedProof` and append it."""
+        transitions = extract_transitions(game.root)
+        full_tree = game.unsimplified_root.serialize() if getattr(game, "unsimplified_root", None) else None
+        simplified_tree = game.root.serialize()
+        proof = CollectedProof(
+            theorem=theorem.source,
+            name=theorem.name,
+            num_iterations=game.num_iterations,
+            full_tree=full_tree,
+            simplified_tree=simplified_tree,
+            transitions=transitions,
+        )
+        with self._lock:
+            self.proofs.append(proof)
+
+    def record_tactic(self, state: str, tactic: str, status: str) -> None:
+        """Buffer a tactic attempt. Lock-free (list.append is atomic under the GIL)."""
+        self.tactics.append({
+            "status": status,
+            "state": state.replace("\n", "\\n"),
+            "tactic": tactic,
+        })
+
+    def num_transitions(self) -> int:
+        with self._lock:
+            return sum(len(p.transitions) for p in self.proofs)
+
+    def transitions(self) -> list[tuple[str, str, float]]:
+        """All transitions across all proofs, filtered by the global state/tactic
+        length limits (matches the old :func:`ReplayBuffer.add_transitions` filter)."""
+        with self._lock:
+            raw = [t for p in self.proofs for t in p.transitions]
+        out: list[tuple[str, str, float]] = []
+        for context, tactic, value_target in raw:
+            context = context.strip()
+            tactic = tactic.strip()
+            if len(context) > GLOBAL_CONFIG.state_max_len or len(tactic) > GLOBAL_CONFIG.tactic_max_len:
+                continue
+            assert len(context) != 0, f"Empty context in transition: tactic={tactic}, value_target={value_target}"
+            assert len(tactic) != 0, f"Empty tactic in transition: context={context}, value_target={value_target}"
+            assert value_target is not None, f"None value_target in transition: context={context}, tactic={tactic}"
+            out.append((context, tactic, value_target))
+        return out
+
+    def save(self, phase_dir: str) -> None:
+        """Write ``collected.jsonl`` and ``generated_tactics.jsonl`` under ``phase_dir``.
+
+        Both files are always written (possibly empty) so an absent file is
+        an unambiguous signal that the phase did not run.
+        """
+        os.makedirs(phase_dir, exist_ok=True)
+        with open(os.path.join(phase_dir, "collected.jsonl"), "w") as f:
+            for p in self.proofs:
+                f.write(json.dumps(asdict(p)) + "\n")
+        with open(os.path.join(phase_dir, "generated_tactics.jsonl"), "w") as f:
+            for t in self.tactics:
+                f.write(json.dumps(t) + "\n")
+
+
 
 
 def compute_value_target(node: Node) -> float:

@@ -5,29 +5,50 @@ import { TacticEntry } from '../types';
 const POLL_INTERVAL = 2000;
 const PAGE_SIZE = 200;
 
-interface TransitionRow {
-  context: string;
-  tactic: string;
-  value_target: number;
+interface ProofSummary {
+  name: string | null;
+  theorem: string;
+  num_iterations: number;
+  num_transitions: number;
 }
 
-interface ModalData {
-  type: 'transition' | 'tactic';
-  state: string;
-  tactic: string;
-  status?: 'success' | 'error' | 'cycle';
-  value?: number;
+interface NodeDict {
+  id: string;
+  action: string | number | null;
+  prior: number | null;
+  state: string[];
+  reward: number | null;
+  to_play: number; // 1 = OR, 2 = AND
+  is_solved: boolean;
+  visit_count: number;
+  evaluations: number;
+  value_sum: number;
+  value_target: number | null;
+  children: Record<string, NodeDict> | null;
 }
+
+interface ProofDetail {
+  theorem: string;
+  name: string | null;
+  num_iterations: number;
+  full_tree: NodeDict | null;
+  simplified_tree: NodeDict | null;
+  transitions: [string, string, number][];
+}
+
+type DetailTab = 'simplified' | 'full' | 'transitions';
 
 export function DataPanel() {
   const [steps, setSteps] = useState<number[]>([]);
   const [selectedStep, setSelectedStep] = useState<number | null>(null);
-  const [transitions, setTransitions] = useState<TransitionRow[]>([]);
-  const [transitionsTotal, setTransitionsTotal] = useState(0);
+  const [proofs, setProofs] = useState<ProofSummary[]>([]);
   const [tactics, setTactics] = useState<TacticEntry[]>([]);
   const [tacticsTotal, setTacticsTotal] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [modalData, setModalData] = useState<ModalData | null>(null);
+  const [selectedProofIndex, setSelectedProofIndex] = useState<number | null>(null);
+  const [proofDetail, setProofDetail] = useState<ProofDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailTab, setDetailTab] = useState<DetailTab>('simplified');
 
   useEffect(() => {
     let alive = true;
@@ -57,8 +78,7 @@ export function DataPanel() {
 
   useEffect(() => {
     if (selectedStep === null) {
-      setTransitions([]);
-      setTransitionsTotal(0);
+      setProofs([]);
       setTactics([]);
       setTacticsTotal(0);
       return;
@@ -67,18 +87,16 @@ export function DataPanel() {
     setLoading(true);
     const load = async () => {
       try {
-        const [rbRes, tacticsRes] = await Promise.all([
-          fetch(`/api/collections/${selectedStep}/replay_buffer?limit=${PAGE_SIZE}`),
+        const [proofsRes, tacticsRes] = await Promise.all([
+          fetch(`/api/collections/${selectedStep}/collected`),
           fetch(`/api/collections/${selectedStep}/generated_tactics?limit=${PAGE_SIZE}`),
         ]);
         if (!alive) return;
-        if (rbRes.ok) {
-          const d = await rbRes.json();
-          setTransitions(d.transitions || []);
-          setTransitionsTotal(d.total ?? (d.transitions?.length || 0));
+        if (proofsRes.ok) {
+          const d = await proofsRes.json();
+          setProofs(d.proofs || []);
         } else {
-          setTransitions([]);
-          setTransitionsTotal(0);
+          setProofs([]);
         }
         if (tacticsRes.ok) {
           const d = await tacticsRes.json();
@@ -90,8 +108,7 @@ export function DataPanel() {
         }
       } catch {
         if (!alive) return;
-        setTransitions([]);
-        setTransitionsTotal(0);
+        setProofs([]);
         setTactics([]);
         setTacticsTotal(0);
       } finally {
@@ -104,7 +121,39 @@ export function DataPanel() {
     };
   }, [selectedStep]);
 
+  useEffect(() => {
+    if (selectedStep === null || selectedProofIndex === null) {
+      setProofDetail(null);
+      return;
+    }
+    let alive = true;
+    setDetailLoading(true);
+    const load = async () => {
+      try {
+        const res = await fetch(
+          `/api/collections/${selectedStep}/collected/${selectedProofIndex}`,
+        );
+        if (!alive) return;
+        if (res.ok) {
+          const d = await res.json();
+          setProofDetail(d);
+        } else {
+          setProofDetail(null);
+        }
+      } catch {
+        if (alive) setProofDetail(null);
+      } finally {
+        if (alive) setDetailLoading(false);
+      }
+    };
+    load();
+    return () => {
+      alive = false;
+    };
+  }, [selectedStep, selectedProofIndex]);
+
   const sortedSteps = [...steps].sort((a, b) => b - a);
+  const selectedProof = selectedProofIndex !== null ? proofs[selectedProofIndex] : null;
 
   return (
     <div className="data-panel">
@@ -134,37 +183,30 @@ export function DataPanel() {
           <>
             <div className="data-section">
               <div className="data-section-title">
-                Replay buffer additions
+                Collected proofs
                 <span className="data-section-count">
-                  {loading ? '…' : `${transitions.length} / ${transitionsTotal}`}
+                  {loading ? '…' : `${proofs.length}`}
                 </span>
               </div>
               <div className="replay-list">
                 {loading ? (
                   <div className="replay-loading">Loading...</div>
-                ) : transitions.length === 0 ? (
-                  <div className="replay-empty">No transitions at this step</div>
+                ) : proofs.length === 0 ? (
+                  <div className="replay-empty">No proofs at this step</div>
                 ) : (
-                  transitions.map((t, i) => (
+                  proofs.map((p, i) => (
                     <div
                       key={i}
-                      className="transition-item clickable"
-                      onClick={() =>
-                        setModalData({
-                          type: 'transition',
-                          state: t.context,
-                          tactic: t.tactic,
-                          value: t.value_target,
-                        })
-                      }
+                      className="proof-item clickable"
+                      onClick={() => {
+                        setSelectedProofIndex(i);
+                        setDetailTab('simplified');
+                      }}
                     >
-                      <div className="transition-state">{t.context}</div>
-                      <div className="transition-tactic">
-                        <span className="transition-value">
-                          {typeof t.value_target === 'number' ? t.value_target.toFixed(2) : '?'}
-                        </span>
-                        → {t.tactic}
-                      </div>
+                      <span className="proof-name">{p.name ?? `proof #${i}`}</span>
+                      <span className="proof-meta">
+                        {p.num_transitions} transitions · {p.num_iterations} iters
+                      </span>
                     </div>
                   ))
                 )}
@@ -190,18 +232,7 @@ export function DataPanel() {
                     const statusIcon =
                       t.status === 'success' ? '✓' : t.status === 'cycle' ? '↻' : '✗';
                     return (
-                      <div
-                        key={i}
-                        className={`tactic-item clickable ${statusClass}`}
-                        onClick={() =>
-                          setModalData({
-                            type: 'tactic',
-                            state: t.state,
-                            tactic: t.tactic,
-                            status: t.status,
-                          })
-                        }
-                      >
+                      <div key={i} className={`tactic-item ${statusClass}`}>
                         <span className="tactic-status">{statusIcon}</span>
                         <span className="tactic-text">{t.tactic}</span>
                         <span className="tactic-state" title={t.state}>
@@ -218,39 +249,122 @@ export function DataPanel() {
       </div>
 
       <Modal
-        isOpen={modalData !== null}
-        onClose={() => setModalData(null)}
-        title={
-          modalData?.type === 'tactic'
-            ? `Tactic (${
-                modalData?.status === 'success'
-                  ? 'Success'
-                  : modalData?.status === 'cycle'
-                  ? 'Cycle'
-                  : 'Error'
-              })`
-            : 'Transition'
-        }
+        isOpen={selectedProofIndex !== null}
+        onClose={() => setSelectedProofIndex(null)}
+        title={selectedProof?.name ?? `Proof #${selectedProofIndex ?? ''}`}
       >
-        {modalData && (
+        {detailLoading || !proofDetail ? (
+          <div className="modal-section">Loading…</div>
+        ) : (
           <>
             <div className="modal-section">
-              <div className="modal-label">State</div>
-              <div className="modal-code state">{modalData.state}</div>
+              <div className="modal-label">Theorem</div>
+              <div className="modal-code state">{proofDetail.theorem}</div>
             </div>
-            <div className="modal-section">
-              <div className="modal-label">Tactic</div>
-              <div className="modal-code tactic">{modalData.tactic}</div>
+
+            <div className="proof-detail-tabs">
+              <button
+                className={detailTab === 'simplified' ? 'active' : ''}
+                onClick={() => setDetailTab('simplified')}
+              >
+                Simplified tree
+              </button>
+              <button
+                className={detailTab === 'full' ? 'active' : ''}
+                onClick={() => setDetailTab('full')}
+              >
+                Full tree
+              </button>
+              <button
+                className={detailTab === 'transitions' ? 'active' : ''}
+                onClick={() => setDetailTab('transitions')}
+              >
+                Transitions ({proofDetail.transitions.length})
+              </button>
             </div>
-            {modalData.type === 'transition' && modalData.value !== undefined && (
-              <div className="modal-section">
-                <div className="modal-label">Value Target</div>
-                <div className="modal-code value">{modalData.value.toFixed(4)}</div>
+
+            {detailTab === 'simplified' && (
+              <TreeView node={proofDetail.simplified_tree} />
+            )}
+            {detailTab === 'full' && (
+              <TreeView node={proofDetail.full_tree} />
+            )}
+            {detailTab === 'transitions' && (
+              <div className="transitions-list">
+                {proofDetail.transitions.length === 0 ? (
+                  <div className="replay-empty">No transitions</div>
+                ) : (
+                  proofDetail.transitions.map(([ctx, tactic, value], i) => (
+                    <div key={i} className="transition-item">
+                      <div className="transition-state">{ctx}</div>
+                      <div className="transition-tactic">
+                        <span className="transition-value">{value.toFixed(2)}</span>
+                        → {tactic}
+                      </div>
+                    </div>
+                  ))
+                )}
               </div>
             )}
           </>
         )}
       </Modal>
+    </div>
+  );
+}
+
+function TreeView({ node }: { node: NodeDict | null }) {
+  if (!node) {
+    return <div className="replay-empty">Tree not available</div>;
+  }
+  return (
+    <div className="tree-view">
+      <TreeNode node={node} depth={0} />
+    </div>
+  );
+}
+
+function TreeNode({ node, depth }: { node: NodeDict; depth: number }) {
+  const children = node.children ? Object.entries(node.children) : [];
+  const hasChildren = children.length > 0;
+  const [expanded, setExpanded] = useState(depth < 6);
+
+  const kind = node.to_play === 1 ? 'OR' : 'AND';
+  const stateStr = node.state.length > 0 ? node.state.join(' │ ') : '∅';
+  const solvedChildren = children.filter(([, c]) => c.is_solved);
+  const solvedActionSet = new Set(solvedChildren.map(([a]) => a));
+
+  return (
+    <div className="tree-node">
+      <div className="tree-row" onClick={() => hasChildren && setExpanded(!expanded)}>
+        <span className="tree-toggle">
+          {hasChildren ? (expanded ? '▾' : '▸') : ' '}
+        </span>
+        <span className={`tree-kind tree-kind-${kind.toLowerCase()}`}>{kind}</span>
+        {node.is_solved && <span className="tree-solved">✓</span>}
+        {node.value_target !== null && (
+          <span className="tree-value">v={node.value_target.toFixed(2)}</span>
+        )}
+        {node.action !== null && (
+          <span className="tree-action">{String(node.action)}</span>
+        )}
+        <span className="tree-state" title={stateStr}>
+          {stateStr.slice(0, 160)}
+          {stateStr.length > 160 ? '…' : ''}
+        </span>
+      </div>
+      {expanded && hasChildren && (
+        <div className="tree-children">
+          {children.map(([action, child]) => (
+            <div
+              key={child.id}
+              className={`tree-branch ${solvedActionSet.has(action) ? 'solved' : ''}`}
+            >
+              <TreeNode node={child} depth={depth + 1} />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
