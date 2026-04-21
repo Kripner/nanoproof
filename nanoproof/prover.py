@@ -425,6 +425,13 @@ class ProverWorker:
                             traceback.print_exc()
                     except MCTSAbortedError:
                         skip_report = True
+                        if timeline is not None:
+                            monitor = get_monitor()
+                            if monitor is not None:
+                                if timeline.events:
+                                    monitor.record_timeline_events(actor_id, timeline.events)
+                                monitor.record_outcome(actor_id, "interrupted")
+                            timeline.events.clear()
                         break
                     except Exception as e:
                         if "Model paused for training" in str(e):
@@ -456,11 +463,19 @@ class ProverWorker:
 
                     on_result(theorem_id, theorem, game, error)
 
-                    # Flush timeline events to the monitor
-                    if timeline and timeline.events:
+                    # Flush timeline events and the per-attempt outcome to
+                    # the monitor so the profiler can render a marker on the
+                    # actor's row.
+                    if timeline is not None:
                         monitor = get_monitor()
                         if monitor is not None:
-                            monitor.record_timeline_events(actor_id, timeline.events)
+                            if timeline.events:
+                                monitor.record_timeline_events(actor_id, timeline.events)
+                            if game is not None and game.root is not None:
+                                outcome_kind = "solved" if game.root.is_solved else "gave_up"
+                                monitor.record_outcome(actor_id, outcome_kind)
+                            elif error is not None:
+                                monitor.record_outcome(actor_id, "gave_up")
                         timeline.events.clear()
 
                 if consecutive_errors >= max_consecutive_errors:

@@ -17,9 +17,18 @@ const COLORS = {
   rowBg: '#161b22',
   label: '#8b949e',
   grid: '#21262d',
+  outcomeSolved: '#3fb950',
+  outcomeGaveUp: '#f0883e',
+  outcomeInterrupted: '#000000',
+  nowCursor: 'rgba(230, 237, 243, 0.55)',
 };
 
+// Translucent fill between phase start and end markers. Kept low so
+// underlying bars stay legible — the user asked for "just a touch".
+const PHASE_OVERLAY_ALPHA = 0.07;
+
 type PhaseName = 'collect' | 'eval' | 'train' | string;
+type OutcomeKind = 'solved' | 'gave_up' | 'interrupted';
 
 interface WirePhase {
   name: PhaseName;
@@ -27,8 +36,13 @@ interface WirePhase {
   t: number;
 }
 
+interface WireOutcome {
+  t: number;
+  kind: OutcomeKind;
+}
+
 interface WireData {
-  actors: Record<string, { llm: number[]; lean: number[] }>;
+  actors: Record<string, { llm: number[]; lean: number[]; outcomes?: WireOutcome[] }>;
   phases: WirePhase[];
   mode?: 'live' | 'standalone';
   cursor?: number;
@@ -38,6 +52,7 @@ interface ActorData {
   // Flat interleaved [start, end, start, end, ...], sorted by start.
   llm: Float64Array;
   lean: Float64Array;
+  outcomes: WireOutcome[];
 }
 
 interface ProfilerData {
@@ -53,8 +68,24 @@ interface Props {
   mode: 'live' | 'standalone';
 }
 
-function buildActorData(llm: number[], lean: number[]): ActorData {
-  return { llm: sortPairs(llm), lean: sortPairs(lean) };
+function buildActorData(
+  llm: number[],
+  lean: number[],
+  outcomes: WireOutcome[] | undefined,
+): ActorData {
+  return {
+    llm: sortPairs(llm),
+    lean: sortPairs(lean),
+    outcomes: outcomes ? outcomes.slice() : [],
+  };
+}
+
+function mergeOutcomes(a: WireOutcome[], b: WireOutcome[]): WireOutcome[] {
+  if (a.length === 0) return b;
+  if (b.length === 0) return a;
+  const out = a.concat(b);
+  out.sort((x, y) => x.t - y.t);
+  return out;
 }
 
 // Sort a flat interleaved [s0,e0,s1,e1,...] array by start ascending.
@@ -114,7 +145,7 @@ function computeBounds(data: ProfilerData | null): { min: number; max: number } 
 function scanBounds(actors: Record<string, ActorData>, phases: WirePhase[]) {
   let min = Infinity, max = -Infinity;
   for (const aid in actors) {
-    const { llm, lean } = actors[aid];
+    const { llm, lean, outcomes } = actors[aid];
     if (llm.length) {
       if (llm[0] < min) min = llm[0];
       if (llm[llm.length - 1] > max) max = llm[llm.length - 1];
@@ -122,6 +153,10 @@ function scanBounds(actors: Record<string, ActorData>, phases: WirePhase[]) {
     if (lean.length) {
       if (lean[0] < min) min = lean[0];
       if (lean[lean.length - 1] > max) max = lean[lean.length - 1];
+    }
+    for (const oc of outcomes) {
+      if (oc.t < min) min = oc.t;
+      if (oc.t > max) max = oc.t;
     }
   }
   for (const ph of phases) {
@@ -181,7 +216,7 @@ export function ProfilerPanel({ mode }: Props) {
         const mergedActors: Record<string, ActorData> = { ...baseActors };
         for (const aid in wire.actors) {
           const w = wire.actors[aid];
-          const incoming = buildActorData(w.llm, w.lean);
+          const incoming = buildActorData(w.llm, w.lean, w.outcomes);
           const existing = mergedActors[aid];
           if (!existing) {
             mergedActors[aid] = incoming;
@@ -189,6 +224,7 @@ export function ProfilerPanel({ mode }: Props) {
             mergedActors[aid] = {
               llm: mergeSorted(existing.llm, incoming.llm),
               lean: mergeSorted(existing.lean, incoming.lean),
+              outcomes: mergeOutcomes(existing.outcomes, incoming.outcomes),
             };
           }
         }
@@ -228,6 +264,25 @@ export function ProfilerPanel({ mode }: Props) {
     const bounds = computeBounds(data);
     return bounds ? bounds.min : 0;
   }, [data]);
+
+  // Pair phase start/end events for background overlays. Only fully-paired
+  // phases get a rect; an in-flight phase (start with no matching end yet)
+  // is intentionally left un-shaded.
+  const phasePairs = useMemo(
+    () => pairPhases(data?.phases ?? []),
+    [data?.phases],
+  );
+
+  // Ticking clock for the "now" cursor line in live mode. 500ms cadence —
+  // fast enough to feel smooth, slow enough not to burn CPU. The line is
+  // rendered as an absolute-positioned div so updates don't repaint the
+  // canvases.
+  const [nowSec, setNowSec] = useState(() => Date.now() / 1000);
+  useEffect(() => {
+    if (mode !== 'live') return;
+    const id = setInterval(() => setNowSec(Date.now() / 1000), 500);
+    return () => clearInterval(id);
+  }, [mode]);
 
   // Track chart-wrapper width via a callback ref so we set up the observer
   // as soon as the wrapper mounts (it's rendered conditionally on hasData).
@@ -290,6 +345,10 @@ export function ProfilerPanel({ mode }: Props) {
       ctx.fillText(formatTime(t - dataOrigin, tickInterval), x, height - 8);
     }
 
+    // Shade each paired phase interval with a translucent rect so it's
+    // visually clear when a phase was active, not just where it changed.
+    paintPhaseOverlays(ctx, phasePairs, timeToX, LABEL_WIDTH, width, 0, height);
+
     // Phase start markers on the header (thin solid lines, no labels;
     // the legend above the chart explains the color meanings). Alpha is
     // attenuated when many lines of the same color are packed into the
@@ -319,7 +378,7 @@ export function ProfilerPanel({ mode }: Props) {
     ctx.moveTo(LABEL_WIDTH, 0);
     ctx.lineTo(LABEL_WIDTH, height);
     ctx.stroke();
-  }, [data, viewStart, viewEnd, dataOrigin, viewportWidth]);
+  }, [data, viewStart, viewEnd, dataOrigin, viewportWidth, phasePairs]);
 
   // Render body canvas (rows + phase bars on top).
   useEffect(() => {
@@ -383,7 +442,17 @@ export function ProfilerPanel({ mode }: Props) {
       accumulateColumns(data.actors[aid].llm, viewStart, viewEnd, timeToX, LABEL_WIDTH, timelineWidth, colLlm);
       accumulateColumns(data.actors[aid].lean, viewStart, viewEnd, timeToX, LABEL_WIDTH, timelineWidth, colLean);
       paintDominant(ctx, colLlm, colLean, COLORS.llm, COLORS.lean, LABEL_WIDTH, y + 1, ROW_HEIGHT - 2);
+
+      // Per-attempt outcome markers drawn on top of the bars, so the edge
+      // of the last activity block and its outcome read as one unit.
+      paintOutcomes(ctx, data.actors[aid].outcomes, viewStart, viewEnd,
+                    timeToX, LABEL_WIDTH, width, y, ROW_HEIGHT);
     }
+
+    // Phase interval overlays go on top of rows so the tint is visible
+    // across the chart (not just in the 2px gaps between rows). Alpha is
+    // very low so underlying bars stay readable.
+    paintPhaseOverlays(ctx, phasePairs, timeToX, LABEL_WIDTH, width, 0, height);
 
     // Phase vertical lines (drawn on top of rows so they're visible).
     // Both starts and ends are thin (1px); starts are solid, ends are dashed.
@@ -418,7 +487,7 @@ export function ProfilerPanel({ mode }: Props) {
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
-  }, [data, viewStart, viewEnd, dataOrigin, viewportWidth, bodyHeight, actorIds]);
+  }, [data, viewStart, viewEnd, dataOrigin, viewportWidth, bodyHeight, actorIds, phasePairs]);
 
   // Wheel handler: ctrl/meta + wheel = zoom; plain wheel = native vertical scroll.
   // Attached natively to get passive:false so preventDefault works for ctrl-wheel.
@@ -542,7 +611,7 @@ export function ProfilerPanel({ mode }: Props) {
         ) : (
           <div
             ref={attachChartRef}
-            style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
+            style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
           >
             {/* Header lives outside the scroll container so it's always visible
                 without depending on position:sticky (which silently no-ops
@@ -560,6 +629,13 @@ export function ProfilerPanel({ mode }: Props) {
                 style={{ display: 'block', cursor: dragging ? 'grabbing' : 'grab' }}
               />
             </div>
+            <NowCursor
+              mode={mode}
+              now={nowSec}
+              viewStart={viewStart}
+              viewEnd={viewEnd}
+              viewportWidth={viewportWidth}
+            />
           </div>
         )}
       </div>
@@ -666,6 +742,140 @@ function phaseColor(name: string): string {
   if (name === 'collect') return COLORS.phase_collect;
   if (name === 'eval') return COLORS.phase_eval;
   return COLORS.phase_train;
+}
+
+// Pair each phase `start` with its next matching `end` of the same name.
+// Unpaired starts (in-flight phase) are dropped so the overlay only shades
+// fully-bounded intervals. Phases can nest / overlap on principle, so we use
+// a per-name stack rather than a single pointer.
+function pairPhases(phases: WirePhase[]): Array<{ name: string; start: number; end: number }> {
+  const sorted = [...phases].sort((a, b) => a.t - b.t);
+  const pending = new Map<string, number[]>();
+  const pairs: Array<{ name: string; start: number; end: number }> = [];
+  for (const ph of sorted) {
+    if (ph.action === 'start') {
+      const stack = pending.get(ph.name) ?? [];
+      stack.push(ph.t);
+      pending.set(ph.name, stack);
+    } else if (ph.action === 'end') {
+      const stack = pending.get(ph.name);
+      if (stack && stack.length) {
+        const start = stack.pop()!;
+        pairs.push({ name: ph.name, start, end: ph.t });
+      }
+    }
+  }
+  return pairs;
+}
+
+function paintPhaseOverlays(
+  ctx: CanvasRenderingContext2D,
+  pairs: Array<{ name: string; start: number; end: number }>,
+  timeToX: (t: number) => number,
+  leftClip: number,
+  rightClip: number,
+  top: number,
+  height: number,
+) {
+  if (pairs.length === 0) return;
+  ctx.globalAlpha = PHASE_OVERLAY_ALPHA;
+  for (const p of pairs) {
+    let x1 = timeToX(p.start);
+    let x2 = timeToX(p.end);
+    if (x2 < leftClip || x1 > rightClip) continue;
+    if (x1 < leftClip) x1 = leftClip;
+    if (x2 > rightClip) x2 = rightClip;
+    if (x2 - x1 < 1) continue;
+    ctx.fillStyle = phaseColor(p.name);
+    ctx.fillRect(x1, top, x2 - x1, height);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// Draw outcome markers (solved checkmark / gave-up cross / interrupted
+// rectangle) centered vertically in an actor's row at the outcome time.
+function paintOutcomes(
+  ctx: CanvasRenderingContext2D,
+  outcomes: WireOutcome[],
+  viewStart: number,
+  viewEnd: number,
+  timeToX: (t: number) => number,
+  leftClip: number,
+  rightClip: number,
+  rowY: number,
+  rowHeight: number,
+) {
+  if (outcomes.length === 0) return;
+  const cy = rowY + rowHeight / 2;
+  const half = Math.max(2, Math.floor((rowHeight - 2) / 2));
+  for (const oc of outcomes) {
+    if (oc.t < viewStart || oc.t > viewEnd) continue;
+    const x = timeToX(oc.t);
+    if (x < leftClip - half || x > rightClip + half) continue;
+    if (oc.kind === 'solved') {
+      ctx.strokeStyle = COLORS.outcomeSolved;
+      ctx.lineWidth = 1.5;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(x - half * 0.7, cy + half * 0.05);
+      ctx.lineTo(x - half * 0.15, cy + half * 0.55);
+      ctx.lineTo(x + half * 0.75, cy - half * 0.55);
+      ctx.stroke();
+    } else if (oc.kind === 'gave_up') {
+      ctx.strokeStyle = COLORS.outcomeGaveUp;
+      ctx.lineWidth = 1.5;
+      ctx.lineCap = 'round';
+      const s = half * 0.6;
+      ctx.beginPath();
+      ctx.moveTo(x - s, cy - s);
+      ctx.lineTo(x + s, cy + s);
+      ctx.moveTo(x + s, cy - s);
+      ctx.lineTo(x - s, cy + s);
+      ctx.stroke();
+    } else if (oc.kind === 'interrupted') {
+      ctx.fillStyle = COLORS.outcomeInterrupted;
+      const s = half * 0.9;
+      // Narrow rectangle so a short interrupt doesn't mask nearby bars.
+      ctx.fillRect(x - s * 0.4, cy - s, s * 0.8, s * 2);
+    }
+  }
+  ctx.lineCap = 'butt';
+  ctx.lineJoin = 'miter';
+}
+
+interface NowCursorProps {
+  mode: 'live' | 'standalone';
+  now: number;
+  viewStart: number;
+  viewEnd: number;
+  viewportWidth: number;
+}
+
+// Vertical "now" indicator. Rendered as an HTML div overlay so it updates
+// independently of the canvases (no repaint per tick).
+function NowCursor({ mode, now, viewStart, viewEnd, viewportWidth }: NowCursorProps) {
+  if (mode !== 'live') return null;
+  const duration = viewEnd - viewStart;
+  if (duration <= 0 || viewportWidth <= 0) return null;
+  if (now < viewStart || now > viewEnd) return null;
+  const timelineWidth = viewportWidth - LABEL_WIDTH;
+  if (timelineWidth <= 0) return null;
+  const x = LABEL_WIDTH + ((now - viewStart) / duration) * timelineWidth;
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        left: x,
+        top: 0,
+        bottom: 0,
+        width: 1,
+        background: COLORS.nowCursor,
+        pointerEvents: 'none',
+        zIndex: 5,
+      }}
+    />
+  );
 }
 
 function LegendSwatch({ color, label }: { color: string; label: string }) {

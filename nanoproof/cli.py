@@ -425,35 +425,50 @@ _PHASE_DEDUP_WINDOW = 10.0
 def _compact_instrumentation(
     actors: dict[Any, list[dict]],
     phases: list[dict],
+    outcomes: dict[Any, list[dict]],
     mode: str,
     since: float,
 ) -> dict:
-    """Encode actor timelines and phase events into a compact, gzip-friendly shape.
+    """Encode actor timelines, outcomes, and phase events into a compact,
+    gzip-friendly shape.
 
-    Instead of a list of `{type, start, end}` objects per actor (lots of repeated
-    keys and braces), emit flat typed arrays: for each actor, a `llm` and `lean`
-    array of interleaved [start, end, start, end, ...] floats. This halves the
-    JSON size before gzip and removes most of the parse overhead on the client.
+    For each actor, emit a `llm` / `lean` array of interleaved
+    [start, end, start, end, ...] floats plus an `outcomes` list of
+    `{t, kind}` points. Halves the JSON size before gzip and removes most of
+    the parse overhead on the client.
 
-    `since` filters to events that started strictly after that absolute
-    timestamp (for delta fetches). Pass -inf to return everything.
+    `since` is a monotonic sequence cursor (see ``WebMonitor._instr_seq``).
+    Only events with seq > since are returned. Pass -inf to return everything
+    (e.g. initial load, or file mode where events don't carry a seq — missing
+    seq is treated as 0, which is > -inf so everything passes).
     """
-    out_actors: dict[str, dict[str, list[float]]] = {}
+    out_actors: dict[str, dict[str, Any]] = {}
     max_cursor = since if since != float("-inf") else 0.0
     for aid, events in actors.items():
         llm: list[float] = []
         lean: list[float] = []
         for ev in events:
-            start = ev["start"]
-            if start <= since:
+            seq = ev.get("seq", 0)
+            if seq <= since:
                 continue
             bucket = llm if ev["type"] == "llm" else lean
-            bucket.append(start)
+            bucket.append(ev["start"])
             bucket.append(ev["end"])
-            if start > max_cursor:
-                max_cursor = start
-        if llm or lean:
-            out_actors[str(aid)] = {"llm": llm, "lean": lean}
+            if seq > max_cursor:
+                max_cursor = seq
+        out_oc: list[dict] = []
+        for oc in outcomes.get(aid, []):
+            seq = oc.get("seq", 0)
+            if seq <= since:
+                continue
+            out_oc.append({"t": oc["t"], "kind": oc["kind"]})
+            if seq > max_cursor:
+                max_cursor = seq
+        if llm or lean or out_oc:
+            entry: dict[str, Any] = {"llm": llm, "lean": lean}
+            if out_oc:
+                entry["outcomes"] = out_oc
+            out_actors[str(aid)] = entry
 
     # Phase events are semantically global (all DDP ranks transition together
     # behind a barrier), but older run logs were written from every rank, so
@@ -465,9 +480,14 @@ def _compact_instrumentation(
     sorted_phases = sorted(phases, key=lambda p: p["time"])
     last_by_key: dict[tuple[str, str], float] = {}
     for ph in sorted_phases:
-        t = ph["time"]
-        if t <= since:
+        seq = ph.get("seq", 0)
+        if seq <= since:
             continue
+        # Advance the cursor even for entries we end up deduping, so a future
+        # poll with since=cursor doesn't re-send the duplicates.
+        if seq > max_cursor:
+            max_cursor = seq
+        t = ph["time"]
         key = (ph["name"], ph["action"])
         last_t = last_by_key.get(key)
         if last_t is not None and t - last_t < _PHASE_DEDUP_WINDOW:
@@ -477,8 +497,6 @@ def _compact_instrumentation(
             continue
         last_by_key[key] = t
         out_phases.append({"name": ph["name"], "action": ph["action"], "t": t})
-        if t > max_cursor:
-            max_cursor = t
 
     return {
         "actors": out_actors,
@@ -697,10 +715,18 @@ class WebMonitor:
 
         # Timeline instrumentation
         self.actor_timelines: dict[int, deque] = {}  # actor_id -> deque of event dicts
+        self.actor_outcomes: dict[int, deque] = {}   # actor_id -> deque of outcome dicts
         self.phase_events: list[dict] = []  # global phase start/end markers
         self._timeline_file: TextIO | None = None
         self.mode: str = "live"  # "live" or "standalone"
         self._max_timeline_events_per_actor = 10000
+        # Monotonic counter attached to every actor event, outcome, and phase
+        # event. Delta polls filter by seq > since so we never lose an event
+        # whose start/end happens to sit before the previous cursor (which used
+        # to happen for long-running LLM calls: a short Lean event on another
+        # actor could advance the cursor past the long call's start, then the
+        # long call's events were dropped on the next poll once flushed).
+        self._instr_seq = 0
 
         # Cache for standalone (post-hoc) instrumentation reads. Keyed by
         # timeline.jsonl mtime so we only re-parse when the file changes.
@@ -1049,10 +1075,13 @@ class WebMonitor:
             """Get live timeline instrumentation data (compact + gzipped).
 
             Query params:
-              since (float, optional): absolute seconds. Only events with
-                start > since (actors) or t > since (phases) are returned.
-                Clients use this to fetch deltas so long runs don't re-download
-                history on every poll.
+              since (int/float, optional): monotonic sequence cursor (see
+                WebMonitor._instr_seq). Only events with seq > since are
+                returned. Clients use this to fetch deltas so long runs don't
+                re-download history on every poll; seq (rather than a
+                wall-clock start time) keeps late-flushed long LLM events from
+                being dropped when shorter events on other actors have already
+                advanced a time-based cursor.
             """
             try:
                 since = float(request.args.get("since", "-inf"))
@@ -1062,9 +1091,12 @@ class WebMonitor:
                 actors_src = {
                     aid: list(evs) for aid, evs in self.actor_timelines.items()
                 }
+                outcomes_src = {
+                    aid: list(ocs) for aid, ocs in self.actor_outcomes.items()
+                }
                 phases_src = list(self.phase_events)
                 mode = self.mode
-            payload = _compact_instrumentation(actors_src, phases_src, mode, since)
+            payload = _compact_instrumentation(actors_src, phases_src, outcomes_src, mode, since)
             return _gzip_json(payload)
 
         @app.route("/api/instrumentation/file")
@@ -1090,6 +1122,7 @@ class WebMonitor:
 
             if cached_body is None:
                 actors: dict[str, list] = {}
+                outcomes: dict[str, list] = {}
                 phases: list[dict] = []
                 try:
                     with open(timeline_path, "r") as f:
@@ -1108,9 +1141,15 @@ class WebMonitor:
                                     "start": entry["start"],
                                     "end": entry["end"],
                                 })
+                            elif t == "outcome":
+                                aid = str(entry["actor"])
+                                outcomes.setdefault(aid, []).append({
+                                    "t": entry["t"],
+                                    "kind": entry["kind"],
+                                })
                 except Exception as e:
                     return jsonify({"error": str(e)}), 500
-                payload = _compact_instrumentation(actors, phases, self.mode, float("-inf"))
+                payload = _compact_instrumentation(actors, phases, outcomes, self.mode, float("-inf"))
                 cached_body = gzip.compress(
                     json.dumps(payload, separators=(",", ":")).encode("utf-8"),
                     compresslevel=6,
@@ -1524,12 +1563,32 @@ class WebMonitor:
             buf = self.actor_timelines[actor_id]
             for ev in events:
                 d = ev.to_dict()
+                self._instr_seq += 1
+                d["seq"] = self._instr_seq
                 buf.append(d)
                 if self._timeline_file is not None:
                     self._timeline_file.write(
                         json.dumps({"type": "actor", "actor": actor_id, "event": d["type"],
                                     "start": d["start"], "end": d["end"]}) + "\n")
             if self._timeline_file is not None:
+                self._timeline_file.flush()
+
+    def record_outcome(self, actor_id: int, kind: str):
+        """Record a per-actor proof-attempt outcome.
+
+        kind: "solved" | "gave_up" | "interrupted". Rendered in the profiler as
+        a per-row marker at the time of the call.
+        """
+        with self._lock:
+            if actor_id not in self.actor_outcomes:
+                self.actor_outcomes[actor_id] = deque(maxlen=self._max_timeline_events_per_actor)
+            self._instr_seq += 1
+            entry = {"t": time.time(), "kind": kind, "seq": self._instr_seq}
+            self.actor_outcomes[actor_id].append(entry)
+            if self._timeline_file is not None:
+                self._timeline_file.write(json.dumps({
+                    "type": "outcome", "actor": actor_id, "kind": kind, "t": entry["t"],
+                }) + "\n")
                 self._timeline_file.flush()
 
     def record_phase_event(self, name: str, action: str):
@@ -1543,10 +1602,15 @@ class WebMonitor:
         if not _is_master_process:
             return
         with self._lock:
-            entry = {"type": "phase", "name": name, "action": action, "time": time.time()}
+            self._instr_seq += 1
+            entry = {"type": "phase", "name": name, "action": action,
+                     "time": time.time(), "seq": self._instr_seq}
             self.phase_events.append(entry)
             if self._timeline_file is not None:
-                self._timeline_file.write(json.dumps(entry) + "\n")
+                # seq is in-memory only; the on-disk log is indexed by
+                # (time, action) which is sufficient for post-hoc replay.
+                file_entry = {"type": "phase", "name": name, "action": action, "time": entry["time"]}
+                self._timeline_file.write(json.dumps(file_entry) + "\n")
                 self._timeline_file.flush()
 
     # --- GPU updates ---
