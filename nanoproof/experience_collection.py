@@ -32,6 +32,7 @@ from nanoproof.common import get_dist_info, Player, GLOBAL_CONFIG
 from nanoproof.data.bench.common import BenchTheorem
 from nanoproof.data.rl import deepseek_prover, leanworkbook, numinamath
 from nanoproof.search import Node, execute_tree
+from nanoproof.tokenizer import get_tokenizer
 
 
 # -----------------------------------------------------------------------------
@@ -184,9 +185,14 @@ class CollectedExperience:
     :meth:`save` to write ``collected.jsonl`` and ``generated_tactics.jsonl``.
     """
 
+    TRAIN_SUBSAMPLE_K = 100
+
     def __init__(self):
         self.proofs: list[CollectedProof] = []
         self.tactics: list[dict] = []
+        self.train_samples: list[dict] = []
+        self._train_seen: int = 0
+        self._train_rng = random.Random(0)
         self._lock = threading.Lock()
 
     def record_proof(self, theorem: BenchTheorem, game) -> None:
@@ -213,6 +219,61 @@ class CollectedExperience:
             "tactic": tactic,
         })
 
+    def record_train_samples(self, inputs, targets, per_token_loss, sources: list) -> None:
+        """Reservoir-sample rows of one training micro-batch into ``self.train_samples``.
+
+        ``inputs`` / ``targets`` / ``per_token_loss`` are all shape ``(B, T)``
+        (with -1 in ``targets`` and 0 in the loss at masked positions).
+        ``sources`` is a length-``B`` list of per-row source tags (``"rl"`` /
+        ``"sft"`` / ``None``). Call per micro-step; reservoir sampling (Vitter
+        Algorithm R) keeps the subsample size bounded at
+        :attr:`TRAIN_SUBSAMPLE_K` regardless of total micro-batches.
+        """
+        tokenizer = get_tokenizer()
+        pad_token_id = tokenizer.encode_special("<|pad|>")
+        value_delim_tok = tokenizer.encode_special("<|value|>")
+
+        inputs_cpu = inputs.detach().cpu()
+        targets_cpu = targets.detach().cpu()
+        loss_cpu = per_token_loss.detach().float().cpu()
+
+        B = inputs_cpu.size(0)
+        for b in range(B):
+            real_len = int((inputs_cpu[b] != pad_token_id).sum().item())
+            if real_len == 0:
+                continue
+            ids = inputs_cpu[b, :real_len].tolist()
+            tgts = targets_cpu[b, :real_len].tolist()
+            losses_row = loss_cpu[b, :real_len].tolist()
+            # losses[t] aligns with tokens[t] ("loss of predicting this token")
+            # by shifting the upstream per-token-loss (which is indexed by the
+            # predictor position, not the predicted position). losses[0] is
+            # always None (BOS is never a target); losses[t>=1] is the loss
+            # computed when predicting tokens[t] from tokens[:t], gated on
+            # supervision via tgts[t-1] >= 0.
+            shifted_losses: list[float | None] = [None]
+            for t in range(1, real_len):
+                shifted_losses.append(losses_row[t - 1] if tgts[t - 1] >= 0 else None)
+            tokens = [tokenizer.id_to_token(i) for i in ids]
+            is_value = value_delim_tok in ids
+            sample = {
+                "source": sources[b] if b < len(sources) else None,
+                "is_value": is_value,
+                "tokens": tokens,
+                "losses": shifted_losses,
+            }
+            self._train_reservoir_offer(sample)
+
+    def _train_reservoir_offer(self, sample: dict) -> None:
+        k = self.TRAIN_SUBSAMPLE_K
+        if len(self.train_samples) < k:
+            self.train_samples.append(sample)
+        else:
+            j = self._train_rng.randrange(self._train_seen + 1)
+            if j < k:
+                self.train_samples[j] = sample
+        self._train_seen += 1
+
     def num_transitions(self) -> int:
         with self._lock:
             return sum(len(p.transitions) for p in self.proofs)
@@ -235,9 +296,10 @@ class CollectedExperience:
         return out
 
     def save(self, phase_dir: str) -> None:
-        """Write ``collected.jsonl`` and ``generated_tactics.jsonl`` under ``phase_dir``.
+        """Write ``collected.jsonl``, ``generated_tactics.jsonl`` and
+        ``train_subsample.jsonl`` under ``phase_dir``.
 
-        Both files are always written (possibly empty) so an absent file is
+        All files are always written (possibly empty) so an absent file is
         an unambiguous signal that the phase did not run.
         """
         os.makedirs(phase_dir, exist_ok=True)
@@ -247,6 +309,9 @@ class CollectedExperience:
         with open(os.path.join(phase_dir, "generated_tactics.jsonl"), "w") as f:
             for t in self.tactics:
                 f.write(json.dumps(t) + "\n")
+        with open(os.path.join(phase_dir, "train_subsample.jsonl"), "w") as f:
+            for s in self.train_samples:
+                f.write(json.dumps(s) + "\n")
 
 
 

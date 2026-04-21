@@ -46,6 +46,15 @@ interface ProofDetail {
   transitions: [string, string, number][];
 }
 
+interface TrainSample {
+  source: 'rl' | 'sft' | null;
+  is_value: boolean;
+  tokens: string[];
+  losses: (number | null)[];
+}
+
+const TRAIN_LOSS_CLAMP = 5.0;
+
 export function DataPanel() {
   const [stepEntries, setStepEntries] = useState<StepEntry[]>([]);
   const [totalProofs, setTotalProofs] = useState(0);
@@ -54,6 +63,8 @@ export function DataPanel() {
   const [proofs, setProofs] = useState<ProofSummary[]>([]);
   const [tactics, setTactics] = useState<TacticEntry[]>([]);
   const [tacticsTotal, setTacticsTotal] = useState(0);
+  const [trainSamples, setTrainSamples] = useState<TrainSample[]>([]);
+  const [trainSamplesTotal, setTrainSamplesTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [selectedProofIndex, setSelectedProofIndex] = useState<number | null>(null);
   const [proofDetail, setProofDetail] = useState<ProofDetail | null>(null);
@@ -93,15 +104,18 @@ export function DataPanel() {
       setProofs([]);
       setTactics([]);
       setTacticsTotal(0);
+      setTrainSamples([]);
+      setTrainSamplesTotal(0);
       return;
     }
     let alive = true;
     setLoading(true);
     const load = async () => {
       try {
-        const [proofsRes, tacticsRes] = await Promise.all([
+        const [proofsRes, tacticsRes, trainRes] = await Promise.all([
           fetch(`/api/collections/${selectedStep}/collected`),
           fetch(`/api/collections/${selectedStep}/generated_tactics?limit=${PAGE_SIZE}`),
+          fetch(`/api/collections/${selectedStep}/train_data?limit=${PAGE_SIZE}`),
         ]);
         if (!alive) return;
         if (proofsRes.ok) {
@@ -118,11 +132,21 @@ export function DataPanel() {
           setTactics([]);
           setTacticsTotal(0);
         }
+        if (trainRes.ok) {
+          const d = await trainRes.json();
+          setTrainSamples(d.samples || []);
+          setTrainSamplesTotal(d.total ?? (d.samples?.length || 0));
+        } else {
+          setTrainSamples([]);
+          setTrainSamplesTotal(0);
+        }
       } catch {
         if (!alive) return;
         setProofs([]);
         setTactics([]);
         setTacticsTotal(0);
+        setTrainSamples([]);
+        setTrainSamplesTotal(0);
       } finally {
         if (alive) setLoading(false);
       }
@@ -265,6 +289,24 @@ export function DataPanel() {
                 )}
               </div>
             </div>
+
+            <div className="data-section">
+              <div className="data-section-title">
+                Training samples
+                <span className="data-section-count">
+                  {loading ? '…' : `${trainSamples.length} / ${trainSamplesTotal}`}
+                </span>
+              </div>
+              <div className="train-samples-list">
+                {loading ? (
+                  <div className="replay-loading">Loading...</div>
+                ) : trainSamples.length === 0 ? (
+                  <div className="replay-empty">No train samples at this step</div>
+                ) : (
+                  trainSamples.map((s, i) => <TrainSampleRow key={i} sample={s} />)
+                )}
+              </div>
+            </div>
           </>
         )}
       </div>
@@ -334,6 +376,42 @@ export function DataPanel() {
       </Modal>
     </div>
   );
+}
+
+function TrainSampleRow({ sample }: { sample: TrainSample }) {
+  const sourceClass =
+    sample.source === 'sft' ? 'train-sample-kind-sft' : sample.source === 'rl' ? 'train-sample-kind-rl' : '';
+  const sourceLabel = sample.source ?? '?';
+  return (
+    <div className="train-sample">
+      <span className={`train-sample-kind ${sourceClass}`}>
+        {sourceLabel}
+        {sample.is_value && ' · value'}
+      </span>
+      <div className="train-sample-tokens">
+        {sample.tokens.map((tok, i) => {
+          const loss = sample.losses[i];
+          const alpha = loss == null ? 0 : Math.min(loss / TRAIN_LOSS_CLAMP, 1);
+          const style =
+            alpha > 0 ? { background: `rgba(248, 81, 73, ${alpha.toFixed(3)})` } : undefined;
+          const title = loss == null ? undefined : `loss=${loss.toFixed(3)}`;
+          return (
+            <span key={i} className="train-token" style={style} title={title}>
+              {renderTokenText(tok)}
+            </span>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function renderTokenText(tok: string): string {
+  // HF BPE tokenizers emit a leading "Ġ" for a real space; flip it back so the
+  // UI's white-space: pre-wrap shows the space naturally.
+  if (tok.startsWith('Ġ')) return ' ' + tok.slice(1);
+  if (tok.startsWith('Ċ')) return '\n' + tok.slice(1);
+  return tok;
 }
 
 function TreeView({ node }: { node: NodeDict | null }) {

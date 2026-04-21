@@ -1062,6 +1062,14 @@ class WebMonitor:
                 "tactics",
             )
 
+        @app.route("/api/collections/<int:step>/train_data")
+        def get_collection_train_data(step: int):
+            return _serve_jsonl_slice(
+                self._phase_file(f"collection_{step:05d}", "train_subsample.jsonl"),
+                request.args,
+                "samples",
+            )
+
         @app.route("/api/evals/<int:step>/generated_tactics")
         def get_eval_tactics(step: int):
             return _serve_jsonl_slice(

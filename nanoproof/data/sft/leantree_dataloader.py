@@ -21,14 +21,19 @@ from nanoproof.data.sft.leantree import leantree_transitions
 
 
 def rl_data_generator(generator, batch_size, device="cuda"):
-    """Tokenize an iterator of ``(state, tactic, proof_depth)`` triples into
-    batched ``(inputs, targets)`` tensors. Each triple becomes two rows in the
-    batch (one tactic-prediction sample, one value-prediction sample), so
+    """Tokenize an iterator of ``(state, tactic, proof_depth)`` triples (or
+    ``(state, tactic, proof_depth, source)`` 4-tuples) into batched
+    ``(inputs, targets, sources)`` tensors. Each triple becomes two rows in
+    the batch (one tactic-prediction sample, one value-prediction sample), so
     ``batch_size`` must be even.
 
     Triples whose tactic exceeds ``tactic_max_len`` or whose state+tactic
     exceeds ``max_seq_len`` are silently dropped. Stops when the upstream
     generator is exhausted.
+
+    The ``sources`` element is a length-``batch_size`` list of the optional
+    4th tuple field (``None`` if the upstream yielded 3-tuples). Both the
+    tactic and value rows derived from the same triple share its source.
     """
     assert batch_size % 2 == 0, "batch_size must be even (each triple emits 2 samples)"
     tokenizer = get_tokenizer()
@@ -57,7 +62,10 @@ def rl_data_generator(generator, batch_size, device="cuda"):
         return inputs.to(device), targets.to(device)
 
     batch = []
-    for state, tactic, proof_depth in generator:
+    batch_sources: list = []
+    for item in generator:
+        state, tactic, proof_depth = item[0], item[1], item[2]
+        source = item[3] if len(item) > 3 else None
         state, tactic = state.strip(), tactic.strip()
         assert len(state) != 0 and len(tactic) != 0 and proof_depth >= 1
 
@@ -77,14 +85,18 @@ def rl_data_generator(generator, batch_size, device="cuda"):
             state_toks + [tactic_delim_tok] + tactic_toks,
             [0] * (len(state_toks) + 1) + [1] * len(tactic_toks),
         ))
+        batch_sources.append(source)
         batch.append((
             state_toks + [value_delim_tok] + value_toks,
             [0] * (len(state_toks) + 1) + [1] * len(value_toks),
         ))
+        batch_sources.append(source)
 
         if len(batch) == batch_size:
-            yield collate(batch)
+            inputs, targets = collate(batch)
+            yield inputs, targets, list(batch_sources)
             batch = []
+            batch_sources = []
 
 
 def sft_data_generator(dataset, batch_size, device="cuda"):
@@ -106,7 +118,7 @@ def sft_data_generator(dataset, batch_size, device="cuda"):
                 yield dataset[i]
             print(f"Warning: Rank {ddp_rank} will loop again on leantree ({len(dataset)=}).", flush=True)
 
-    for inputs, targets in rl_data_generator(stream_triples(), batch_size, device):
+    for inputs, targets, _sources in rl_data_generator(stream_triples(), batch_size, device):
         yield inputs, targets, progress["approx"], progress["last_step"]
 
 

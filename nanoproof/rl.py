@@ -234,14 +234,16 @@ def train_generator():
             except StopIteration:
                 mathlib_iter = iter(mathlib_train)
                 state, tactic, proof_depth = next(mathlib_iter)
+            source = "sft"
         else:
             state, tactic, value_target = replay_buffer.sample_transition()
             proof_depth = -value_target
             # Only run augmentations on replay buffer data - Mathlib data is already augmented.
             if args.augment_data:
                 state, tactic = augment(state, tactic)
+            source = "rl"
 
-        yield state, tactic, proof_depth
+        yield state, tactic, proof_depth, source
 
 
 train_loader = rl_data_generator(train_generator(), batch_size=args.device_batch_size)
@@ -354,6 +356,7 @@ while True:
         rl_monitor.record_phase_event("eval", "end")
         flush()
 
+    experience: CollectedExperience | None = None
     if step % args.collect_every == 0:
         # Collect proofs (rank 0 only, worker ranks serve inference)
         timer.start("collect")
@@ -383,7 +386,8 @@ while True:
 
         if master_process:
             rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
-            experience.save(collection_dir(output_dir, step))
+        # experience.save() is deferred until after the train phase so
+        # train_subsample.jsonl lands in the same collection_<step>/ dir.
 
     if step % args.save_every == 0 and step > 0 and master_process:
         checkpoint_meta = {
@@ -420,9 +424,12 @@ while True:
     for _ in range(args.num_updates_per_step):
         num_tokens = torch.tensor(0, device=device)
         for micro_step in range(grad_accum_steps):
-            train_inputs, train_targets = next(train_loader)
+            train_inputs, train_targets, batch_sources = next(train_loader)
             per_token_loss = model(train_inputs, train_targets, loss_reduction='none')  # (B*T,)
             per_token_loss = per_token_loss.view(train_inputs.shape)  # (B, T)
+
+            if master_process and experience is not None:
+                experience.record_train_samples(train_inputs, train_targets, per_token_loss, batch_sources)
 
             is_value_sample = (train_inputs == value_delim_tok).any(dim=1)  # (B,)
             sample_weights = torch.where(is_value_sample, args.value_weight, 1.0)  # (B,)
@@ -465,5 +472,8 @@ while True:
         **{f"time/{k}": v for k, v in timer.get_times().items()},
         **rl_monitor.lean_server_metrics(),
     })
+
+    if master_process and experience is not None:
+        experience.save(collection_dir(output_dir, step))
 
     step += 1

@@ -1282,3 +1282,62 @@ body {
   text-transform: none;
   letter-spacing: 0;
 }
+
+/* Training samples */
+.train-samples-list {
+  flex: 1;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  overflow-y: auto;
+}
+
+.train-sample {
+  display: flex;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: var(--font-xs);
+  align-items: flex-start;
+}
+
+.train-sample:last-child {
+  border-bottom: none;
+}
+
+.train-sample-kind {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: 600;
+  font-size: 0.85em;
+  min-width: 28px;
+  text-align: center;
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+}
+
+.train-sample-kind-sft {
+  background: rgba(139, 148, 158, 0.25);
+  color: var(--text-secondary);
+}
+
+.train-sample-kind-rl {
+  background: rgba(163, 113, 247, 0.25);
+  color: var(--accent-purple);
+}
+
+.train-sample-tokens {
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+
+.train-token {
+  padding: 1px 0;
+  border-radius: 2px;
+}
