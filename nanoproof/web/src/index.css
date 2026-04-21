@@ -986,6 +986,18 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   margin-bottom: 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.data-sidebar-totals {
+  font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: var(--font-xs);
+  color: var(--text-muted);
+  text-transform: none;
+  letter-spacing: 0;
 }
 
 .data-step-list {
@@ -1006,6 +1018,27 @@ body {
   font-family: 'SF Mono', 'Consolas', monospace;
   font-size: var(--font-xs);
   cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.data-step-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.data-step-counts {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  font-size: 0.9em;
+}
+
+.data-step-btn.active .data-step-counts {
+  color: rgba(0, 0, 0, 0.55);
 }
 
 .data-step-btn:hover {
@@ -1093,6 +1126,7 @@ body {
 .proof-meta {
   color: var(--text-muted);
   flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .proof-detail-tabs {
@@ -1126,8 +1160,7 @@ body {
 }
 
 .tree-view {
-  max-height: 60vh;
-  overflow: auto;
+  overflow-x: auto;
   background: var(--bg-primary);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -1141,12 +1174,34 @@ body {
   gap: 6px;
   align-items: baseline;
   padding: 2px 0;
-  cursor: default;
+  cursor: pointer;
   white-space: nowrap;
+  overflow: hidden;
 }
 
 .tree-row:hover {
   background: var(--bg-tertiary);
+}
+
+.tree-row.wrapped {
+  white-space: normal;
+  align-items: flex-start;
+  overflow: visible;
+}
+
+.tree-row.wrapped .tree-action,
+.tree-row.wrapped .tree-state {
+  max-width: none;
+  overflow: visible;
+  text-overflow: unset;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tree-depth {
+  color: var(--text-muted);
+  font-size: 0.85em;
+  flex-shrink: 0;
 }
 
 .tree-toggle {
@@ -1213,12 +1268,17 @@ body {
 }
 
 .transitions-list {
-  max-height: 60vh;
-  overflow: auto;
   background: var(--bg-primary);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 8px;
   font-family: 'SF Mono', 'Consolas', monospace;
   font-size: var(--font-xs);
+}
+
+.modal-sublabel {
+  color: var(--text-muted);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
 }

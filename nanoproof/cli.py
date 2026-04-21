@@ -544,6 +544,50 @@ def _serve_jsonl_slice(path: str | None, args, key: str) -> Response:
     return jsonify({key: items, "total": total})
 
 
+def _tree_depth_and_size(node: dict | None) -> tuple[int, int]:
+    """Return (depth, size) for a serialized search tree. Empty/None -> (0, 0)."""
+    if not node:
+        return 0, 0
+    size = 1
+    max_child_depth = 0
+    children = node.get("children") or {}
+    for child in children.values():
+        d, s = _tree_depth_and_size(child)
+        size += s
+        if d > max_child_depth:
+            max_child_depth = d
+    return max_child_depth + 1, size
+
+
+_collection_stats_cache: dict[str, tuple[float, dict]] = {}
+
+
+def _collection_stats(path: str | None) -> dict:
+    """Count proofs and transitions in a ``collected.jsonl`` file (mtime-cached)."""
+    if not path or not os.path.exists(path):
+        return {"num_proofs": 0, "num_transitions": 0}
+    mtime = os.path.getmtime(path)
+    cached = _collection_stats_cache.get(path)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    num_proofs = 0
+    num_transitions = 0
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            num_proofs += 1
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            num_transitions += len(obj.get("transitions", []))
+    stats = {"num_proofs": num_proofs, "num_transitions": num_transitions}
+    _collection_stats_cache[path] = (mtime, stats)
+    return stats
+
+
 def _serve_collected_summary(path: str | None) -> Response:
     """Return lightweight proof summaries from a ``collected.jsonl`` file.
 
@@ -553,19 +597,32 @@ def _serve_collected_summary(path: str | None) -> Response:
     if not path or not os.path.exists(path):
         return jsonify({"error": "Not found"}), 404
     proofs: list[dict] = []
+    for_totals_transitions = 0
     with open(path, "r") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             obj = json.loads(line)
+            full_depth, full_size = _tree_depth_and_size(obj.get("full_tree"))
+            simp_depth, simp_size = _tree_depth_and_size(obj.get("simplified_tree"))
+            num_trans = len(obj.get("transitions", []))
+            for_totals_transitions += num_trans
             proofs.append({
                 "name": obj.get("name"),
                 "theorem": obj.get("theorem"),
                 "num_iterations": obj.get("num_iterations", 0),
-                "num_transitions": len(obj.get("transitions", [])),
+                "num_transitions": num_trans,
+                "full_tree_depth": full_depth,
+                "full_tree_size": full_size,
+                "simplified_tree_depth": simp_depth,
+                "simplified_tree_size": simp_size,
             })
-    return jsonify({"proofs": proofs, "total": len(proofs)})
+    return jsonify({
+        "proofs": proofs,
+        "total": len(proofs),
+        "total_transitions": for_totals_transitions,
+    })
 
 
 def _serve_collected_entry(path: str | None, index: int) -> Response:
@@ -915,8 +972,27 @@ class WebMonitor:
 
         @app.route("/api/collections")
         def list_collections():
-            """List available collection steps (directories ``collection_<step:05d>``)."""
-            return jsonify({"steps": _list_phase_steps(self.output_dir, "collection_")})
+            """List available collection steps with per-step proof / transition counts."""
+            steps = _list_phase_steps(self.output_dir, "collection_")
+            entries: list[dict] = []
+            total_proofs = 0
+            total_transitions = 0
+            for s in steps:
+                path = self._phase_file(f"collection_{s:05d}", "collected.jsonl")
+                stats = _collection_stats(path)
+                entries.append({
+                    "step": s,
+                    "num_proofs": stats["num_proofs"],
+                    "num_transitions": stats["num_transitions"],
+                })
+                total_proofs += stats["num_proofs"]
+                total_transitions += stats["num_transitions"]
+            return jsonify({
+                "steps": [e["step"] for e in entries],
+                "entries": entries,
+                "total_proofs": total_proofs,
+                "total_transitions": total_transitions,
+            })
 
         @app.route("/api/evals")
         def list_evals():

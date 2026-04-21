@@ -10,6 +10,16 @@ interface ProofSummary {
   theorem: string;
   num_iterations: number;
   num_transitions: number;
+  full_tree_depth: number;
+  full_tree_size: number;
+  simplified_tree_depth: number;
+  simplified_tree_size: number;
+}
+
+interface StepEntry {
+  step: number;
+  num_proofs: number;
+  num_transitions: number;
 }
 
 interface NodeDict {
@@ -36,10 +46,10 @@ interface ProofDetail {
   transitions: [string, string, number][];
 }
 
-type DetailTab = 'simplified' | 'full' | 'transitions';
-
 export function DataPanel() {
-  const [steps, setSteps] = useState<number[]>([]);
+  const [stepEntries, setStepEntries] = useState<StepEntry[]>([]);
+  const [totalProofs, setTotalProofs] = useState(0);
+  const [totalTransitions, setTotalTransitions] = useState(0);
   const [selectedStep, setSelectedStep] = useState<number | null>(null);
   const [proofs, setProofs] = useState<ProofSummary[]>([]);
   const [tactics, setTactics] = useState<TacticEntry[]>([]);
@@ -48,7 +58,6 @@ export function DataPanel() {
   const [selectedProofIndex, setSelectedProofIndex] = useState<number | null>(null);
   const [proofDetail, setProofDetail] = useState<ProofDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [detailTab, setDetailTab] = useState<DetailTab>('simplified');
 
   useEffect(() => {
     let alive = true;
@@ -58,11 +67,14 @@ export function DataPanel() {
         if (!res.ok) return;
         const data = await res.json();
         if (!alive) return;
-        const newSteps: number[] = data.steps || [];
-        setSteps(newSteps);
+        const entries: StepEntry[] = data.entries || [];
+        setStepEntries(entries);
+        setTotalProofs(data.total_proofs ?? 0);
+        setTotalTransitions(data.total_transitions ?? 0);
         setSelectedStep((prev) => {
-          if (prev !== null && newSteps.includes(prev)) return prev;
-          return newSteps.length > 0 ? newSteps[newSteps.length - 1] : null;
+          const stepNums = entries.map((e) => e.step);
+          if (prev !== null && stepNums.includes(prev)) return prev;
+          return stepNums.length > 0 ? stepNums[stepNums.length - 1] : null;
         });
       } catch {
         // ignore
@@ -152,24 +164,34 @@ export function DataPanel() {
     };
   }, [selectedStep, selectedProofIndex]);
 
-  const sortedSteps = [...steps].sort((a, b) => b - a);
+  const sortedEntries = [...stepEntries].sort((a, b) => b.step - a.step);
   const selectedProof = selectedProofIndex !== null ? proofs[selectedProofIndex] : null;
 
   return (
     <div className="data-panel">
       <div className="data-sidebar">
-        <div className="data-sidebar-title">Collections</div>
-        {sortedSteps.length === 0 ? (
+        <div className="data-sidebar-title">
+          <span>Collections</span>
+          <span className="data-sidebar-totals">
+            {totalProofs} proofs · {totalTransitions} trans.
+          </span>
+        </div>
+        {sortedEntries.length === 0 ? (
           <div className="data-empty">No collection steps yet</div>
         ) : (
           <div className="data-step-list">
-            {sortedSteps.map((s) => (
+            {sortedEntries.map((e) => (
               <button
-                key={s}
-                className={`data-step-btn ${s === selectedStep ? 'active' : ''}`}
-                onClick={() => setSelectedStep(s)}
+                key={e.step}
+                className={`data-step-btn ${e.step === selectedStep ? 'active' : ''}`}
+                onClick={() => setSelectedStep(e.step)}
               >
-                step {s.toString().padStart(5, '0')}
+                <span className="data-step-name">
+                  step {e.step.toString().padStart(5, '0')}
+                </span>
+                <span className="data-step-counts">
+                  {e.num_proofs}p · {e.num_transitions}t
+                </span>
               </button>
             ))}
           </div>
@@ -198,14 +220,13 @@ export function DataPanel() {
                     <div
                       key={i}
                       className="proof-item clickable"
-                      onClick={() => {
-                        setSelectedProofIndex(i);
-                        setDetailTab('simplified');
-                      }}
+                      onClick={() => setSelectedProofIndex(i)}
                     >
                       <span className="proof-name">{p.name ?? `proof #${i}`}</span>
                       <span className="proof-meta">
-                        {p.num_transitions} transitions · {p.num_iterations} iters
+                        {p.num_transitions} trans · {p.num_iterations} iters ·
+                        {' '}full d{p.full_tree_depth}/s{p.full_tree_size} ·
+                        {' '}simp d{p.simplified_tree_depth}/s{p.simplified_tree_size}
                       </span>
                     </div>
                   ))
@@ -262,34 +283,36 @@ export function DataPanel() {
               <div className="modal-code state">{proofDetail.theorem}</div>
             </div>
 
-            <div className="proof-detail-tabs">
-              <button
-                className={detailTab === 'simplified' ? 'active' : ''}
-                onClick={() => setDetailTab('simplified')}
-              >
+            <div className="modal-section">
+              <div className="modal-label">
                 Simplified tree
-              </button>
-              <button
-                className={detailTab === 'full' ? 'active' : ''}
-                onClick={() => setDetailTab('full')}
-              >
-                Full tree
-              </button>
-              <button
-                className={detailTab === 'transitions' ? 'active' : ''}
-                onClick={() => setDetailTab('transitions')}
-              >
-                Transitions ({proofDetail.transitions.length})
-              </button>
+                {selectedProof && (
+                  <span className="modal-sublabel">
+                    {' '}(depth {selectedProof.simplified_tree_depth},
+                    size {selectedProof.simplified_tree_size})
+                  </span>
+                )}
+              </div>
+              <TreeView node={proofDetail.simplified_tree} />
             </div>
 
-            {detailTab === 'simplified' && (
-              <TreeView node={proofDetail.simplified_tree} />
-            )}
-            {detailTab === 'full' && (
+            <div className="modal-section">
+              <div className="modal-label">
+                Full tree
+                {selectedProof && (
+                  <span className="modal-sublabel">
+                    {' '}(depth {selectedProof.full_tree_depth},
+                    size {selectedProof.full_tree_size})
+                  </span>
+                )}
+              </div>
               <TreeView node={proofDetail.full_tree} />
-            )}
-            {detailTab === 'transitions' && (
+            </div>
+
+            <div className="modal-section">
+              <div className="modal-label">
+                Transitions ({proofDetail.transitions.length})
+              </div>
               <div className="transitions-list">
                 {proofDetail.transitions.length === 0 ? (
                   <div className="replay-empty">No transitions</div>
@@ -305,7 +328,7 @@ export function DataPanel() {
                   ))
                 )}
               </div>
-            )}
+            </div>
           </>
         )}
       </Modal>
@@ -328,19 +351,33 @@ function TreeNode({ node, depth }: { node: NodeDict; depth: number }) {
   const children = node.children ? Object.entries(node.children) : [];
   const hasChildren = children.length > 0;
   const [expanded, setExpanded] = useState(depth < 6);
+  const [wrapped, setWrapped] = useState(false);
 
   const kind = node.to_play === 1 ? 'OR' : 'AND';
   const stateStr = node.state.length > 0 ? node.state.join(' │ ') : '∅';
   const solvedChildren = children.filter(([, c]) => c.is_solved);
   const solvedActionSet = new Set(solvedChildren.map(([a]) => a));
 
+  const toggleExpand = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (hasChildren) setExpanded(!expanded);
+  };
+
   return (
     <div className="tree-node">
-      <div className="tree-row" onClick={() => hasChildren && setExpanded(!expanded)}>
-        <span className="tree-toggle">
+      <div
+        className={`tree-row ${wrapped ? 'wrapped' : ''}`}
+        onClick={() => setWrapped(!wrapped)}
+      >
+        <span
+          className="tree-toggle"
+          onClick={toggleExpand}
+          role="button"
+        >
           {hasChildren ? (expanded ? '▾' : '▸') : ' '}
         </span>
         <span className={`tree-kind tree-kind-${kind.toLowerCase()}`}>{kind}</span>
+        <span className="tree-depth">d{depth}</span>
         {node.is_solved && <span className="tree-solved">✓</span>}
         {node.value_target !== null && (
           <span className="tree-value">v={node.value_target.toFixed(2)}</span>
@@ -349,8 +386,7 @@ function TreeNode({ node, depth }: { node: NodeDict; depth: number }) {
           <span className="tree-action">{String(node.action)}</span>
         )}
         <span className="tree-state" title={stateStr}>
-          {stateStr.slice(0, 160)}
-          {stateStr.length > 160 ? '…' : ''}
+          {stateStr}
         </span>
       </div>
       {expanded && hasChildren && (
