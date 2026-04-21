@@ -4,7 +4,7 @@ import { StatsPanel } from './components/StatsPanel'
 import { ProverGrid } from './components/ProverGrid'
 import { GPUPanel } from './components/GPUPanel'
 import { LogViewer } from './components/LogViewer'
-import { ReplayBufferPanel } from './components/ReplayBufferPanel'
+import { DataPanel } from './components/DataPanel'
 import { LeanServerPanel } from './components/LeanServerPanel'
 import { ProfilerPanel } from './components/ProfilerPanel'
 
@@ -17,7 +17,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [selectedActor, setSelectedActor] = useState<string | null>(null);
-  const [tab, setTab] = useState<'monitor' | 'profiler'>('monitor');
+  const [tab, setTab] = useState<'monitor' | 'profiler' | 'data'>('monitor');
 
   // Default to profiler tab in standalone mode
   useEffect(() => {
@@ -129,6 +129,8 @@ function App() {
           )}
           <button className={`tab-btn ${tab === 'profiler' ? 'active' : ''}`}
                   onClick={() => setTab('profiler')}>Profiler</button>
+          <button className={`tab-btn ${tab === 'data' ? 'active' : ''}`}
+                  onClick={() => setTab('data')}>Data</button>
         </div>
         {tab === 'monitor' && (
           <>
@@ -180,12 +182,7 @@ function App() {
             <GPUPanel gpus={state.gpus} />
           </div>
 
-          {/* Row 3: Data */}
-          <div className="row">
-            <ReplayBufferPanel />
-          </div>
-
-          {/* Row 4: Logs */}
+          {/* Row 3: Logs */}
           <div className="row row-logs">
             <LogViewer
               logs={logs}
@@ -199,6 +196,10 @@ function App() {
 
       {tab === 'profiler' && (
         <ProfilerPanel mode={state.mode} />
+      )}
+
+      {tab === 'data' && (
+        <DataPanel />
       )}
     </div>
   );

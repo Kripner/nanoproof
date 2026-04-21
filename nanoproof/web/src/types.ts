@@ -73,18 +73,6 @@ export interface MonitorState {
   lean_servers: LeanServerStatus[];
 }
 
-export interface ReplayBufferFile {
-  name: string;
-  size: number;
-  step: number;
-}
-
-export interface Transition {
-  0: string;  // state
-  1: string;  // tactic
-  2: number;  // value
-}
-
 export interface TacticEntry {
   status: 'success' | 'error' | 'cycle';
   state: string;

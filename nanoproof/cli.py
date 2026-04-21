@@ -39,7 +39,6 @@ from nanoproof.common import TimelineEvent
 
 _log_lock = threading.Lock()
 _log_file: TextIO | None = None
-_tactics_file: TextIO | None = None
 _errors_file: TextIO | None = None
 _is_master_process: bool = True  # Default to True for non-DDP usage
 _ddp_rank: int = 0  # DDP rank for logging
@@ -50,9 +49,12 @@ _ddp_rank: int = 0  # DDP rank for logging
 _error_dedup: dict[tuple[str, str], tuple[float, int]] = {}
 _error_dedup_window_seconds: float = 60.0
 
-# In-memory tactics buffer for distributed mode (provers collect and report)
-_tactics_buffer: deque = deque(maxlen=1000)
-_tactics_buffer_lock = threading.Lock()
+# In-memory buffer for tactics generated during the current phase (collect or
+# eval). log_tactic appends here from inside parallel MCTS expansion; the RL
+# loop swaps and flushes this list to disk once per phase via
+# reset_generated_buffer() / flush_generated(). list.append is atomic under
+# the GIL, so no lock is needed on the hot path.
+_generated_buffer: list[dict] = []
 
 # In-memory log buffers for web streaming
 _log_buffers: dict[str, deque] = {}
@@ -94,28 +96,30 @@ def configure_logging(output_dir: str | None):
     """
     Configure logging to write to files in the output directory.
 
+    Opens per-rank log and errors files under ``<output_dir>/logging/``. The
+    rank is read from the module-level ``_ddp_rank`` set by
+    :func:`set_ddp_info`, so call it first.
+
     Args:
         output_dir: Directory where log files will be written.
                    If None, logging goes to console only.
     """
-    global _log_file, _tactics_file, _errors_file
+    global _log_file, _errors_file
 
     with _log_lock:
         # Close any existing files
         if _log_file is not None:
             _log_file.close()
             _log_file = None
-        if _tactics_file is not None:
-            _tactics_file.close()
-            _tactics_file = None
         if _errors_file is not None:
             _errors_file.close()
             _errors_file = None
 
         if output_dir is not None:
-            _log_file = open(os.path.join(output_dir, "logs.txt"), "a")
-            _tactics_file = open(os.path.join(output_dir, "tactics.txt"), "a")
-            _errors_file = open(os.path.join(output_dir, "errors.jsonl"), "a")
+            logging_dir = os.path.join(output_dir, "logging")
+            os.makedirs(logging_dir, exist_ok=True)
+            _log_file = open(os.path.join(logging_dir, f"rank{_ddp_rank}.log"), "a")
+            _errors_file = open(os.path.join(logging_dir, f"rank{_ddp_rank}_errors.jsonl"), "a")
 
 
 def log(msg: str, component: str | None = None, actor_id: int | None = None):
@@ -225,41 +229,48 @@ def log_actionable_error(component: str, error: str, **extra):
 
 
 def log_tactic(state: str, tactic: str, status: str):
-    """Log a generated tactic to the tactics file and in-memory buffer.
-    
+    """Record a generated tactic in the in-memory per-phase buffer.
+
+    Called from inside parallel MCTS expansion. Relies on ``list.append``
+    being atomic under the GIL so the hot path does not take a lock.
+    The buffer is drained to disk once per phase by
+    :func:`reset_generated_buffer` / :func:`flush_generated`.
+
     Args:
         state: The proof state (goal)
         tactic: The tactic that was attempted
         status: One of "success", "error", or "cycle"
     """
-    state_oneline = state.replace("\n", "\\n")
-    
-    with _log_lock:
-        if _tactics_file is not None:
-            _tactics_file.write(f"{status}\t{state_oneline}\t{tactic}\n")
-            _tactics_file.flush()
-    
-    # Also add to in-memory buffer (for distributed mode collection)
-    with _tactics_buffer_lock:
-        _tactics_buffer.append({
-            "status": status,
-            "state": state_oneline,
-            "tactic": tactic,
-        })
+    _generated_buffer.append({
+        "status": status,
+        "state": state.replace("\n", "\\n"),
+        "tactic": tactic,
+    })
+
+
+def reset_generated_buffer() -> list[dict]:
+    """Atomically swap the generated-tactics buffer for a fresh list.
+
+    Returns the drained list so the caller can flush it to disk.
+    """
+    global _generated_buffer
+    old = _generated_buffer
+    _generated_buffer = []
+    return old
+
+
+def flush_generated(path: str, tactics: list[dict]) -> None:
+    """Write a list of tactic dicts to ``path`` as JSONL in one bulk write."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        for t in tactics:
+            f.write(json.dumps(t) + "\n")
 
 
 def get_and_clear_tactics_buffer() -> list[dict]:
-    """Get all tactics from the buffer and clear it.
-    
-    Used by prover servers to collect tactics and report them to the coordinator.
-    
-    Returns:
-        List of {"status": str, "state": str, "tactic": str} dicts.
-    """
-    with _tactics_buffer_lock:
-        tactics = list(_tactics_buffer)
-        _tactics_buffer.clear()
-        return tactics
+    """Drain the generated-tactics buffer. Used by distributed prover servers
+    to ship tactics back to the coordinator."""
+    return reset_generated_buffer()
 
 
 # -----------------------------------------------------------------------------
@@ -517,6 +528,51 @@ def _gzip_json(payload: dict) -> Response:
     )
 
 
+def _list_phase_steps(output_dir: str | None, prefix: str) -> list[int]:
+    """Scan ``output_dir`` for subdirs named ``<prefix><step>`` and return sorted steps."""
+    if not output_dir or not os.path.isdir(output_dir):
+        return []
+    steps: list[int] = []
+    for name in os.listdir(output_dir):
+        if not name.startswith(prefix):
+            continue
+        try:
+            steps.append(int(name[len(prefix):]))
+        except ValueError:
+            continue
+    steps.sort()
+    return steps
+
+
+def _serve_jsonl_slice(path: str | None, args, key: str) -> Response:
+    """Return a slice of a JSONL file as ``{key: [...], total: int}``.
+
+    Query params: ``offset`` (default 0), ``limit`` (default 200, 0 = all).
+    404 if the file is missing (expected for steps that were skipped).
+    """
+    if not path or not os.path.exists(path):
+        return jsonify({"error": "Not found"}), 404
+    try:
+        offset = max(0, int(args.get("offset", "0")))
+    except ValueError:
+        offset = 0
+    try:
+        limit = int(args.get("limit", "200"))
+    except ValueError:
+        limit = 200
+    items: list[dict] = []
+    total = 0
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if offset <= total and (limit == 0 or len(items) < limit):
+                items.append(json.loads(line))
+            total += 1
+    return jsonify({key: items, "total": total})
+
+
 # -----------------------------------------------------------------------------
 # Web Monitor
 # -----------------------------------------------------------------------------
@@ -543,12 +599,6 @@ class WebMonitor:
         self.step: int = 0
         self.replay_buffer_size: int = 0
         self.replay_buffer_base_size: int = 0  # Size at start of collection
-
-        # Live transitions (for displaying during collection)
-        self.live_transitions: deque = deque(maxlen=500)  # Increased from 200
-        
-        # Live tactics (for displaying in distributed mode)
-        self.live_tactics: deque = deque(maxlen=200)
 
         # Collection stats
         self.collection = CollectionStats(num_actors=num_actors)
@@ -852,90 +902,53 @@ class WebMonitor:
             
             return Response(generate(), mimetype="text/event-stream")
 
-        @app.route("/api/replay_buffers")
-        def list_replay_buffers():
-            """List available replay buffer files."""
-            with self._lock:
-                output_dir = self.output_dir
-            if not output_dir or not os.path.exists(output_dir):
-                return jsonify({"files": []})
-            
-            files = []
-            for f in sorted(os.listdir(output_dir)):
-                if f.startswith("replay_buffer_") and f.endswith(".jsonl"):
-                    filepath = os.path.join(output_dir, f)
-                    files.append({
-                        "name": f,
-                        "size": os.path.getsize(filepath),
-                        "step": int(f.replace("replay_buffer_", "").replace(".jsonl", "")),
-                    })
-            return jsonify({"files": files})
+        @app.route("/api/collections")
+        def list_collections():
+            """List available collection steps (directories ``collection_<step:05d>``)."""
+            return jsonify({"steps": _list_phase_steps(self.output_dir, "collection_")})
 
-        @app.route("/api/replay_buffers/<filename>")
-        def get_replay_buffer(filename: str):
-            """Get contents of a specific replay buffer file."""
+        @app.route("/api/evals")
+        def list_evals():
+            """List available eval steps (directories under ``evals/``)."""
             with self._lock:
                 output_dir = self.output_dir
             if not output_dir:
-                return jsonify({"error": "No output directory"}), 404
-            
-            filepath = os.path.join(output_dir, filename)
-            if not os.path.exists(filepath) or not filename.startswith("replay_buffer_"):
-                return jsonify({"error": "File not found"}), 404
-            
-            try:
-                with open(filepath, "r") as f:
-                    data = [json.loads(line) for line in f if line.strip()]
-                return jsonify({"transitions": data})
-            except Exception as e:
-                return jsonify({"error": str(e)}), 500
+                return jsonify({"steps": []})
+            evals_dir = os.path.join(output_dir, "evals")
+            if not os.path.isdir(evals_dir):
+                return jsonify({"steps": []})
+            steps = []
+            for name in os.listdir(evals_dir):
+                try:
+                    steps.append(int(name))
+                except ValueError:
+                    continue
+            steps.sort()
+            return jsonify({"steps": steps})
 
-        @app.route("/api/tactics")
-        def get_tactics():
-            """Get recent tactics from tactics.txt or live tactics from distributed mode."""
-            with self._lock:
-                output_dir = self.output_dir
-                # Include live tactics from distributed mode
-                live_tactics = list(self.live_tactics)
-            
-            tactics = []
-            
-            # Try to read from tactics.txt (local mode)
-            if output_dir:
-                filepath = os.path.join(output_dir, "tactics.txt")
-                if os.path.exists(filepath):
-                    try:
-                        with open(filepath, "r") as f:
-                            lines = f.readlines()
-                            # Return last 200 lines
-                            for line in lines[-200:]:
-                                parts = line.strip().split("\t")
-                                if len(parts) >= 3:
-                                    tactics.append({
-                                        "status": parts[0],
-                                        "state": parts[1],
-                                        "tactic": parts[2],
-                                    })
-                    except Exception:
-                        pass
-            
-            # Also include live tactics from distributed mode
-            for t in live_tactics:
-                tactics.append({
-                    "status": t.get("status", "error"),
-                    "state": str(t.get("state", "")),
-                    "tactic": t.get("tactic", ""),
-                })
-            
-            # Return most recent 200
-            return jsonify({"tactics": tactics[-200:]})
+        @app.route("/api/collections/<int:step>/replay_buffer")
+        def get_collection_replay_buffer(step: int):
+            return _serve_jsonl_slice(
+                self._phase_file(f"collection_{step:05d}", "replay_buffer.jsonl"),
+                request.args,
+                "transitions",
+            )
 
-        @app.route("/api/live_transitions")
-        def get_live_transitions():
-            """Get live transitions collected during the current collection phase."""
-            with self._lock:
-                transitions = list(self.live_transitions)
-            return jsonify({"transitions": transitions})
+        @app.route("/api/collections/<int:step>/generated_tactics")
+        def get_collection_tactics(step: int):
+            return _serve_jsonl_slice(
+                self._phase_file(f"collection_{step:05d}", "generated_tactics.jsonl"),
+                request.args,
+                "tactics",
+            )
+
+        @app.route("/api/evals/<int:step>/generated_tactics")
+        def get_eval_tactics(step: int):
+            return _serve_jsonl_slice(
+                self._phase_file(os.path.join("evals", f"{step:05d}"), "generated_tactics.jsonl"),
+                request.args,
+                "tactics",
+            )
 
         @app.route("/api/instrumentation")
         def get_instrumentation():
@@ -1257,6 +1270,14 @@ class WebMonitor:
         with self._lock:
             self.replay_buffer_size = size
 
+    def _phase_file(self, subdir: str, filename: str) -> str | None:
+        """Resolve a file path under ``output_dir/<subdir>/<filename>``."""
+        with self._lock:
+            output_dir = self.output_dir
+        if not output_dir:
+            return None
+        return os.path.join(output_dir, subdir, filename)
+
     def set_output_dir(self, output_dir: str):
         with self._lock:
             self.output_dir = output_dir
@@ -1273,8 +1294,6 @@ class WebMonitor:
             self.collection.target_samples = target_samples
             self.collection.num_actors = num_actors
             self.replay_buffer_base_size = self.replay_buffer_size
-            self.live_transitions.clear()
-            self.live_tactics.clear()
 
     def record_proof_attempt(self, successful: bool, transitions: int = 0):
         with self._lock:
@@ -1284,24 +1303,9 @@ class WebMonitor:
                 self.collection.samples_collected += transitions
 
     def record_transitions(self, transitions: list):
-        """Record live transitions during collection."""
+        """Update samples_collected count for the progress bar."""
         with self._lock:
-            for t in transitions:
-                self.live_transitions.append(t)
-            # Also update samples_collected count for the progress bar
             self.collection.samples_collected += len(transitions)
-
-    def clear_live_transitions(self):
-        """Clear live transitions (called when collection ends)."""
-        with self._lock:
-            self.live_transitions.clear()
-            self.live_tactics.clear()
-
-    def record_tactics(self, tactics: list):
-        """Record tactics from distributed provers."""
-        with self._lock:
-            for t in tactics:
-                self.live_tactics.append(t)
 
     def record_expansion(self):
         with self._lock:
@@ -1505,7 +1509,8 @@ def create_monitor(num_actors: int = 0, enabled: bool = True, port: int = 5050) 
 def run_standalone(run_dir: str, port: int = 5050):
     """Launch the web monitor in standalone mode on a finished run directory.
 
-    Only the Profiler tab is shown (no live monitor data).
+    The Profiler and Data tabs both read from disk, so they work identically
+    against a finished run. The Main tab degrades gracefully to empty stats.
     """
     if not os.path.isdir(run_dir):
         print(f"Error: {run_dir} is not a directory")
@@ -1516,7 +1521,7 @@ def run_standalone(run_dir: str, port: int = 5050):
     monitor.output_dir = run_dir
     set_monitor(monitor)
 
-    print(f"Serving profiler for: {run_dir}")
+    print(f"Serving: {run_dir}")
     # Block forever (the Flask server runs in a daemon thread)
     try:
         threading.Event().wait()

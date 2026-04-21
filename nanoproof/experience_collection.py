@@ -85,17 +85,22 @@ class ReplayBuffer:
                 assert value_target is not None, f"None value_target in transition: context={context}, tactic={tactic}"
             self.local_buffer.extend(transitions)
 
-    def synchronize(self):
+    def synchronize(self) -> list[tuple[str, str, float]]:
         """Merge local_buffer into buffer and broadcast to all DDP ranks.
 
         Only rank 0 collects transitions (into local_buffer). This method
         moves them into the shared buffer and broadcasts the result so all
         ranks can sample from it during training.
+
+        Returns the list of transitions that were drained from local_buffer
+        so rank 0 can persist them to disk as the step's delta (other ranks
+        get [] since only rank 0 collects).
         """
         ddp, _, _, _ = get_dist_info()
 
         # Move local_buffer → buffer (only rank 0 has data, others are empty)
-        self.buffer.extend(self.local_buffer)
+        drained = self.local_buffer
+        self.buffer.extend(drained)
         self.local_buffer = []
         if len(self.buffer) > self.window_size:
             self.buffer = self.buffer[-self.window_size:]
@@ -105,6 +110,8 @@ class ReplayBuffer:
             buffer_list = [self.buffer]
             dist.broadcast_object_list(buffer_list, src=0)
             self.buffer = buffer_list[0]
+
+        return drained
 
     def sample_transition(self) -> tuple[str, str, float]:
         return self.rng.choice(self.buffer)

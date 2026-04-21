@@ -187,7 +187,7 @@ def save_eval_results(checkpoint_info: CheckpointInfo, dataset_name: str, result
 
 def save_eval_results_to_run_dir(output_dir: str, step: int, dataset_name: str, results: dict):
     """Save evaluation results in the RL run's eval directory."""
-    eval_dir = os.path.join(output_dir, "evals", str(step))
+    eval_dir = os.path.join(output_dir, "evals", f"{step:05d}")
     os.makedirs(eval_dir, exist_ok=True)
     jsonl_path = os.path.join(eval_dir, f"{dataset_name}.jsonl")
     write_eval_results_jsonl(jsonl_path, results)

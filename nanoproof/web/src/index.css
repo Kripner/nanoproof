@@ -959,3 +959,105 @@ body {
 .tactic-item.clickable:hover {
   background: var(--bg-tertiary);
 }
+
+/* Data Panel */
+.data-panel {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 12px;
+  padding: 12px 24px;
+  min-height: 0;
+}
+
+.data-sidebar {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.data-sidebar-title {
+  font-size: var(--font-xs);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 8px;
+}
+
+.data-step-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.data-step-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  text-align: left;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: var(--font-xs);
+  cursor: pointer;
+}
+
+.data-step-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.data-step-btn.active {
+  background: var(--accent-purple);
+  color: var(--bg-primary);
+  border-color: var(--accent-purple);
+}
+
+.data-main {
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  gap: 12px;
+  min-height: 0;
+}
+
+.data-section {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.data-section-title {
+  font-size: var(--font-xs);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.data-section-count {
+  font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: var(--font-xs);
+  color: var(--text-muted);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.data-empty {
+  color: var(--text-muted);
+  text-align: center;
+  padding: 20px;
+  font-size: var(--font-xs);
+}
