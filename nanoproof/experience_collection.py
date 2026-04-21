@@ -52,18 +52,16 @@ def eval_dir(run_dir: str, step: int) -> str:
     return os.path.join(run_dir, "evals", f"{step:05d}")
 
 
-def load_collected_transitions(run_dir: str, up_to_step: int | None = None) -> list[tuple[str, str, float]]:
-    """Concatenate transitions from every ``collection_<s>/collected.jsonl`` in
-    ``run_dir``, preserving collection order. If ``up_to_step`` is given, only
-    shards with ``s <= up_to_step`` are included; otherwise every shard in the
-    directory contributes. Returns the raw (context, tactic, value_target)
-    tuples; callers apply any FIFO truncation or length filtering themselves.
+def load_collected_transitions(run_dir: str) -> list[tuple[str, str, float]]:
+    """Concatenate transitions from every ``collection_<s>/collected.jsonl``
+    in ``run_dir``, preserving step order across shards and file order within
+    a shard. Returns raw (context, tactic, value_target) tuples; callers apply
+    any FIFO truncation or length filtering themselves.
     """
     shards: list[tuple[int, str]] = []
     for shard_path in glob.glob(os.path.join(run_dir, f"{_COLLECTION_PREFIX}*", COLLECTED_FILENAME)):
         shard_step = int(os.path.basename(os.path.dirname(shard_path))[len(_COLLECTION_PREFIX):])
-        if up_to_step is None or shard_step <= up_to_step:
-            shards.append((shard_step, shard_path))
+        shards.append((shard_step, shard_path))
     shards.sort()
     transitions: list[tuple[str, str, float]] = []
     for _, shard_path in shards:
