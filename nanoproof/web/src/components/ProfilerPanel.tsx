@@ -142,6 +142,65 @@ function computeBounds(data: ProfilerData | null): { min: number; max: number } 
   return { min: data.minTime, max: data.maxTime };
 }
 
+// Return a view of `data` with events from interrupted proof attempts
+// removed. An event belongs to the attempt whose outcome comes next in
+// time; if that outcome is "interrupted", the event is dropped. The
+// interrupted outcome markers themselves are dropped too. Events with no
+// following outcome (in-flight attempt) are kept — we don't know yet
+// whether they'll be productive.
+function filterProductive(data: ProfilerData): ProfilerData {
+  const filteredActors: Record<string, ActorData> = {};
+  for (const aid of data.actorIds) {
+    filteredActors[aid] = filterActorProductive(data.actors[aid]);
+  }
+  const { min, max } = scanBounds(filteredActors, data.phases);
+  return {
+    actorIds: data.actorIds,
+    actors: filteredActors,
+    phases: data.phases,
+    minTime: min,
+    maxTime: max,
+    cursor: data.cursor,
+  };
+}
+
+function filterActorProductive(actor: ActorData): ActorData {
+  const hasInterrupted = actor.outcomes.some(o => o.kind === 'interrupted');
+  if (!hasInterrupted) return actor;
+  const sorted = [...actor.outcomes].sort((a, b) => a.t - b.t);
+  // Find the outcome that an event with end time `e` belongs to: the
+  // smallest outcome with outcome.t >= e. Events in a single attempt all
+  // have end <= outcome.t, so this is a simple binary search.
+  const times = new Float64Array(sorted.length);
+  for (let i = 0; i < sorted.length; i++) times[i] = sorted[i].t;
+  const eventIsInterrupted = (end: number): boolean => {
+    let lo = 0, hi = times.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (times[mid] < end) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo === times.length) return false; // in-flight attempt
+    return sorted[lo].kind === 'interrupted';
+  };
+  return {
+    llm: filterPairs(actor.llm, eventIsInterrupted),
+    lean: filterPairs(actor.lean, eventIsInterrupted),
+    outcomes: actor.outcomes.filter(o => o.kind !== 'interrupted'),
+  };
+}
+
+function filterPairs(arr: Float64Array, drop: (end: number) => boolean): Float64Array {
+  const kept: number[] = [];
+  for (let i = 0; i < arr.length; i += 2) {
+    if (drop(arr[i + 1])) continue;
+    kept.push(arr[i], arr[i + 1]);
+  }
+  const out = new Float64Array(kept.length);
+  for (let i = 0; i < kept.length; i++) out[i] = kept[i];
+  return out;
+}
+
 function scanBounds(actors: Record<string, ActorData>, phases: WirePhase[]) {
   let min = Infinity, max = -Infinity;
   for (const aid in actors) {
@@ -180,6 +239,7 @@ export function ProfilerPanel({ mode }: Props) {
   const [viewStart, setViewStart] = useState(0);
   const [viewEnd, setViewEnd] = useState(60);
   const [autoFollow, setAutoFollow] = useState(true);
+  const [productiveOnly, setProductiveOnly] = useState(false);
 
   const dragRef = useRef<{ startX: number; startY: number; viewStart: number; viewEnd: number; scrollTop: number } | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -250,27 +310,37 @@ export function ProfilerPanel({ mode }: Props) {
     return () => { cancelled = true; };
   }, [mode]);
 
+  // When "productive only" is on, hide events that belong to interrupted
+  // proof attempts (abort from stop flag or pause for training). The
+  // attempt a given event belongs to is inferred from the actor's outcome
+  // timestamps — all events between outcome[i-1] and outcome[i] are from
+  // attempt i — so we don't need per-event grouping on the wire.
+  const view = useMemo(
+    () => (productiveOnly && data ? filterProductive(data) : data),
+    [data, productiveOnly],
+  );
+
   // Auto-follow: keep view fitted to data bounds when new data arrives.
   useEffect(() => {
-    const bounds = computeBounds(data);
+    const bounds = computeBounds(view);
     if (!bounds || !autoFollow) return;
     const range = bounds.max - bounds.min;
     const padding = Math.max(range * 0.05, 5);
     setViewStart(bounds.min);
     setViewEnd(bounds.max + padding);
-  }, [data, autoFollow]);
+  }, [view, autoFollow]);
 
   const dataOrigin = useMemo(() => {
-    const bounds = computeBounds(data);
+    const bounds = computeBounds(view);
     return bounds ? bounds.min : 0;
-  }, [data]);
+  }, [view]);
 
   // Pair phase start/end events for background overlays. Only fully-paired
   // phases get a rect; an in-flight phase (start with no matching end yet)
   // is intentionally left un-shaded.
   const phasePairs = useMemo(
-    () => pairPhases(data?.phases ?? []),
-    [data?.phases],
+    () => pairPhases(view?.phases ?? []),
+    [view?.phases],
   );
 
   // Ticking clock for the "now" cursor line in live mode. 500ms cadence —
@@ -299,14 +369,14 @@ export function ProfilerPanel({ mode }: Props) {
     observerRef.current = observer;
   }, []);
 
-  const actorIds = data?.actorIds ?? [];
+  const actorIds = view?.actorIds ?? [];
   const numRows = actorIds.length;
   const bodyHeight = Math.max(numRows * (ROW_HEIGHT + ROW_GAP) + 8, 120);
 
   // Render header canvas.
   useEffect(() => {
     const canvas = headerCanvasRef.current;
-    if (!canvas || viewportWidth === 0 || !data) return;
+    if (!canvas || viewportWidth === 0 || !view) return;
     const dpr = window.devicePixelRatio || 1;
     const width = viewportWidth;
     const height = HEADER_HEIGHT;
@@ -354,9 +424,9 @@ export function ProfilerPanel({ mode }: Props) {
     // attenuated when many lines of the same color are packed into the
     // viewport, so a dense run of phase transitions doesn't paint over the
     // whole chart.
-    const phaseAlpha = computePhaseAlphas(data.phases, viewStart, viewEnd, timelineWidth);
+    const phaseAlpha = computePhaseAlphas(view.phases, viewStart, viewEnd, timelineWidth);
     ctx.lineWidth = 1;
-    for (const ph of data.phases) {
+    for (const ph of view.phases) {
       if (ph.action !== 'start') continue;
       const x = timeToX(ph.t);
       if (x < LABEL_WIDTH || x > width) continue;
@@ -378,12 +448,12 @@ export function ProfilerPanel({ mode }: Props) {
     ctx.moveTo(LABEL_WIDTH, 0);
     ctx.lineTo(LABEL_WIDTH, height);
     ctx.stroke();
-  }, [data, viewStart, viewEnd, dataOrigin, viewportWidth, phasePairs]);
+  }, [view, viewStart, viewEnd, dataOrigin, viewportWidth, phasePairs]);
 
   // Render body canvas (rows + phase bars on top).
   useEffect(() => {
     const canvas = bodyCanvasRef.current;
-    if (!canvas || viewportWidth === 0 || !data) return;
+    if (!canvas || viewportWidth === 0 || !view) return;
 
     const dpr = window.devicePixelRatio || 1;
     const width = viewportWidth;
@@ -439,13 +509,13 @@ export function ProfilerPanel({ mode }: Props) {
 
       colLlm.fill(0);
       colLean.fill(0);
-      accumulateColumns(data.actors[aid].llm, viewStart, viewEnd, timeToX, LABEL_WIDTH, timelineWidth, colLlm);
-      accumulateColumns(data.actors[aid].lean, viewStart, viewEnd, timeToX, LABEL_WIDTH, timelineWidth, colLean);
+      accumulateColumns(view.actors[aid].llm, viewStart, viewEnd, timeToX, LABEL_WIDTH, timelineWidth, colLlm);
+      accumulateColumns(view.actors[aid].lean, viewStart, viewEnd, timeToX, LABEL_WIDTH, timelineWidth, colLean);
       paintDominant(ctx, colLlm, colLean, COLORS.llm, COLORS.lean, LABEL_WIDTH, y + 1, ROW_HEIGHT - 2);
 
       // Per-attempt outcome markers drawn on top of the bars, so the edge
       // of the last activity block and its outcome read as one unit.
-      paintOutcomes(ctx, data.actors[aid].outcomes, viewStart, viewEnd,
+      paintOutcomes(ctx, view.actors[aid].outcomes, viewStart, viewEnd,
                     timeToX, LABEL_WIDTH, width, y, ROW_HEIGHT);
     }
 
@@ -460,10 +530,10 @@ export function ProfilerPanel({ mode }: Props) {
     // overlapping dashed end at the same x coordinate. Alpha is attenuated
     // when many same-color lines pack into the viewport so they don't fully
     // overpower the underlying actor bars.
-    const bodyPhaseAlpha = computePhaseAlphas(data.phases, viewStart, viewEnd, timelineWidth);
+    const bodyPhaseAlpha = computePhaseAlphas(view.phases, viewStart, viewEnd, timelineWidth);
     ctx.lineWidth = 1;
     ctx.setLineDash([3, 3]);
-    for (const ph of data.phases) {
+    for (const ph of view.phases) {
       if (ph.action !== 'end') continue;
       const x = timeToX(ph.t);
       if (x < LABEL_WIDTH || x > width) continue;
@@ -475,7 +545,7 @@ export function ProfilerPanel({ mode }: Props) {
       ctx.stroke();
     }
     ctx.setLineDash([]);
-    for (const ph of data.phases) {
+    for (const ph of view.phases) {
       if (ph.action !== 'start') continue;
       const x = timeToX(ph.t);
       if (x < LABEL_WIDTH || x > width) continue;
@@ -487,7 +557,7 @@ export function ProfilerPanel({ mode }: Props) {
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
-  }, [data, viewStart, viewEnd, dataOrigin, viewportWidth, bodyHeight, actorIds, phasePairs]);
+  }, [view, viewStart, viewEnd, dataOrigin, viewportWidth, bodyHeight, actorIds, phasePairs]);
 
   // Wheel handler: ctrl/meta + wheel = zoom; plain wheel = native vertical scroll.
   // Attached natively to get passive:false so preventDefault works for ctrl-wheel.
@@ -515,7 +585,7 @@ export function ProfilerPanel({ mode }: Props) {
     };
     el.addEventListener('wheel', handler, { passive: false });
     return () => el.removeEventListener('wheel', handler);
-  }, [viewStart, viewEnd, data]);
+  }, [viewStart, viewEnd, view]);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     setAutoFollow(false);
@@ -568,7 +638,7 @@ export function ProfilerPanel({ mode }: Props) {
     );
   }
 
-  if (!data) {
+  if (!data || !view) {
     return (
       <div className="main" style={{ padding: 16 }}>
         <div className="card" style={{ padding: 24, textAlign: 'center' }}>
@@ -578,7 +648,7 @@ export function ProfilerPanel({ mode }: Props) {
     );
   }
 
-  const hasData = actorIds.length > 0 || data.phases.length > 0;
+  const hasData = actorIds.length > 0 || view.phases.length > 0;
 
   return (
     <div className="main" style={{ padding: 16 }}>
@@ -595,6 +665,14 @@ export function ProfilerPanel({ mode }: Props) {
           <div style={{ marginLeft: 'auto', fontSize: 'var(--font-xs)', color: 'var(--text-secondary)' }}>
             Ctrl+wheel to zoom, drag to pan
           </div>
+          <button
+            className={`tab-btn ${productiveOnly ? 'active' : ''}`}
+            onClick={() => setProductiveOnly(!productiveOnly)}
+            style={{ fontSize: 'var(--font-xs)' }}
+            title="Hide activity from interrupted proof attempts (stop flag, training pause)"
+          >
+            Productive only
+          </button>
           <button
             className={`tab-btn ${autoFollow ? 'active' : ''}`}
             onClick={() => setAutoFollow(!autoFollow)}

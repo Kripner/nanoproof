@@ -43,6 +43,44 @@ import json as json_mod
 from urllib.request import urlopen
 
 
+def _flush_timeline(
+    actor_id: int,
+    timeline: TimelineRecorder,
+    *,
+    game: "Game | None",
+    error: str | None,
+    interrupted: bool,
+) -> None:
+    """Ship an actor's accumulated timeline events and a single outcome marker
+    to the monitor, then reset the recorder.
+
+    Called once per theorem iteration regardless of ``skip_report``: aborted
+    attempts still did real LLM/Lean work and are worth showing in the
+    profiler. The outcome kind classifies what the "productive only" toggle
+    should hide.
+    """
+    monitor = get_monitor()
+    if monitor is None:
+        timeline.events.clear()
+        return
+    if timeline.events:
+        monitor.record_timeline_events(actor_id, timeline.events)
+    kind = _outcome_kind(game=game, error=error, interrupted=interrupted)
+    if kind is not None:
+        monitor.record_outcome(actor_id, kind)
+    timeline.events.clear()
+
+
+def _outcome_kind(*, game, error, interrupted) -> str | None:
+    if interrupted:
+        return "interrupted"
+    if game is not None and game.root is not None:
+        return "solved" if game.root.is_solved else "gave_up"
+    if error is not None:
+        return "gave_up"
+    return None
+
+
 # -----------------------------------------------------------------------------
 # Prover
 # -----------------------------------------------------------------------------
@@ -401,6 +439,7 @@ class ProverWorker:
                 game = None
                 error = None
                 skip_report = False
+                interrupted = False
                 timeline = TimelineRecorder() if record_timeline else None
                 for attempt in range(max_retries):
                     try:
@@ -425,19 +464,14 @@ class ProverWorker:
                             traceback.print_exc()
                     except MCTSAbortedError:
                         skip_report = True
-                        if timeline is not None:
-                            monitor = get_monitor()
-                            if monitor is not None:
-                                if timeline.events:
-                                    monitor.record_timeline_events(actor_id, timeline.events)
-                                monitor.record_outcome(actor_id, "interrupted")
-                            timeline.events.clear()
+                        interrupted = True
                         break
                     except Exception as e:
                         if "Model paused for training" in str(e):
                             set_thread_state(actor_id, "idle")
                             time.sleep(0.5)
                             skip_report = True
+                            interrupted = True
                             break
                         error = str(e)
                         consecutive_errors += 1
@@ -463,20 +497,14 @@ class ProverWorker:
 
                     on_result(theorem_id, theorem, game, error)
 
-                    # Flush timeline events and the per-attempt outcome to
-                    # the monitor so the profiler can render a marker on the
-                    # actor's row.
-                    if timeline is not None:
-                        monitor = get_monitor()
-                        if monitor is not None:
-                            if timeline.events:
-                                monitor.record_timeline_events(actor_id, timeline.events)
-                            if game is not None and game.root is not None:
-                                outcome_kind = "solved" if game.root.is_solved else "gave_up"
-                                monitor.record_outcome(actor_id, outcome_kind)
-                            elif error is not None:
-                                monitor.record_outcome(actor_id, "gave_up")
-                        timeline.events.clear()
+                # Always flush timeline, even when skip_report is true. Without
+                # this, events from proofs aborted mid-flight (stop flag, pause
+                # for training) are silently dropped, which made collect look
+                # much sparser than eval in the profiler even though the
+                # actors were equally busy.
+                if timeline is not None:
+                    _flush_timeline(actor_id, timeline, game=game, error=error,
+                                    interrupted=interrupted)
 
                 if consecutive_errors >= max_consecutive_errors:
                     log(f"[Actor {actor_id}] CRASHED after {consecutive_errors} consecutive errors, exiting (will be restarted by pool)", component="Prover")
