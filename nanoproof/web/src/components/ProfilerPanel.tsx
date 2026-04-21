@@ -135,6 +135,7 @@ export function ProfilerPanel({ mode }: Props) {
   const [data, setData] = useState<ProfilerData | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const chartRef = useRef<HTMLDivElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const observerRef = useRef<ResizeObserver | null>(null);
   const headerCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -228,10 +229,10 @@ export function ProfilerPanel({ mode }: Props) {
     return bounds ? bounds.min : 0;
   }, [data]);
 
-  // Track container width via a callback ref so we set up the observer as
-  // soon as the scroll container mounts (it's rendered conditionally).
-  const attachScrollRef = useCallback((el: HTMLDivElement | null) => {
-    scrollRef.current = el;
+  // Track chart-wrapper width via a callback ref so we set up the observer
+  // as soon as the wrapper mounts (it's rendered conditionally on hasData).
+  const attachChartRef = useCallback((el: HTMLDivElement | null) => {
+    chartRef.current = el;
     if (observerRef.current) {
       observerRef.current.disconnect();
       observerRef.current = null;
@@ -421,8 +422,11 @@ export function ProfilerPanel({ mode }: Props) {
 
   // Wheel handler: ctrl/meta + wheel = zoom; plain wheel = native vertical scroll.
   // Attached natively to get passive:false so preventDefault works for ctrl-wheel.
+  // Listen on the chart wrapper (parent of header + scroll body) so the
+  // listener exists for the whole chart area, not just the inner scroll
+  // container.
   useEffect(() => {
-    const el = scrollRef.current;
+    const el = chartRef.current;
     if (!el) return;
     const handler = (e: WheelEvent) => {
       if (!(e.ctrlKey || e.metaKey)) return;
@@ -442,7 +446,7 @@ export function ProfilerPanel({ mode }: Props) {
     };
     el.addEventListener('wheel', handler, { passive: false });
     return () => el.removeEventListener('wheel', handler);
-  }, [viewStart, viewEnd]);
+  }, [viewStart, viewEnd, data]);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     setAutoFollow(false);
@@ -537,23 +541,25 @@ export function ProfilerPanel({ mode }: Props) {
           </div>
         ) : (
           <div
-            ref={attachScrollRef}
-            style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden', position: 'relative' }}
+            ref={attachChartRef}
+            style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
           >
-            <div style={{
-              position: 'sticky',
-              top: 0,
-              zIndex: 2,
-              background: COLORS.background,
-              borderBottom: `1px solid ${COLORS.grid}`,
-            }}>
+            {/* Header lives outside the scroll container so it's always visible
+                without depending on position:sticky (which silently no-ops
+                when the scroll container's height isn't actually constrained). */}
+            <div style={{ flexShrink: 0, borderBottom: `1px solid ${COLORS.grid}`, background: COLORS.background }}>
               <canvas ref={headerCanvasRef} style={{ display: 'block' }} />
             </div>
-            <canvas
-              ref={bodyCanvasRef}
-              onMouseDown={handleMouseDown}
-              style={{ display: 'block', cursor: dragging ? 'grabbing' : 'grab' }}
-            />
+            <div
+              ref={scrollRef}
+              style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}
+            >
+              <canvas
+                ref={bodyCanvasRef}
+                onMouseDown={handleMouseDown}
+                style={{ display: 'block', cursor: dragging ? 'grabbing' : 'grab' }}
+              />
+            </div>
           </div>
         )}
       </div>
