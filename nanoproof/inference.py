@@ -307,14 +307,25 @@ class BlockingTacticModel:
         """Number of generation samples if pending items were batched now."""
         return len(self._pending) * self.inner_model.num_samples
 
+    def _trigger_reason(self) -> str | None:
+        """Return a human-readable trigger reason if a batch should start, else None.
+
+        The reason string is logged at debug level by ``_process_batch_locked``
+        so ``--verbose`` runs show which limit fired for each batch.
+        """
+        if not self._pending or self._first_request_time is None or self._paused:
+            return None
+        elapsed = time.time() - self._first_request_time
+        gen_samples = self._pending_gen_samples()
+        if self.max_gen_samples is not None and gen_samples >= self.max_gen_samples:
+            return f"samples ({gen_samples} >= {self.max_gen_samples})"
+        if elapsed >= self.timeout_seconds:
+            return f"time ({elapsed * 1000:.0f} ms >= {self.timeout_seconds * 1000:.0f} ms)"
+        return None
+
     def _should_process(self) -> bool:
         """Check if batch should be processed based on timeout or sample count."""
-        if not self._pending or self._first_request_time is None or self._paused:
-            return False
-        elapsed = time.time() - self._first_request_time
-        if self.max_gen_samples is None:
-            return elapsed >= self.timeout_seconds
-        return elapsed >= self.timeout_seconds or self._pending_gen_samples() >= self.max_gen_samples
+        return self._trigger_reason() is not None
 
     def shutdown(self):
         """Signal shutdown to unblock all waiting threads."""
@@ -481,22 +492,33 @@ class BlockingTacticModel:
         if not self._pending or self._batch_in_progress:
             return
 
+        trigger_reason = self._trigger_reason() or "forced"
+
         self._batch_in_progress = True
         self._total_batches += 1
         batch_num = self._total_batches
         inference_start_time = time.time()
 
         # Take items up to max_gen_samples limit to avoid OOM
+        pending_len_at_start = len(self._pending)
         if self.max_gen_samples is not None:
             max_items = self.max_gen_samples // self.inner_model.num_samples
         else:
             max_items = len(self._pending)
         batch = self._pending[:max(1, max_items)]
+        size_after_samples_cap = len(batch)
+        samples_cap_cut_info: str | None = None
+        if size_after_samples_cap < pending_len_at_start:
+            samples_cap_cut_info = (
+                f"samples_cap ({pending_len_at_start} -> {size_after_samples_cap} items, "
+                f"limit {self.max_gen_samples} samples)"
+            )
 
         # Further limit by prompt tokens: the KV cache is allocated as
         # N_rows * max_prompt_len, so one long prompt inflates memory for ALL
         # rows. We track count * running_max to match the actual allocation.
         # Token counts are pre-computed by the tokenizer on queue entry.
+        token_cut_info: str | None = None
         if self.max_batch_prompt_tokens is not None and len(batch) > 1:
             GEN_OVERHEAD = 64
             max_tokens = 0
@@ -515,6 +537,8 @@ class BlockingTacticModel:
                 if effective > token_limit:
                     cut = max(1, i)
                     break
+            if cut < len(batch):
+                token_cut_info = f"tokens ({len(batch)} -> {cut} items, limit {token_limit} tokens)"
             batch = batch[:cut]
 
         remaining = self._pending[len(batch):]
@@ -536,7 +560,16 @@ class BlockingTacticModel:
             max_tc = max((item[1] for item in batch), default=0)
             sum_tc = sum(item[1] for item in batch)
             allocated_gb = torch.cuda.memory_allocated() / 1024**3
-            logger.debug(f"Batch #{batch_num}: {len(batch)} states, {gen_samples} gen samples, max_tokens={max_tc}, sum_tokens={sum_tc}, {allocated_gb:.1f} GiB allocated")
+            limit_parts = [f"trigger={trigger_reason}"]
+            if samples_cap_cut_info is not None:
+                limit_parts.append(samples_cap_cut_info)
+            if token_cut_info is not None:
+                limit_parts.append(token_cut_info)
+            logger.debug(
+                f"Batch #{batch_num}: {len(batch)} states, {gen_samples} gen samples, "
+                f"max_tokens={max_tc}, sum_tokens={sum_tc}, {allocated_gb:.1f} GiB allocated "
+                f"[{'; '.join(limit_parts)}]"
+            )
             t0 = time.time()
             results = self.inner_model.sample_tactic_from_str_batch(state_strs)
             logger.debug(f"Batch #{batch_num}: completed in {time.time() - t0:.3f}s")
