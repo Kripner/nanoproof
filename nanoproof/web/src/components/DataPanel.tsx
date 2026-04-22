@@ -53,6 +53,13 @@ interface TrainSample {
   losses: (number | null)[];
 }
 
+interface CollectedTransition {
+  proof: string | null;
+  state: string;
+  tactic: string;
+  value: number;
+}
+
 const TRAIN_LOSS_CLAMP = 5.0;
 
 export function DataPanel() {
@@ -65,6 +72,8 @@ export function DataPanel() {
   const [tacticsTotal, setTacticsTotal] = useState(0);
   const [trainSamples, setTrainSamples] = useState<TrainSample[]>([]);
   const [trainSamplesTotal, setTrainSamplesTotal] = useState(0);
+  const [collectedTransitions, setCollectedTransitions] = useState<CollectedTransition[]>([]);
+  const [collectedTransitionsTotal, setCollectedTransitionsTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [selectedProofIndex, setSelectedProofIndex] = useState<number | null>(null);
   const [proofDetail, setProofDetail] = useState<ProofDetail | null>(null);
@@ -106,14 +115,17 @@ export function DataPanel() {
       setTacticsTotal(0);
       setTrainSamples([]);
       setTrainSamplesTotal(0);
+      setCollectedTransitions([]);
+      setCollectedTransitionsTotal(0);
       return;
     }
     let alive = true;
     setLoading(true);
     const load = async () => {
       try {
-        const [proofsRes, tacticsRes, trainRes] = await Promise.all([
+        const [proofsRes, transitionsRes, tacticsRes, trainRes] = await Promise.all([
           fetch(`/api/collections/${selectedStep}/collected`),
+          fetch(`/api/collections/${selectedStep}/transitions?limit=${PAGE_SIZE}`),
           fetch(`/api/collections/${selectedStep}/generated_tactics?limit=${PAGE_SIZE}`),
           fetch(`/api/collections/${selectedStep}/train_data?limit=${PAGE_SIZE}`),
         ]);
@@ -123,6 +135,14 @@ export function DataPanel() {
           setProofs(d.proofs || []);
         } else {
           setProofs([]);
+        }
+        if (transitionsRes.ok) {
+          const d = await transitionsRes.json();
+          setCollectedTransitions(d.transitions || []);
+          setCollectedTransitionsTotal(d.total ?? (d.transitions?.length || 0));
+        } else {
+          setCollectedTransitions([]);
+          setCollectedTransitionsTotal(0);
         }
         if (tacticsRes.ok) {
           const d = await tacticsRes.json();
@@ -147,6 +167,8 @@ export function DataPanel() {
         setTacticsTotal(0);
         setTrainSamples([]);
         setTrainSamplesTotal(0);
+        setCollectedTransitions([]);
+        setCollectedTransitionsTotal(0);
       } finally {
         if (alive) setLoading(false);
       }
@@ -227,6 +249,35 @@ export function DataPanel() {
           <div className="data-empty">Select a collection step</div>
         ) : (
           <>
+            <div className="data-section">
+              <div className="data-section-title">
+                Collected transitions
+                <span className="data-section-count">
+                  {loading ? '…' : `${collectedTransitions.length} / ${collectedTransitionsTotal}`}
+                </span>
+              </div>
+              <div className="collected-transitions-list">
+                {loading ? (
+                  <div className="replay-loading">Loading...</div>
+                ) : collectedTransitions.length === 0 ? (
+                  <div className="replay-empty">No transitions at this step</div>
+                ) : (
+                  collectedTransitions.map((t, i) => (
+                    <div key={i} className="transition-item">
+                      <div className="transition-state">{t.state}</div>
+                      <div className="transition-tactic">
+                        <span className="transition-value">{t.value.toFixed(2)}</span>
+                        → {t.tactic}
+                        {t.proof && (
+                          <span className="transition-proof"> ({t.proof})</span>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
             <div className="data-section">
               <div className="data-section-title">
                 Collected proofs

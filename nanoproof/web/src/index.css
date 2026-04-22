@@ -591,7 +591,8 @@ body {
 }
 
 .replay-list,
-.tactics-list {
+.tactics-list,
+.collected-transitions-list {
   flex: 1;
   background: var(--bg-primary);
   border: 1px solid var(--border);
@@ -600,6 +601,10 @@ body {
   overflow-y: auto;
   font-family: 'SF Mono', 'Consolas', monospace;
   font-size: var(--font-xs);
+}
+
+.transition-proof {
+  color: var(--text-muted);
 }
 
 .replay-loading,
@@ -1054,7 +1059,7 @@ body {
 
 .data-main {
   display: grid;
-  grid-template-rows: 1fr 1fr;
+  grid-template-rows: 1fr auto 1fr 1fr;
   gap: 12px;
   min-height: 0;
 }

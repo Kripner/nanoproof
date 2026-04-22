@@ -689,6 +689,42 @@ def _serve_collected_entry(path: str | None, index: int) -> Response:
     return jsonify({"error": "Index out of range"}), 404
 
 
+def _serve_collected_transitions(path: str | None, args) -> Response:
+    """Flatten transitions across all proofs in a ``collected.jsonl`` file.
+
+    Query params: ``offset`` (default 0), ``limit`` (default 200, 0 = all).
+    """
+    if not path or not os.path.exists(path):
+        return jsonify({"error": "Not found"}), 404
+    try:
+        offset = max(0, int(args.get("offset", "0")))
+    except ValueError:
+        offset = 0
+    try:
+        limit = int(args.get("limit", "200"))
+    except ValueError:
+        limit = 200
+    items: list[dict] = []
+    total = 0
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            proof_name = obj.get("name")
+            for t in obj.get("transitions", []):
+                if offset <= total and (limit == 0 or len(items) < limit):
+                    items.append({
+                        "proof": proof_name,
+                        "state": t[0],
+                        "tactic": t[1],
+                        "value": t[2],
+                    })
+                total += 1
+    return jsonify({"transitions": items, "total": total})
+
+
 # -----------------------------------------------------------------------------
 # Web Monitor
 # -----------------------------------------------------------------------------
@@ -1174,6 +1210,13 @@ class WebMonitor:
             return _serve_collected_entry(
                 self._phase_file(f"collection_{step:05d}", "collected.jsonl"),
                 index,
+            )
+
+        @app.route("/api/collections/<int:step>/transitions")
+        def get_collection_transitions(step: int):
+            return _serve_collected_transitions(
+                self._phase_file(f"collection_{step:05d}", "collected.jsonl"),
+                request.args,
             )
 
         @app.route("/api/collections/<int:step>/generated_tactics")
