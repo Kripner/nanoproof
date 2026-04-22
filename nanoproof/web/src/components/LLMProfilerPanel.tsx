@@ -135,6 +135,18 @@ function firstVisiblePair(arr: Float64Array, t: number): number {
   return lo;
 }
 
+function dedupePhases(phases: WirePhase[]): WirePhase[] {
+  const seen = new Set<string>();
+  const out: WirePhase[] = [];
+  for (const ph of phases) {
+    const key = `${ph.name}|${ph.action}|${ph.t}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(ph);
+  }
+  return out;
+}
+
 function scanBounds(ranks: Record<string, RankData>, phases: WirePhase[]) {
   let min = Infinity, max = -Infinity, maxN = 0;
   for (const rid in ranks) {
@@ -227,7 +239,13 @@ export function LLMProfilerPanel({ mode }: Props) {
             };
           }
         }
-        const mergedPhases = isDelta && prev ? prev.phases.concat(wire.phases) : wire.phases;
+        // Server re-sends the full phase list on every poll (phases are
+        // low-volume and live in a different seq-space from LLM events).
+        // Dedupe on (name, action, t) so pairPhases + paintPhaseOverlays
+        // don't stack identical rectangles and compound the alpha.
+        const mergedPhases = dedupePhases(
+          isDelta && prev ? prev.phases.concat(wire.phases) : wire.phases,
+        );
         const { min, max, maxN } = scanBounds(mergedRanks, mergedPhases);
         const rankIds = Object.keys(mergedRanks).sort((a, b) => Number(a) - Number(b));
         return {
