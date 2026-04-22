@@ -16,6 +16,7 @@ const NAV_STEP = 1800;
 const COLORS = {
   inferencing: '#58a6ff',
   waiting: '#484f58',
+  inferenceStart: '#f85149',
   queueLine: '#f0c64a',
   phase_collect: '#3fb950',
   phase_eval: '#d29922',
@@ -426,6 +427,12 @@ export function LLMProfilerPanel({ mode }: Props) {
                      LABEL_WIDTH, timelineWidth, stateBarY, STATE_BAR_HEIGHT,
                      COLORS.inferencing);
 
+      // Red dots at every inference start, so batch boundaries are visible
+      // even when consecutive batches paint a continuous blue bar.
+      paintIntervalStarts(ctx, rank.inferencing, viewStart, viewEnd, timeToX,
+                          LABEL_WIDTH, width, stateBarY, STATE_BAR_HEIGHT,
+                          COLORS.inferenceStart);
+
       // Queue-depth line plot (step function — samples are every ~200ms and
       // depth is a discrete integer count).
       paintQueuePlot(ctx, rank.sampleT, rank.sampleN, viewStart, viewEnd,
@@ -601,6 +608,7 @@ export function LLMProfilerPanel({ mode }: Props) {
           <div className="card-title" style={{ margin: 0 }}>LLM Inference Timelines</div>
           <div style={{ display: 'flex', gap: 12, fontSize: 'var(--font-sm)', flexWrap: 'wrap' }}>
             <LegendSwatch color={COLORS.inferencing} label="Inferencing" />
+            <LegendDot color={COLORS.inferenceStart} label="Batch start" />
             <LegendSwatch color={COLORS.waiting} label="Waiting" />
             <LegendLine color={COLORS.queueLine} label={`Queue depth (max ${data.maxQueueDepth})`} />
             <LegendDash color={COLORS.phase_collect} label="collect" />
@@ -713,6 +721,38 @@ function paintIntervals(
     }
   }
   if (runStart >= 0) ctx.fillRect(leftClip + runStart, y, timelineWidth - runStart, height);
+}
+
+// Draw a small red dot at each inference interval's start time. The state
+// bar's blue paint runs edge-to-edge when consecutive batches touch, so
+// without this the viewer can't tell one batch from the next.
+function paintIntervalStarts(
+  ctx: CanvasRenderingContext2D,
+  arr: Float64Array,
+  viewStart: number,
+  viewEnd: number,
+  timeToX: (t: number) => number,
+  leftClip: number,
+  rightClip: number,
+  barY: number,
+  barHeight: number,
+  color: string,
+) {
+  const n = arr.length >> 1;
+  if (n === 0) return;
+  const startIdx = firstVisiblePair(arr, viewStart);
+  const cy = barY + barHeight / 2;
+  const radius = Math.min(barHeight / 2, 3);
+  ctx.fillStyle = color;
+  for (let i = startIdx; i < n; i++) {
+    const s = arr[i * 2];
+    if (s > viewEnd) break;
+    const x = timeToX(s);
+    if (x < leftClip - radius || x > rightClip + radius) continue;
+    ctx.beginPath();
+    ctx.arc(x, cy, radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
 }
 
 // Queue depth as a step-function polyline: each sample holds until the next.
@@ -951,6 +991,15 @@ function LegendSwatch({ color, label }: { color: string; label: string }) {
   return (
     <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
       <span style={{ width: 12, height: 12, borderRadius: 2, background: color, display: 'inline-block' }} />
+      {label}
+    </span>
+  );
+}
+
+function LegendDot({ color, label }: { color: string; label: string }) {
+  return (
+    <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+      <span style={{ width: 6, height: 6, borderRadius: '50%', background: color, display: 'inline-block' }} />
       {label}
     </span>
   );
