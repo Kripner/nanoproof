@@ -195,6 +195,15 @@ rl_monitor.set_output_dir(output_dir)
 rl_monitor.set_lean_servers(args.lean_servers)
 rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
 
+# Register per-rank inference servers so the LLM profiler tab can poll
+# their timelines. Every rank runs a Flask inference server at
+# inference_server_port + rank (see setup_distributed_inference).
+if master_process:
+    rl_monitor.set_llm_endpoints([
+        f"127.0.0.1:{args.inference_server_port + r}"
+        for r in range(ddp_world_size)
+    ])
+
 # Augmentations
 shuffle_goals_and_hypotheses = leantree.augmentations.ShuffleGoalsAndHypotheses(seed=args.seed)
 random_rename = leantree.augmentations.RandomRename(seed=args.seed)

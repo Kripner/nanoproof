@@ -19,6 +19,7 @@ import logging
 import threading
 import uuid
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Self
 
@@ -269,6 +270,17 @@ class BlockingTacticModel:
         self._first_request_time: float | None = None
         self._total_batches = 0
 
+        # LLM profiler instrumentation. Each BlockingTacticModel tracks its
+        # own timeline of inference intervals plus a periodic queue-depth
+        # sample. Rank 0's WebMonitor polls every rank's /llm_timeline
+        # endpoint to aggregate these for the frontend LLM profiler tab.
+        self._llm_events: deque[dict] = deque(maxlen=20000)
+        self._llm_samples: deque[dict] = deque(maxlen=100000)
+        self._llm_seq = 0
+        self._llm_stop = threading.Event()
+        self._llm_sampler_thread = threading.Thread(target=self._llm_sampler_loop, daemon=True)
+        self._llm_sampler_thread.start()
+
     @property
     def network(self):
         return self.inner_model.network
@@ -298,6 +310,7 @@ class BlockingTacticModel:
 
     def shutdown(self):
         """Signal shutdown to unblock all waiting threads."""
+        self._llm_stop.set()
         with self._lock:
             self._shutdown = True
             for _, _, event, slot in self._pending:
@@ -406,6 +419,46 @@ class BlockingTacticModel:
 
                 self._batch_ready.wait(timeout=0.1)
 
+    def _llm_sampler_loop(self):
+        """Background thread: sample pending-queue depth every 200ms.
+
+        Sampling cadence is a compromise: fast enough to resolve sub-second
+        queue buildup around pause/resume, slow enough that a multi-hour
+        run doesn't overflow the bounded sample deque.
+        """
+        while not self._llm_stop.wait(timeout=0.2):
+            with self._lock:
+                self._llm_seq += 1
+                self._llm_samples.append({
+                    "t": time.time(),
+                    "n": len(self._pending),
+                    "seq": self._llm_seq,
+                })
+
+    def get_llm_timeline(self, since: float = float("-inf")) -> dict:
+        """Return inference intervals + queue-depth samples with seq > since.
+
+        Thread-safe. Polled by the master rank's WebMonitor to aggregate
+        per-rank data for the LLM profiler tab.
+        """
+        events: list[dict] = []
+        samples: list[dict] = []
+        max_cursor = since if since != float("-inf") else 0.0
+        with self._lock:
+            for ev in self._llm_events:
+                if ev["seq"] <= since:
+                    continue
+                events.append({"start": ev["start"], "end": ev["end"]})
+                if ev["seq"] > max_cursor:
+                    max_cursor = ev["seq"]
+            for s in self._llm_samples:
+                if s["seq"] <= since:
+                    continue
+                samples.append({"t": s["t"], "n": s["n"]})
+                if s["seq"] > max_cursor:
+                    max_cursor = s["seq"]
+        return {"events": events, "samples": samples, "cursor": max_cursor}
+
     def _process_batch_locked(self):
         """Process pending batch. Must be called with lock held."""
         if not self._pending or self._batch_in_progress:
@@ -414,6 +467,7 @@ class BlockingTacticModel:
         self._batch_in_progress = True
         self._total_batches += 1
         batch_num = self._total_batches
+        inference_start_time = time.time()
 
         # Take items up to max_gen_samples limit to avoid OOM
         if self.max_gen_samples is not None:
@@ -487,6 +541,12 @@ class BlockingTacticModel:
         finally:
             self._lock.acquire()
             self._batch_in_progress = False
+            self._llm_seq += 1
+            self._llm_events.append({
+                "start": inference_start_time,
+                "end": time.time(),
+                "seq": self._llm_seq,
+            })
             self._batch_ready.notify_all()
 
 
@@ -672,6 +732,19 @@ def create_blocking_model_app(model: BlockingTacticModel, server_id: str = ""):
                 for r in results
             ]
         })
+
+    @app.route("/llm_timeline", methods=["GET"])
+    def llm_timeline():
+        """Inference intervals + queue-depth samples for the LLM profiler.
+
+        ``since`` is this server's monotonic seq; only items with seq > since
+        are returned. Rank 0's WebMonitor polls this per rank and aggregates.
+        """
+        try:
+            since = float(request.args.get("since", "-inf"))
+        except ValueError:
+            since = float("-inf")
+        return jsonify(model.get_llm_timeline(since))
 
     return app
 

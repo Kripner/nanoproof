@@ -7,6 +7,7 @@ import { LogViewer } from './components/LogViewer'
 import { DataPanel } from './components/DataPanel'
 import { LeanServerPanel } from './components/LeanServerPanel'
 import { ProfilerPanel } from './components/ProfilerPanel'
+import { LLMProfilerPanel } from './components/LLMProfilerPanel'
 
 const POLL_INTERVAL = 1000;
 
@@ -17,7 +18,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [selectedActor, setSelectedActor] = useState<string | null>(null);
-  const [tab, setTab] = useState<'monitor' | 'profiler' | 'data'>('monitor');
+  const [tab, setTab] = useState<'monitor' | 'profiler' | 'llm' | 'data'>('monitor');
 
   // Default to profiler tab in standalone mode
   useEffect(() => {
@@ -129,6 +130,8 @@ function App() {
           )}
           <button className={`tab-btn ${tab === 'profiler' ? 'active' : ''}`}
                   onClick={() => setTab('profiler')}>Profiler</button>
+          <button className={`tab-btn ${tab === 'llm' ? 'active' : ''}`}
+                  onClick={() => setTab('llm')}>LLM Profiler</button>
           <button className={`tab-btn ${tab === 'data' ? 'active' : ''}`}
                   onClick={() => setTab('data')}>Data</button>
         </div>
@@ -196,6 +199,10 @@ function App() {
 
       {tab === 'profiler' && (
         <ProfilerPanel mode={state.mode} />
+      )}
+
+      {tab === 'llm' && (
+        <LLMProfilerPanel mode={state.mode} />
       )}
 
       {tab === 'data' && (

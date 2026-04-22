@@ -747,6 +747,24 @@ class WebMonitor:
         self.actor_timelines: dict[int, deque] = {}  # actor_id -> deque of event dicts
         self.actor_outcomes: dict[int, deque] = {}   # actor_id -> deque of outcome dicts
         self.phase_events: list[dict] = []  # global phase start/end markers
+
+        # LLM profiler instrumentation (per GPU rank). Populated by a
+        # background thread that polls each rank's Flask inference server's
+        # /llm_timeline endpoint.
+        self.llm_endpoints: dict[int, str] = {}           # rank -> "host:port"
+        self.llm_events: dict[int, deque] = {}            # rank -> deque of {start,end,seq}
+        self.llm_samples: dict[int, deque] = {}           # rank -> deque of {t,n,seq}
+        self.llm_remote_cursor: dict[int, float] = {}     # rank -> last seq seen from that server
+        self._llm_out_seq = 0                             # outgoing monotonic seq for delta polls
+        self._llm_poll_thread: threading.Thread | None = None
+        self._llm_poll_interval = 2.0
+        # inference_timeline.jsonl — persistent log mirroring llm_events /
+        # llm_samples so the profiler tab works in standalone mode on a
+        # finished run. Each line is either a "event" (inference interval)
+        # or a "sample" (queue-depth sample). Phase events are read from
+        # the sibling timeline.jsonl so we don't duplicate them.
+        self._inference_timeline_file: TextIO | None = None
+        self._inference_file_cache: dict[str, Any] = {"mtime": None, "body": None}
         self._timeline_file: TextIO | None = None
         self.mode: str = "live"  # "live" or "standalone"
         self._max_timeline_events_per_actor = 10000
@@ -937,6 +955,76 @@ class WebMonitor:
 
         self._lean_servers_monitor_thread = threading.Thread(target=monitor_lean_servers, daemon=True)
         self._lean_servers_monitor_thread.start()
+
+    def set_llm_endpoints(self, endpoints: list[str]):
+        """Register per-rank inference server endpoints for LLM profiler.
+
+        ``endpoints[i]`` is the "host:port" for rank ``i``. Only called on
+        master; starts a background thread that polls each rank's
+        ``/llm_timeline`` and stores events + queue-depth samples for the
+        LLM profiler tab.
+        """
+        with self._lock:
+            self.llm_endpoints = {i: e for i, e in enumerate(endpoints)}
+            for i in range(len(endpoints)):
+                self.llm_events.setdefault(i, deque(maxlen=20000))
+                self.llm_samples.setdefault(i, deque(maxlen=100000))
+                self.llm_remote_cursor.setdefault(i, float("-inf"))
+        if self._llm_poll_thread is None and self.enabled:
+            self._start_llm_poll()
+
+    def _start_llm_poll(self):
+        """Start a background thread that polls every rank's /llm_timeline."""
+        def poll():
+            while not self._stop_monitors.wait(timeout=self._llm_poll_interval):
+                with self._lock:
+                    endpoints = list(self.llm_endpoints.items())
+                    cursors = dict(self.llm_remote_cursor)
+                for rank, endpoint in endpoints:
+                    try:
+                        url = f"http://{endpoint}/llm_timeline?since={cursors[rank]}"
+                        req = urllib.request.Request(url)
+                        req.add_header("Accept", "application/json")
+                        with urllib.request.urlopen(req, timeout=5.0) as resp:
+                            data = json.loads(resp.read().decode())
+                    except Exception:
+                        continue
+                    with self._lock:
+                        buf_events = self.llm_events[rank]
+                        buf_samples = self.llm_samples[rank]
+                        f = self._inference_timeline_file
+                        for ev in data.get("events", []):
+                            self._llm_out_seq += 1
+                            buf_events.append({
+                                "start": ev["start"],
+                                "end": ev["end"],
+                                "seq": self._llm_out_seq,
+                            })
+                            if f is not None:
+                                f.write(json.dumps({
+                                    "type": "event", "rank": rank,
+                                    "start": ev["start"], "end": ev["end"],
+                                }) + "\n")
+                        for s in data.get("samples", []):
+                            self._llm_out_seq += 1
+                            buf_samples.append({
+                                "t": s["t"],
+                                "n": s["n"],
+                                "seq": self._llm_out_seq,
+                            })
+                            if f is not None:
+                                f.write(json.dumps({
+                                    "type": "sample", "rank": rank,
+                                    "t": s["t"], "n": s["n"],
+                                }) + "\n")
+                        if f is not None:
+                            f.flush()
+                        cursor = data.get("cursor")
+                        if cursor is not None and cursor > self.llm_remote_cursor[rank]:
+                            self.llm_remote_cursor[rank] = cursor
+
+        self._llm_poll_thread = threading.Thread(target=poll, daemon=True)
+        self._llm_poll_thread.start()
 
     def _start_lean_monitor(self):
         """Start a background thread to monitor Lean server status."""
@@ -1140,6 +1228,175 @@ class WebMonitor:
                 mode = self.mode
             payload = _compact_instrumentation(actors_src, phases_src, outcomes_src, mode, since)
             return _gzip_json(payload)
+
+        @app.route("/api/llm_instrumentation")
+        def get_llm_instrumentation():
+            """Per-rank LLM inference timeline + pending-queue depth samples.
+
+            Query params:
+              since (float, optional): monotonic seq cursor; only items with
+                seq > since are returned. See `_llm_out_seq`.
+            """
+            try:
+                since = float(request.args.get("since", "-inf"))
+            except ValueError:
+                since = float("-inf")
+            out_ranks: dict[str, dict] = {}
+            max_cursor = since if since != float("-inf") else 0.0
+            with self._lock:
+                rank_ids = sorted(self.llm_endpoints.keys())
+                for rank in rank_ids:
+                    # Flat interleaved [s0,e0,s1,e1,...] for inference intervals,
+                    # parallel arrays for samples. Same compact shape as the
+                    # actor profiler so the frontend rendering is familiar.
+                    ev_flat: list[float] = []
+                    for ev in self.llm_events.get(rank, ()):
+                        if ev["seq"] <= since:
+                            continue
+                        ev_flat.append(ev["start"])
+                        ev_flat.append(ev["end"])
+                        if ev["seq"] > max_cursor:
+                            max_cursor = ev["seq"]
+                    sample_ts: list[float] = []
+                    sample_ns: list[int] = []
+                    for s in self.llm_samples.get(rank, ()):
+                        if s["seq"] <= since:
+                            continue
+                        sample_ts.append(s["t"])
+                        sample_ns.append(s["n"])
+                        if s["seq"] > max_cursor:
+                            max_cursor = s["seq"]
+                    out_ranks[str(rank)] = {
+                        "inferencing": ev_flat,
+                        "sample_t": sample_ts,
+                        "sample_n": sample_ns,
+                    }
+                phases_src = list(self.phase_events)
+                mode = self.mode
+            # Reuse the phase dedup logic from the actor profiler so the
+            # frontend can draw the same phase lines / overlays for context.
+            out_phases = []
+            sorted_phases = sorted(phases_src, key=lambda p: p["time"])
+            last_by_key: dict[tuple[str, str], float] = {}
+            for ph in sorted_phases:
+                t = ph["time"]
+                key = (ph["name"], ph["action"])
+                last_t = last_by_key.get(key)
+                if last_t is not None and t - last_t < _PHASE_DEDUP_WINDOW:
+                    last_by_key[key] = t
+                    continue
+                last_by_key[key] = t
+                out_phases.append({"name": ph["name"], "action": ph["action"], "t": t})
+            payload = {
+                "ranks": out_ranks,
+                "phases": out_phases,
+                "mode": mode,
+                "cursor": max_cursor,
+            }
+            return _gzip_json(payload)
+
+        @app.route("/api/llm_instrumentation/file")
+        def get_llm_instrumentation_file():
+            """Serve inference_timeline.jsonl contents for standalone mode.
+
+            Phase events are read from the sibling timeline.jsonl since phases
+            are shared between the actor and LLM profilers. Response is cached
+            by the inference file's mtime.
+            """
+            with self._lock:
+                output_dir = self.output_dir
+            if not output_dir:
+                return jsonify({"error": "No output directory"}), 404
+
+            inf_path = os.path.join(output_dir, "inference_timeline.jsonl")
+            phase_path = os.path.join(output_dir, "timeline.jsonl")
+            if not os.path.exists(inf_path):
+                return _gzip_json({"ranks": {}, "phases": [], "mode": self.mode})
+
+            try:
+                mtime = os.path.getmtime(inf_path)
+            except OSError as e:
+                return jsonify({"error": str(e)}), 500
+
+            cached_body = None
+            if self._inference_file_cache["mtime"] == mtime:
+                cached_body = self._inference_file_cache["body"]
+
+            if cached_body is None:
+                rank_events: dict[int, list[float]] = {}
+                rank_sample_t: dict[int, list[float]] = {}
+                rank_sample_n: dict[int, list[int]] = {}
+                phases: list[dict] = []
+                try:
+                    with open(inf_path, "r") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            entry = json.loads(line)
+                            rank = int(entry.get("rank", 0))
+                            t = entry.get("type")
+                            if t == "event":
+                                rank_events.setdefault(rank, []).extend(
+                                    [entry["start"], entry["end"]])
+                            elif t == "sample":
+                                rank_sample_t.setdefault(rank, []).append(entry["t"])
+                                rank_sample_n.setdefault(rank, []).append(entry["n"])
+                    if os.path.exists(phase_path):
+                        with open(phase_path, "r") as f:
+                            for line in f:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                entry = json.loads(line)
+                                if entry.get("type") == "phase":
+                                    phases.append({
+                                        "name": entry["name"],
+                                        "action": entry["action"],
+                                        "time": entry["time"],
+                                    })
+                except Exception as e:
+                    return jsonify({"error": str(e)}), 500
+
+                # Phase dedup across DDP ranks (same logic as the live endpoint).
+                out_phases: list[dict] = []
+                sorted_phases = sorted(phases, key=lambda p: p["time"])
+                last_by_key: dict[tuple[str, str], float] = {}
+                for ph in sorted_phases:
+                    pt = ph["time"]
+                    key = (ph["name"], ph["action"])
+                    last_t = last_by_key.get(key)
+                    if last_t is not None and pt - last_t < _PHASE_DEDUP_WINDOW:
+                        last_by_key[key] = pt
+                        continue
+                    last_by_key[key] = pt
+                    out_phases.append({"name": ph["name"], "action": ph["action"], "t": pt})
+
+                rank_ids = sorted(set(rank_events.keys()) | set(rank_sample_t.keys()))
+                out_ranks: dict[str, dict] = {}
+                for r in rank_ids:
+                    out_ranks[str(r)] = {
+                        "inferencing": rank_events.get(r, []),
+                        "sample_t": rank_sample_t.get(r, []),
+                        "sample_n": rank_sample_n.get(r, []),
+                    }
+                payload = {
+                    "ranks": out_ranks,
+                    "phases": out_phases,
+                    "mode": self.mode,
+                }
+                cached_body = gzip.compress(
+                    json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+                    compresslevel=6,
+                )
+                self._inference_file_cache["mtime"] = mtime
+                self._inference_file_cache["body"] = cached_body
+
+            return Response(
+                cached_body,
+                mimetype="application/json",
+                headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"},
+            )
 
         @app.route("/api/instrumentation/file")
         def get_instrumentation_file():
@@ -1460,11 +1717,15 @@ class WebMonitor:
     def set_output_dir(self, output_dir: str):
         with self._lock:
             self.output_dir = output_dir
-            # Open timeline file for append
+            # Open timeline files for append
             if self._timeline_file is not None:
                 self._timeline_file.close()
             timeline_path = os.path.join(output_dir, "timeline.jsonl")
             self._timeline_file = open(timeline_path, "a")
+            if self._inference_timeline_file is not None:
+                self._inference_timeline_file.close()
+            inference_timeline_path = os.path.join(output_dir, "inference_timeline.jsonl")
+            self._inference_timeline_file = open(inference_timeline_path, "a")
 
     def start_collection(self, target_samples: int, num_actors: int):
         with self._lock:
