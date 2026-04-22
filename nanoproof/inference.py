@@ -41,6 +41,14 @@ from nanoproof.model import Transformer
 State = list  # list[LeanProofBranch]
 
 
+class BusyError(Exception):
+    """Raised by BlockingTacticModel when a batch is in progress or the model is paused.
+
+    The Flask layer turns this into HTTP 503; the balancer uses it as a signal
+    to try the next backend instead of queueing.
+    """
+
+
 # -----------------------------------------------------------------------------
 # Tactic Models
 # -----------------------------------------------------------------------------
@@ -366,7 +374,9 @@ class BlockingTacticModel:
         Thread-safe batch tactic+value generation. All states are queued together
         and will be processed in the same or consecutive GPU batches.
 
-        Returns list of (tactics, value) tuples.
+        Returns list of (tactics, value) tuples. Raises ``BusyError`` if a batch
+        is already in progress or the model is paused; the HTTP layer translates
+        this to 503 so the balancer can route to another backend.
         """
         if not state_strs:
             return []
@@ -380,6 +390,13 @@ class BlockingTacticModel:
         with self._lock:
             if self._shutdown:
                 return [ValueOrError.from_error("Model shutdown") for _ in state_strs]
+
+            # Reject new requests while a batch is running or while paused.
+            # The balancer cycles to another backend on this signal; the
+            # pointer pattern concentrates actors on the one currently-filling
+            # GPU without a per-request timeout wait.
+            if self._batch_in_progress or self._paused:
+                raise BusyError()
 
             # Create events and slots for all states
             entries = [(s, tc, threading.Event(), []) for s, tc in zip(state_strs, token_counts)]
@@ -599,7 +616,22 @@ class RemoteTacticModel:
         return results[0]
 
     def sample_tactic_from_str_batch(self, state_strs: list[str]) -> list[ValueOrError[TacticAndValue]]:
-        """Sample tactics and predict values for multiple state strings."""
+        """Sample tactics and predict values for multiple state strings.
+
+        503 busy responses are surfaced as an error on every returned slot
+        (callers that need the busy/retry signal should use
+        ``try_sample_tactic_from_str_batch`` instead).
+        """
+        result = self.try_sample_tactic_from_str_batch(state_strs)
+        if result is None:
+            return [ValueOrError.from_error("Busy") for _ in state_strs]
+        return result
+
+    def try_sample_tactic_from_str_batch(self, state_strs: list[str]) -> list[ValueOrError[TacticAndValue]] | None:
+        """Same as ``sample_tactic_from_str_batch`` but returns ``None`` on a
+        503 busy response. Used by ``InferenceBalancer`` to advance its
+        pointer to the next backend without treating busy as an error.
+        """
         if not state_strs:
             return []
 
@@ -609,6 +641,12 @@ class RemoteTacticModel:
                 json={"states": state_strs},
                 timeout=self.timeout
             )
+            if response.status_code == 503:
+                # Server is running a batch or paused. Not a failure - the
+                # balancer expects this signal to advance its pointer.
+                with self._lock:
+                    self._consecutive_failures = 0
+                return None
             response.raise_for_status()
             data = response.json()
 
@@ -668,10 +706,20 @@ class RemoteTacticModel:
 class InferenceBalancer:
     """Load-balances inference across multiple GPU backends via HTTP.
 
-    All backends are remote inference servers accessed via RemoteTacticModel.
-    Requests are routed round-robin. Lifecycle management (pause/resume/shutdown)
-    is handled by each rank's local BlockingTacticModel directly, not by the balancer.
+    Each backend is a remote inference server (``RemoteTacticModel``) that
+    either accepts a request (queues it for the next batch) or responds
+    HTTP 503 while a batch is already running. The balancer keeps a pointer
+    into the backend list and forwards to it; on a 503 it advances to the
+    next backend, wrapping around. If every backend is busy, the balancer
+    sleeps 100 ms and retries. On a successful accept the pointer parks at
+    that backend, so subsequent callers keep filling the same GPU until it
+    flips busy - at which point the pointer naturally moves on.
+
+    Lifecycle management (pause/resume/shutdown) is handled by each rank's
+    local BlockingTacticModel directly, not by the balancer.
     """
+
+    _BUSY_SLEEP_SECONDS = 0.1
 
     def __init__(self, endpoints: list[str]):
         """
@@ -679,23 +727,32 @@ class InferenceBalancer:
             endpoints: List of "host:port" strings for inference servers (one per GPU rank).
         """
         self._backends = [RemoteTacticModel(ep) for ep in endpoints]
-        self._next_idx = 0
+        self._pointer = 0
         self._lock = threading.Lock()
 
-    def _next_backend(self):
-        with self._lock:
-            idx = self._next_idx
-            self._next_idx = (self._next_idx + 1) % len(self._backends)
-        return self._backends[idx]
-
     def sample_tactic(self, state: State) -> ValueOrError[TacticAndValue]:
-        return self._next_backend().sample_tactic(state)
+        assert len(state) == 1, \
+            f"expected single branch in state, got {len(state)}"
+        return self.sample_tactic_from_str(str(state[0].state).strip())
 
     def sample_tactic_from_str(self, state_str: str) -> ValueOrError[TacticAndValue]:
-        return self._next_backend().sample_tactic_from_str(state_str)
+        return self.sample_tactic_from_str_batch([state_str])[0]
 
     def sample_tactic_from_str_batch(self, state_strs: list[str]) -> list[ValueOrError[TacticAndValue]]:
-        return self._next_backend().sample_tactic_from_str_batch(state_strs)
+        if not state_strs:
+            return []
+        n = len(self._backends)
+        while True:
+            with self._lock:
+                start = self._pointer
+            for offset in range(n):
+                idx = (start + offset) % n
+                result = self._backends[idx].try_sample_tactic_from_str_batch(state_strs)
+                if result is not None:
+                    with self._lock:
+                        self._pointer = idx
+                    return result
+            time.sleep(self._BUSY_SLEEP_SECONDS)
 
 
 # -----------------------------------------------------------------------------
@@ -719,13 +776,17 @@ def create_blocking_model_app(model: BlockingTacticModel, server_id: str = ""):
         """Generate tactics and predict value for each state.
 
         Returns combined results with both 'tactics' and 'value' for each state.
+        Returns HTTP 503 with `{"busy": true}` if the model is currently running
+        a batch or paused; the balancer interprets this as "try the next GPU".
         """
         data = request.get_json()
         states = data.get("states", [])
         if not states:
             return jsonify({"results": []})
-        # Submit all states at once - they'll be batched together
-        results = model.sample_tactic_from_str_batch(states)
+        try:
+            results = model.sample_tactic_from_str_batch(states)
+        except BusyError:
+            return jsonify({"busy": True}), 503
         return jsonify({
             "results": [
                 {"tactics": r.value[0], "value": r.value[1]} if r.is_success() else {"error": r.error}

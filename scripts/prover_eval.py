@@ -13,6 +13,7 @@ Usage:
 import argparse
 import atexit
 import logging
+import math
 import os
 import sys
 import threading
@@ -114,7 +115,7 @@ def main():
 
     # Init compute
     device_type = autodetect_device_type()
-    ddp, ddp_rank, _, _, device = compute_init(device_type)
+    ddp, ddp_rank, _, ddp_world_size, device = compute_init(device_type)
     master_process = ddp_rank == 0
 
     # Check for existing results early (before loading model)
@@ -179,9 +180,13 @@ def main():
     balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
     if balancer:
         prover = ProverWorker(balancer, args.lean_servers)
-        max_gen_samples = args.batch_max_gen_samples or prover.num_actors * args.num_sampled_tactics
+        # Per-GPU capacity: the busy-aware balancer funnels actors onto one
+        # GPU until it flips busy, so sizing aggregate would starve the rest.
+        max_gen_samples = args.batch_max_gen_samples or math.ceil(
+            prover.num_actors * args.num_sampled_tactics / ddp_world_size
+        )
         tactic_model.max_gen_samples = max_gen_samples
-        print0(f"Batch max gen samples: {max_gen_samples} ({prover.num_actors} actors * {args.num_sampled_tactics} samples)")
+        print0(f"Batch max gen samples: {max_gen_samples} ({prover.num_actors} actors * {args.num_sampled_tactics} samples / {ddp_world_size} ranks)")
     else:
         prover = None
 

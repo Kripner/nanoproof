@@ -1,4 +1,5 @@
 import atexit
+import math
 import os
 import logging
 import sys
@@ -164,9 +165,15 @@ theorems_sampler = TheoremsSampler(seed=rank_seed, datasets=args.datasets, lean_
 balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
 if balancer:
     prover = ProverWorker(balancer, args.lean_servers)
-    max_gen_samples = args.batch_max_gen_samples or prover.num_actors * args.num_sampled_tactics
+    # With the busy-aware balancer, actors concentrate on one GPU at a time;
+    # that GPU flips busy once its queue hits max_gen_samples, then the
+    # pointer moves on. To actually spread load across GPUs we size this
+    # per-GPU: ceil(total_actors * samples / world_size).
+    max_gen_samples = args.batch_max_gen_samples or math.ceil(
+        prover.num_actors * args.num_sampled_tactics / ddp_world_size
+    )
     tactic_model.max_gen_samples = max_gen_samples
-    log0(f"Batch max gen samples: {max_gen_samples} ({prover.num_actors} actors * {args.num_sampled_tactics} samples)", component="Config")
+    log0(f"Batch max gen samples: {max_gen_samples} ({prover.num_actors} actors * {args.num_sampled_tactics} samples / {ddp_world_size} ranks)", component="Config")
 else:
     prover = None
 
