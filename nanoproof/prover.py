@@ -589,7 +589,6 @@ class ProverWorker:
                             log_actionable_error("Prover", str(e),
                                                  actor=actor_id, lean=f"{lean_address}:{lean_port}",
                                                  retries_exhausted=True)
-                            traceback.print_exc()
                     except MCTSAbortedError:
                         skip_report = True
                         interrupted = True

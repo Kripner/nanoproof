@@ -6,10 +6,11 @@ import math
 import uuid
 
 from leantree.repl_adapter.server import LeanProofBranch, LeanClient
-from leantree.repl_adapter.interaction import LeanProcess
+from leantree.repl_adapter.interaction import LeanProcess, LeanProcessException
+from leantree.utils import RemoteException
 
 from nanoproof.common import pretty_print_tree, ValueOrError, theorem_to_example, Player, TimelineRecorder
-from nanoproof.cli import get_monitor, log_tactic
+from nanoproof.cli import get_monitor, log_tactic, log
 from nanoproof.inference import TacticModel, BlockingTacticModel
 
 logger = logging.getLogger(__name__)
@@ -505,11 +506,16 @@ def expand_node(
         assert len(node.state) == 1
         branch = node.state[0]
         # TODO (!): investigate how often this times out; log timeout errors differently
-        if timeline:
-            with timeline.record("lean"):
+        try:
+            if timeline:
+                with timeline.record("lean"):
+                    new_branches = branch.try_apply_tactic(action)
+            else:
                 new_branches = branch.try_apply_tactic(action)
-        else:
-            new_branches = branch.try_apply_tactic(action)
+        except (RemoteException, LeanProcessException, ConnectionError, TimeoutError) as e:
+            short_err = str(e).split('\n', 1)[0]
+            log(f"Lean crash on tactic {action!r}: {short_err}", component="Search")
+            raise
         if not new_branches.is_success():
             # Invalid action encountered.
             log_tactic(state_str, action, status="error")
