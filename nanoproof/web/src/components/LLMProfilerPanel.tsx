@@ -194,6 +194,7 @@ export function LLMProfilerPanel({ mode }: Props) {
   const dragRef = useRef<{ startX: number; startY: number; viewStart: number; viewEnd: number; scrollTop: number } | null>(null);
   const [dragging, setDragging] = useState(false);
   const [hoverX, setHoverX] = useState<number | null>(null);
+  const [hoverPlot, setHoverPlot] = useState<{ depth: number; lineY: number } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -543,22 +544,69 @@ export function LLMProfilerPanel({ mode }: Props) {
 
   const goEnd = useCallback(() => setAutoFollow(true), []);
 
-  const handleHeaderMouseMove = useCallback((e: React.MouseEvent) => {
+  const handleChartMouseMove = useCallback((e: React.MouseEvent) => {
+    if (dragging) return;
     const chart = chartRef.current;
-    if (!chart) return;
+    if (!chart || !data) return;
     const rect = chart.getBoundingClientRect();
     const x = e.clientX - rect.left;
     if (x < LABEL_WIDTH || x > rect.width) {
       setHoverX(null);
+      setHoverPlot(null);
       return;
     }
     setHoverX(x);
-  }, []);
 
-  const handleHeaderMouseLeave = useCallback(() => setHoverX(null), []);
+    const bodyCanvas = bodyCanvasRef.current;
+    if (!bodyCanvas) {
+      setHoverPlot(null);
+      return;
+    }
+    const bodyRect = bodyCanvas.getBoundingClientRect();
+    if (e.clientY < bodyRect.top || e.clientY > bodyRect.bottom) {
+      setHoverPlot(null);
+      return;
+    }
+    const yInBody = e.clientY - bodyRect.top;
+    const rowPitch = ROW_HEIGHT + ROW_GAP;
+    const rankIdx = Math.floor(yInBody / rowPitch);
+    if (rankIdx < 0 || rankIdx >= data.rankIds.length) {
+      setHoverPlot(null);
+      return;
+    }
+    const yInRow = yInBody - rankIdx * rowPitch;
+    const plotTopLocal = 2;
+    const plotHeightLocal = ROW_HEIGHT - STATE_BAR_HEIGHT - 4;
+    if (yInRow < plotTopLocal || yInRow > plotTopLocal + plotHeightLocal) {
+      setHoverPlot(null);
+      return;
+    }
+    const timelineWidth = rect.width - LABEL_WIDTH;
+    const duration = viewEnd - viewStart;
+    const t = viewStart + ((x - LABEL_WIDTH) / timelineWidth) * duration;
+    const rid = data.rankIds[rankIdx];
+    const rank = data.ranks[rid];
+    const idx = findSampleAt(rank.sampleT, t);
+    if (idx < 0) {
+      setHoverPlot(null);
+      return;
+    }
+    const depth = rank.sampleN[idx];
+    const absPlotTop = rankIdx * rowPitch + plotTopLocal;
+    const maxQ = Math.max(data.maxQueueDepth, 1);
+    const lineY = absPlotTop + plotHeightLocal - (depth / maxQ) * plotHeightLocal;
+    setHoverPlot({ depth, lineY });
+  }, [data, viewStart, viewEnd, dragging]);
+
+  const handleChartMouseLeave = useCallback(() => {
+    setHoverX(null);
+    setHoverPlot(null);
+  }, []);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     setAutoFollow(false);
+    setHoverX(null);
+    setHoverPlot(null);
     dragRef.current = {
       startX: e.clientX,
       startY: e.clientY,
@@ -658,23 +706,26 @@ export function LLMProfilerPanel({ mode }: Props) {
         ) : (
           <div
             ref={attachChartRef}
+            onMouseMove={handleChartMouseMove}
+            onMouseLeave={handleChartMouseLeave}
             style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
           >
-            <div
-              style={{ flexShrink: 0, borderBottom: `1px solid ${COLORS.grid}`, background: COLORS.background }}
-              onMouseMove={handleHeaderMouseMove}
-              onMouseLeave={handleHeaderMouseLeave}
-            >
+            <div style={{ flexShrink: 0, borderBottom: `1px solid ${COLORS.grid}`, background: COLORS.background }}>
               <canvas ref={headerCanvasRef} style={{ display: 'block' }} />
             </div>
             <div
               ref={scrollRef}
-              style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}
+              style={{ position: 'relative', flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}
             >
               <canvas
                 ref={bodyCanvasRef}
                 onMouseDown={handleMouseDown}
                 style={{ display: 'block', cursor: dragging ? 'grabbing' : 'grab' }}
+              />
+              <QueueDepthOverlay
+                hoverX={hoverX}
+                hoverPlot={hoverPlot}
+                viewportWidth={viewportWidth}
               />
             </div>
             <NowCursor
@@ -992,6 +1043,68 @@ function HoverCursor({ hoverX, viewStart, viewEnd, viewportWidth, dataOrigin }: 
       </div>
     </>
   );
+}
+
+interface QueueDepthOverlayProps {
+  hoverX: number | null;
+  hoverPlot: { depth: number; lineY: number } | null;
+  viewportWidth: number;
+}
+
+function QueueDepthOverlay({ hoverX, hoverPlot, viewportWidth }: QueueDepthOverlayProps) {
+  if (hoverX === null || hoverPlot === null || viewportWidth <= 0) return null;
+  const APPROX_LABEL_WIDTH = 40;
+  const flipLeft = hoverX + 6 + APPROX_LABEL_WIDTH > viewportWidth - 4;
+  return (
+    <>
+      <div
+        style={{
+          position: 'absolute',
+          top: hoverPlot.lineY,
+          left: LABEL_WIDTH,
+          right: 0,
+          height: 0,
+          borderTop: `1px dashed ${COLORS.queueLine}`,
+          pointerEvents: 'none',
+          zIndex: 6,
+        }}
+      />
+      <div
+        style={{
+          position: 'absolute',
+          top: hoverPlot.lineY - 8,
+          left: flipLeft ? undefined : hoverX + 6,
+          right: flipLeft ? viewportWidth - hoverX + 6 : undefined,
+          fontSize: 10,
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+          background: 'rgba(13, 17, 23, 0.9)',
+          color: COLORS.queueLine,
+          padding: '1px 4px',
+          borderRadius: 2,
+          border: `1px solid ${COLORS.grid}`,
+          pointerEvents: 'none',
+          whiteSpace: 'nowrap',
+          zIndex: 7,
+        }}
+      >
+        waiting: {hoverPlot.depth}
+      </div>
+    </>
+  );
+}
+
+// Find the largest i with sampleT[i] <= t. Queue depth is a step function
+// (the sample value is held until the next sample), so the "current" depth
+// at time t is the most recent sample at or before t.
+function findSampleAt(sampleT: Float64Array, t: number): number {
+  if (sampleT.length === 0 || t < sampleT[0]) return -1;
+  let lo = 0, hi = sampleT.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (sampleT[mid] <= t) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
 }
 
 function formatHoverTime(seconds: number): string {
