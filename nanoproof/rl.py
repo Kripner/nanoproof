@@ -178,6 +178,11 @@ if balancer:
 else:
     prover = None
 
+# Broadcast max_gen_samples from master to worker ranks (workers don't have
+# a ProverWorker to compute it from).
+if ddp:
+    tactic_model.max_gen_samples = broadcast_value(tactic_model.max_gen_samples)
+
 # Prompt token limit for inference batches (prevents OOM on long prompts).
 # Each rank computes its own limit based on its GPU's free VRAM rather than
 # broadcasting from rank 0.  This is important because NCCL lazily allocates
@@ -190,15 +195,18 @@ max_prompt_tokens = args.batch_max_prompt_tokens
 if max_prompt_tokens is None:
     max_prompt_tokens = compute_max_batch_prompt_tokens(model.config, args.num_sampled_tactics, device)
     free_driver, _ = torch.cuda.mem_get_info(device)
-    log0(f"Batch max prompt tokens: {max_prompt_tokens} (auto from {free_driver / 1024**3:.1f} GiB free, {torch.cuda.memory_allocated(device) / 1024**3:.1f} GiB allocated)", component="Config")
+    source = f"auto from {free_driver / 1024**3:.1f} GiB free, {torch.cuda.memory_allocated(device) / 1024**3:.1f} GiB allocated"
 else:
-    log0(f"Batch max prompt tokens: {max_prompt_tokens} (manual)", component="Config")
+    source = "manual"
 tactic_model.max_batch_prompt_tokens = max_prompt_tokens
 
-# Broadcast max_gen_samples from master to worker ranks (workers don't have
-# a ProverWorker to compute it from).
 if ddp:
-    tactic_model.max_gen_samples = broadcast_value(tactic_model.max_gen_samples)
+    all_max_prompt_tokens = [None] * ddp_world_size
+    dist.all_gather_object(all_max_prompt_tokens, max_prompt_tokens)
+    log0(f"Batch max prompt tokens per rank ({source}): {all_max_prompt_tokens}", component="Config")
+else:
+    log0(f"Batch max prompt tokens: {max_prompt_tokens} ({source})", component="Config")
+
 
 # Create the RL monitor (master only)
 rl_monitor = create_monitor(num_actors=0, enabled=master_process)
