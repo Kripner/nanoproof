@@ -37,8 +37,6 @@ from nanoproof.tokenizer import HuggingFaceTokenizer
 from nanoproof.model import Transformer
 
 
-# Type alias for State - avoid circular import with search.py
-State = list  # list[LeanProofBranch]
 
 
 class BusyError(Exception):
@@ -52,6 +50,9 @@ class BusyError(Exception):
 # -----------------------------------------------------------------------------
 # Tactic Models
 # -----------------------------------------------------------------------------
+
+# Type alias for State - avoid circular import with search.py
+State = list  # list[LeanProofBranch]
 
 # Result type for combined tactic + value prediction
 TacticAndValue = tuple[list[str], float]  # (tactics, value)
@@ -221,9 +222,11 @@ def compute_max_batch_prompt_tokens(model_config, num_samples: int, device: torc
     The main memory consumer during batched inference is the KV cache, allocated as:
         2 (k+v) * n_layers * total_rows * kv_seq_len * n_kv_head * head_dim * dtype_bytes
 
-    where total_rows = N_states * num_samples and kv_seq_len ~ max_prompt_len + max_gen_tokens.
-    We approximate total memory as proportional to sum_of_prompt_tokens * num_samples,
-    and set the limit so the KV cache fits in available VRAM with headroom for activations.
+    where total_rows = N_states * num_samples and kv_seq_len = max_prompt_len +
+    GLOBAL_CONFIG.tactic_max_len. The batcher caps sum over rows of (prompt_len +
+    tactic_max_len) at the returned limit (see GEN_OVERHEAD in _process_batch_locked),
+    so the budget represents combined prompt+gen tokens and the KV cache fits in
+    available VRAM with headroom for activations.
     """
     # mem_get_info returns (free, total) at the CUDA driver level, which
     # accounts for memory consumed by ALL processes on this GPU (e.g. NCCL
@@ -256,8 +259,7 @@ class BlockingTacticModel:
     Each request generates both tactics and value prediction together.
     """
 
-    def __init__(self, inner_model: TacticModel, timeout_seconds: float, max_gen_samples: int | None,
-                 max_batch_prompt_tokens: int | None = None):
+    def __init__(self, inner_model: TacticModel, timeout_seconds: float, max_gen_samples: int | None, max_batch_prompt_tokens: int | None = None):
         self.inner_model = inner_model
         self.timeout_seconds = timeout_seconds
         self.max_gen_samples = max_gen_samples
@@ -403,9 +405,13 @@ class BlockingTacticModel:
                 return [ValueOrError.from_error("Model shutdown") for _ in state_strs]
 
             # Reject new requests while a batch is running or while paused.
-            # The balancer cycles to another backend on this signal; the
-            # pointer pattern concentrates actors on the one currently-filling
-            # GPU without a per-request timeout wait.
+            # The balancer handles 503 differently in the two cases:
+            # - batch in progress: cycle to another backend (pointer pattern
+            #   concentrates actors on the one currently-filling GPU).
+            # - paused: the balancer itself is paused (see
+            #   InferenceBalancer.pause/resume), so it blocks on a condvar
+            #   rather than busy-looping - actors don't hold onto Lean
+            #   processes while spinning on 503s during training steps.
             if self._batch_in_progress or self._paused:
                 raise BusyError()
 
@@ -506,39 +512,27 @@ class BlockingTacticModel:
         else:
             max_items = len(self._pending)
         batch = self._pending[:max(1, max_items)]
-        size_after_samples_cap = len(batch)
         samples_cap_cut_info: str | None = None
-        if size_after_samples_cap < pending_len_at_start:
-            samples_cap_cut_info = (
-                f"samples_cap ({pending_len_at_start} -> {size_after_samples_cap} items, "
-                f"limit {self.max_gen_samples} samples)"
-            )
+        if len(batch) < pending_len_at_start:
+            samples_cap_cut_info = f"samples_cap ({pending_len_at_start} -> {len(batch)} items, limit {self.max_gen_samples} samples)"
 
         # Further limit by prompt tokens: the KV cache is allocated as
-        # N_rows * max_prompt_len, so one long prompt inflates memory for ALL
-        # rows. We track count * running_max to match the actual allocation.
-        # Token counts are pre-computed by the tokenizer on queue entry.
+        # N_rows * (max_prompt_len + tactic_max_len), so one long prompt
+        # inflates memory for ALL rows. We track count * running_max to match
+        # the actual allocation. Token counts are pre-computed by the
+        # tokenizer on queue entry.
         token_cut_info: str | None = None
         if self.max_batch_prompt_tokens is not None and len(batch) > 1:
-            GEN_OVERHEAD = 64
             max_tokens = 0
             cut = len(batch)
-            # Recompute the token limit from actual free VRAM rather than
-            # relying on the init-time budget.  After training, persistent
-            # allocations (NCCL buffers, weight casts, etc.) can reduce
-            # available VRAM well below what was measured at init.
-            device = self.inner_model.network.get_device()
-            live_limit = compute_max_batch_prompt_tokens(
-                self.inner_model.network.config, self.inner_model.num_samples, device)
-            token_limit = min(self.max_batch_prompt_tokens, live_limit)
             for i, (_, tc, _, _) in enumerate(batch):
-                max_tokens = max(max_tokens, tc + GEN_OVERHEAD)
+                max_tokens = max(max_tokens, tc + GLOBAL_CONFIG.tactic_max_len)
                 effective = (i + 1) * max_tokens
-                if effective > token_limit:
+                if effective > self.max_batch_prompt_tokens:
                     cut = max(1, i)
                     break
             if cut < len(batch):
-                token_cut_info = f"tokens ({len(batch)} -> {cut} items, limit {token_limit} tokens)"
+                token_cut_info = f"tokens ({len(batch)} -> {cut} items, limit {self.max_batch_prompt_tokens} tokens)"
             batch = batch[:cut]
 
         remaining = self._pending[len(batch):]
@@ -741,15 +735,20 @@ class InferenceBalancer:
 
     Each backend is a remote inference server (``RemoteTacticModel``) that
     either accepts a request (queues it for the next batch) or responds
-    HTTP 503 while a batch is already running. The balancer keeps a pointer
-    into the backend list and forwards to it; on a 503 it advances to the
-    next backend, wrapping around. If every backend is busy, the balancer
-    sleeps 100 ms and retries. On a successful accept the pointer parks at
-    that backend, so subsequent callers keep filling the same GPU until it
-    flips busy - at which point the pointer naturally moves on.
+    HTTP 503 while a batch is already running or while paused. The balancer
+    keeps a pointer into the backend list and forwards to it; on a 503 it
+    advances to the next backend, wrapping around. If every backend is
+    busy, the balancer sleeps 100 ms and retries. On a successful accept
+    the pointer parks at that backend, so subsequent callers keep filling
+    the same GPU until it flips busy - at which point the pointer
+    naturally moves on.
 
-    Lifecycle management (pause/resume/shutdown) is handled by each rank's
-    local BlockingTacticModel directly, not by the balancer.
+    ``pause()`` / ``resume()`` gate the balancer itself: during a training
+    step every rank's tactic model is paused and would 503 indefinitely,
+    so the balancer parks incoming requests on a condvar until resume
+    rather than busy-looping HTTP against paused servers (which would
+    both burn CPU and starve the Lean process pool held by mid-MCTS
+    actors).
     """
 
     _BUSY_SLEEP_SECONDS = 0.1
@@ -762,6 +761,28 @@ class InferenceBalancer:
         self._backends = [RemoteTacticModel(ep) for ep in endpoints]
         self._pointer = 0
         self._lock = threading.Lock()
+        self._paused = False
+        self._pause_cv = threading.Condition(self._lock)
+
+    def pause(self):
+        """Block new ``sample_tactic*`` calls until ``resume()``.
+
+        Called on rank 0 alongside the local BlockingTacticModel.pause() so
+        actor threads stop hammering the busy-loop retry path during a
+        training step.
+        """
+        with self._lock:
+            self._paused = True
+
+    def resume(self):
+        with self._lock:
+            self._paused = False
+            self._pause_cv.notify_all()
+
+    def _wait_while_paused(self):
+        with self._lock:
+            while self._paused:
+                self._pause_cv.wait()
 
     def sample_tactic(self, state: State) -> ValueOrError[TacticAndValue]:
         assert len(state) == 1, \
@@ -776,6 +797,7 @@ class InferenceBalancer:
             return []
         n = len(self._backends)
         while True:
+            self._wait_while_paused()
             with self._lock:
                 start = self._pointer
             for offset in range(n):

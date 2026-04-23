@@ -137,6 +137,7 @@ tactic_model = BlockingTacticModel(
     inner_model=inner_tactic_model,
     timeout_seconds=args.batch_time_limit,
     max_gen_samples=None,  # resolved after ProverWorker init
+    max_batch_prompt_tokens=None,  # resolved after ProverWorker init
 )
 model = tactic_model.network
 
@@ -182,6 +183,9 @@ else:
 # broadcasting from rank 0.  This is important because NCCL lazily allocates
 # ~414 MiB per peer on some GPUs (topology-dependent), so different ranks
 # can have different amounts of usable memory.
+# The budget covers (prompt + GLOBAL_CONFIG.tactic_max_len) tokens per batch
+# row, since the inference batcher reserves tactic_max_len of KV space per row
+# for the generated tactic.
 max_prompt_tokens = args.batch_max_prompt_tokens
 if max_prompt_tokens is None:
     max_prompt_tokens = compute_max_batch_prompt_tokens(model.config, args.num_sampled_tactics, device)
@@ -435,6 +439,11 @@ while True:
     # Pause inference across all ranks before touching the model for training.
     # The store-based barrier turns rank desyncs at this transition into a
     # diagnosable TimeoutError + traceback instead of a cryptic NCCL watchdog.
+    # Pause the balancer first (master only) so actor threads park on a
+    # condvar instead of busy-looping HTTP against every rank once all
+    # local tactic_models start 503-ing.
+    if balancer is not None:
+        balancer.pause()
     tactic_model.pause()
     active_barrier(f"train_{step}/enter")
 
@@ -484,6 +493,11 @@ while True:
     timer.end("train")
     rl_monitor.record_phase_event("train", "end")
     tactic_model.resume()
+    # Unblock balancer after local servers are accepting again, so the
+    # woken actor threads don't immediately 503-spin against a rank whose
+    # resume hasn't run yet.
+    if balancer is not None:
+        balancer.resume()
 
     mean_loss = total_loss / args.num_updates_per_step
     rl_monitor.update_training(step, mean_loss, total_tokens)
