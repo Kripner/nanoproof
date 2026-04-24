@@ -27,8 +27,41 @@ uv sync --extra cpu --group dev
 source .venv/bin/activate
 
 hf auth login
+```
 
-python -m nanoproof.dataset
+## Datasets
+
+nanoproof uses several datasets across pretraining, midtraining, SFT, RL, and evaluation. They all live under [nanoproof/data/](nanoproof/data/):
+
+| Name | Stage | Source |
+| --- | --- | --- |
+| `nemotron` | pretrain | Nemotron-CC-Math-v1 (~20B tokens) |
+| `leangithubraw` | midtrain | Lean code from GitHub (~65M tokens) |
+| `leantree` | SFT | LeanTree transitions from Mathlib (~260k) |
+| `leanworkbook` | RL | Lean-Workbook formal statements |
+| `numinamath` | RL | NuminaMath-LEAN formal statements |
+| `deepseek_prover` | RL | DeepSeek-Prover-V1 formal statements |
+| `minif2f` | benchmark | MiniF2F (valid + test) |
+| `proofnet` | benchmark | ProofNet (valid + test) |
+
+Download them all with a single command:
+
+```
+python -m nanoproof.data.download
+```
+
+Or pick a subset (individual datasets or stage aliases `pretrain`, `midtrain`, `sft`, `rl`, `bench`):
+
+```
+python -m nanoproof.data.download minif2f proofnet leantree
+python -m nanoproof.data.download sft rl
+```
+
+The RL datasets (`leanworkbook`, `numinamath`, `deepseek_prover`) also pull a pre-computed whitelist from [data/whitelists/](data/whitelists/) alongside the source file, which `list_theorems(split, lean_version=...)` uses to skip theorems that don't initialize under the given Lean toolchain. Currently shipped for Lean `v4.27.0`; regenerate for other versions with each module's `check-init` CLI action (requires a running Lean server).
+
+Train the tokenizer once the pretraining data is on disk:
+
+```
 python -m scripts.tok_train
 ```
 

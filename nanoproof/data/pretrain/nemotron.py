@@ -158,6 +158,28 @@ def _download_single_file(index):
     return False
 
 
+def download_dataset(num_files: int = -1, num_workers: int = 4) -> None:
+    """Download Nemotron-CC-Math-v1 shards in parallel.
+
+    ``num_files=-1`` downloads all shards; otherwise caps to ``min(num_files, MAX_SHARD + 1)``.
+    """
+    os.makedirs(DATA_DIR, exist_ok=True)
+    num = MAX_SHARD + 1 if num_files == -1 else min(num_files, MAX_SHARD + 1)
+    ids_to_download = list(range(num))
+    print(f"Downloading {len(ids_to_download)} shards using {num_workers} workers...")
+    print(f"Target directory: {DATA_DIR}")
+    print()
+    with Pool(processes=num_workers) as pool:
+        results = list(tqdm(
+            pool.imap(_download_single_file, ids_to_download),
+            total=len(ids_to_download),
+            desc="Downloading shards"
+        ))
+
+    successful = sum(1 for success in results if success)
+    print(f"Done! Downloaded: {successful}/{len(ids_to_download)} shards to {DATA_DIR}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Manage Nemotron-CC-Math-v1 dataset", allow_abbrev=False)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -167,26 +189,13 @@ if __name__ == "__main__":
     parser_download.add_argument("-w", "--num-workers", type=int, default=4, help="Number of parallel download workers (default: 4)")
 
     parser_process = subparsers.add_parser("process", help="Process all downloaded parquet files (re-chunk to 1024 group size)")
-    
+
     args = parser.parse_args()
 
     os.makedirs(DATA_DIR, exist_ok=True)
 
     if args.command == "download":
-        num = MAX_SHARD + 1 if args.num_files == -1 else min(args.num_files, MAX_SHARD + 1)
-        ids_to_download = list(range(num))
-        print(f"Downloading {len(ids_to_download)} shards using {args.num_workers} workers...")
-        print(f"Target directory: {DATA_DIR}")
-        print()
-        with Pool(processes=args.num_workers) as pool:
-            results = list(tqdm(
-                pool.imap(_download_single_file, ids_to_download),
-                total=len(ids_to_download),
-                desc="Downloading shards"
-            ))
-
-        successful = sum(1 for success in results if success)
-        print(f"Done! Downloaded: {successful}/{len(ids_to_download)} shards to {DATA_DIR}")
+        download_dataset(num_files=args.num_files, num_workers=args.num_workers)
 
     elif args.command == "process":
         parquet_paths = list_parquet_files()

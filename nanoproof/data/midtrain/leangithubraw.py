@@ -179,7 +179,7 @@ def _publish_dataset(repo_id):
     except Exception as e:
         print(f"Error uploading dataset: {e}")
 
-def download_dataset(repo_id):
+def download_dataset(repo_id="Kripi/Lean-Github-Raw"):
     """Downloads the dataset from Hugging Face Hub."""
     output_dir = DATA_DIR
         

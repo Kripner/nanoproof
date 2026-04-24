@@ -21,7 +21,7 @@ from nanoproof.data.check_init import (
     run_check_init_cli,
     whitelist_path,
 )
-from nanoproof.data.rl.common import download_hf_file, shuffle_train_valid_split
+from nanoproof.data.rl.common import download_file, download_whitelists, shuffle_train_valid_split
 
 DATA_DIR = os.path.join(get_base_dir(), "data", "leanworkbook")
 JSON_PATH = os.path.join(DATA_DIR, "lean_workbook.json")
@@ -29,7 +29,8 @@ HF_URL = "https://huggingface.co/datasets/internlm/Lean-Workbook/resolve/main/le
 
 
 def download_dataset() -> None:
-    download_hf_file(HF_URL, JSON_PATH, desc="lean_workbook.json")
+    download_file(HF_URL, JSON_PATH, desc="lean_workbook.json")
+    download_whitelists(JSON_PATH)
 
 
 def _load_sources() -> list[str]:

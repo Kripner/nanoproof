@@ -18,7 +18,7 @@ from pathlib import Path
 from nanoproof.common import get_base_dir
 from nanoproof.data.bench.common import BenchTheorem
 from nanoproof.data.check_init import add_check_init_args, run_check_init_cli
-from nanoproof.data.rl.common import download_hf_file
+from nanoproof.data.rl.common import download_file
 
 DATA_DIR = os.path.join(get_base_dir(), "data", "proofnet")
 SOURCE_URL = "https://raw.githubusercontent.com/Kripner/ProofNet/refs/heads/main/data/proofnet.jsonl"
@@ -29,7 +29,7 @@ _SPLITS = ("valid", "test")
 
 def download_dataset() -> None:
     """Download proofnet.jsonl from the ProofNet GitHub repo."""
-    download_hf_file(SOURCE_URL, FILE_PATH, desc=FILENAME)
+    download_file(SOURCE_URL, FILE_PATH, desc=FILENAME)
 
 
 def _load_records() -> list[dict]:

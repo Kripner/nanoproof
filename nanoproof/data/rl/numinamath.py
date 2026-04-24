@@ -24,7 +24,7 @@ from nanoproof.data.check_init import (
     run_check_init_cli,
     whitelist_path,
 )
-from nanoproof.data.rl.common import download_hf_file, shuffle_train_valid_split
+from nanoproof.data.rl.common import download_file, download_whitelists, shuffle_train_valid_split
 
 DATA_DIR = os.path.join(get_base_dir(), "data", "numinamath")
 PARQUET_PATH = os.path.join(DATA_DIR, "numinamath.parquet")
@@ -72,7 +72,8 @@ def _process_statement(statement: str) -> str | None:
 
 
 def download_dataset() -> None:
-    download_hf_file(HF_URL, PARQUET_PATH, desc="numinamath.parquet")
+    download_file(HF_URL, PARQUET_PATH, desc="numinamath.parquet")
+    download_whitelists(PARQUET_PATH)
 
 
 def _load_sources() -> list[str]:

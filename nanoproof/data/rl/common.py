@@ -12,12 +12,19 @@ from typing import Iterable
 import requests
 from tqdm import tqdm
 
+# Lean versions for which we ship pre-computed whitelists in the nanoproof repo
+# (see data/whitelists/). Each RL dataset's download_dataset() fetches all of
+# these alongside the source data so users don't need to regenerate them.
+WHITELIST_VERSIONS = ("v4.27.0",)
+WHITELIST_BASE_URL = (
+    "https://raw.githubusercontent.com/Kripner/nanoproof/refs/heads/main/data/whitelists"
+)
 
-def download_hf_file(url: str, dest_path: str, desc: str | None = None) -> None:
-    """Download a single file from HuggingFace (or any HTTP URL) with a tqdm
-    progress bar. Streams to ``dest_path + ".tmp"`` and atomically renames on
-    success; cleans up partial files on failure. No-op if ``dest_path`` already
-    exists.
+
+def download_file(url: str, dest_path: str, desc: str | None = None) -> None:
+    """Download a single HTTP(S) URL with a tqdm progress bar. Streams to
+    ``dest_path + ".tmp"`` and atomically renames on success; cleans up
+    partial files on failure. No-op if ``dest_path`` already exists.
     """
     if os.path.exists(dest_path):
         print(f"Already downloaded: {dest_path}")
@@ -46,6 +53,21 @@ def download_hf_file(url: str, dest_path: str, desc: str | None = None) -> None:
                 print(f"Cleaning up {path}")
                 os.remove(path)
         raise
+
+
+def download_whitelists(data_file_path: str) -> None:
+    """Download every shipped whitelist version for ``data_file_path``.
+
+    Each whitelist lives next to the data file as
+    ``{data_file_path}.whitelist.{version}.json`` -- the same layout that
+    ``nanoproof.data.check_init.whitelist_path`` expects at load time.
+    """
+    filename = os.path.basename(data_file_path)
+    for version in WHITELIST_VERSIONS:
+        wl_name = f"{filename}.whitelist.{version}.json"
+        url = f"{WHITELIST_BASE_URL}/{wl_name}"
+        dest = f"{data_file_path}.whitelist.{version}.json"
+        download_file(url, dest, desc=wl_name)
 
 
 def shuffle_train_valid_split(

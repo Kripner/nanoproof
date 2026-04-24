@@ -15,7 +15,7 @@ from pathlib import Path
 from nanoproof.common import get_base_dir
 from nanoproof.data.bench.common import BenchTheorem, MINIF2F_PREAMBLE
 from nanoproof.data.check_init import add_check_init_args, run_check_init_cli
-from nanoproof.data.rl.common import download_hf_file
+from nanoproof.data.rl.common import download_file
 
 DATA_DIR = os.path.join(get_base_dir(), "data", "minif2f")
 BASE_URL = "https://raw.githubusercontent.com/google-deepmind/miniF2F/refs/heads/main/MiniF2F/"
@@ -29,7 +29,7 @@ def download_dataset() -> None:
     """Download Valid.lean and Test.lean from the upstream GitHub repo."""
     for filename in _SPLIT_FILES.values():
         dest = os.path.join(DATA_DIR, filename)
-        download_hf_file(BASE_URL + filename, dest, desc=filename)
+        download_file(BASE_URL + filename, dest, desc=filename)
 
 
 def _split_file(split: str) -> str:

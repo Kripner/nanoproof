@@ -30,7 +30,7 @@ from nanoproof.data.check_init import (
     run_check_init_cli,
     whitelist_path,
 )
-from nanoproof.data.rl.common import download_hf_file, shuffle_train_valid_split
+from nanoproof.data.rl.common import download_file, download_whitelists, shuffle_train_valid_split
 
 DATA_DIR = os.path.join(get_base_dir(), "data", "deepseek_prover")
 JSONL_PATH = os.path.join(DATA_DIR, "deepseek_prover.jsonl")
@@ -56,7 +56,8 @@ def _statement_only(formal_statement: str) -> str | None:
 
 
 def download_dataset() -> None:
-    download_hf_file(HF_URL, JSONL_PATH, desc="deepseek_prover.jsonl")
+    download_file(HF_URL, JSONL_PATH, desc="deepseek_prover.jsonl")
+    download_whitelists(JSONL_PATH)
 
 
 def _load_sources() -> list[str]:
