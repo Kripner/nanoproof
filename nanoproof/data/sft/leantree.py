@@ -7,12 +7,12 @@ from pathlib import Path
 
 import termplotlib as tpl
 import numpy as np
-import requests
-
 from tqdm import tqdm
+
 import leantree
 
 from nanoproof.common import get_base_dir, format_distribution
+from nanoproof.data.rl.common import download_file
 from nanoproof.tokenizer import get_tokenizer
 
 base_dir = get_base_dir()
@@ -56,35 +56,7 @@ def leantree_transitions(split, eval_fraction=0.1, augmentations=None):
 def download_dataset():
     """Download the leantree dataset from HuggingFace."""
     jsonl_path = os.path.join(DATA_DIR, "leantree_mathlib.jsonl")
-
-    # skip if already downloaded
-    if os.path.exists(jsonl_path):
-        print(f"Dataset already downloaded at {jsonl_path}")
-        return
-
-    try:
-        print(f"Downloading leantree dataset from HuggingFace...")
-        response = requests.get(HF_URL, stream=True, timeout=60)
-        response.raise_for_status()
-
-        temp_path = jsonl_path + ".tmp"
-        total_size = int(response.headers.get("content-length", 0))
-        with open(temp_path, "wb") as f:
-            with tqdm(total=total_size, unit="B", unit_scale=True, unit_divisor=1024, desc="Downloading leantree_mathlib.jsonl") as pbar:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):  # 1MB chunks
-                    if chunk:
-                        f.write(chunk)
-                        pbar.update(len(chunk))
-
-        os.rename(temp_path, jsonl_path)
-        print(f"Successfully downloaded {jsonl_path}")
-    except (requests.RequestException, IOError):
-        # Clean up any partial files
-        for path in [jsonl_path + ".tmp", jsonl_path]:
-            if os.path.exists(path):
-                print(f"Cleaning up {path}")
-                os.remove(path)
-        raise
+    download_file(HF_URL, jsonl_path, desc="leantree_mathlib.jsonl")
 
 def __print_stats():
     tokenizer = get_tokenizer()
