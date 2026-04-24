@@ -65,30 +65,26 @@ def parquets_iter_batched(split, start=0, step=1):
             texts = rg.column('text').to_pylist()
             yield texts
 
+def _rechunk_into(src_path, dest_path):
+    """Load ``src_path``, drop all columns except ``text``, write to ``dest_path``
+    with 1024-row groups. ``src_path`` and ``dest_path`` must differ.
+    """
+    table = pq.read_table(src_path)
+    if 'text' in table.column_names:
+        table = table.select(['text'])
+    else:
+        print(f"Warning: 'text' column not found in {src_path}")
+    pq.write_table(table, dest_path, row_group_size=1024)
+
+
 def _rechunk_parquet(filepath):
-    """
-    Loads a parquet file, changes group size to 1024, drops all columns except 'text',
-    and overwrites the file.
-    """
+    """In-place rechunk, for the ``process`` CLI action on already-downloaded shards."""
     try:
-        # Read the table
-        table = pq.read_table(filepath)
-        
-        # Select only 'text' column if others exist
-        if 'text' in table.column_names:
-            table = table.select(['text'])
-        else:
-            print(f"Warning: 'text' column not found in {filepath}")
-            
-        # Write to a temporary file with new row group size
         temp_path = filepath + ".rechunk"
-        pq.write_table(table, temp_path, row_group_size=1024)
-        
-        # Overwrite the original file
+        _rechunk_into(filepath, temp_path)
         os.rename(temp_path, filepath)
     except Exception as e:
         print(f"Failed to process {filepath}: {e}")
-        # Clean up temp file if it was created
         if os.path.exists(filepath + ".rechunk"):
             try:
                 os.remove(filepath + ".rechunk")
@@ -115,33 +111,36 @@ def _download_single_file(index):
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
+    # Staging files. `filepath` is only created (via atomic rename of `.tmp`) once the shard
+    # is fully rechunked, so an interruption can never leave a committed-but-unprocessed file.
+    raw_path = filepath + ".raw"
+    tmp_path = filepath + ".tmp"
+
     # Download with retries
     max_attempts = 5
     for attempt in range(1, max_attempts + 1):
         try:
             response = requests.get(url, stream=True, timeout=30, headers=headers)
             response.raise_for_status()
-            # Write to temporary file first
-            temp_path = filepath + f".tmp"
-            Path(temp_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(raw_path).parent.mkdir(parents=True, exist_ok=True)
             total_size = int(response.headers.get('content-length', 0))
-            with open(temp_path, 'wb') as f:
+            with open(raw_path, 'wb') as f:
                 with tqdm(total=total_size, unit='B', unit_scale=True, unit_divisor=1024, desc=os.path.basename(filename), leave=False) as pbar:
                     for chunk in response.iter_content(chunk_size=1024 * 1024):  # 1MB chunks
                         if chunk:
                             f.write(chunk)
                             pbar.update(len(chunk))
-            # Move temp file to final location
-            os.rename(temp_path, filepath)
-            # Process the file immediately after download
-            _rechunk_parquet(filepath)
+            # Rechunk into tmp_path, then atomically commit.
+            _rechunk_into(raw_path, tmp_path)
+            os.remove(raw_path)
+            os.rename(tmp_path, filepath)
             print(f"Successfully downloaded and processed {filename}")
             return True
 
         except (requests.RequestException, IOError) as e:
             print(f"Attempt {attempt}/{max_attempts} failed for {filename}: {e}")
             # Clean up any partial files
-            for path in [filepath + f".tmp", filepath]:
+            for path in [raw_path, tmp_path, filepath]:
                 if os.path.exists(path):
                     try:
                         os.remove(path)
