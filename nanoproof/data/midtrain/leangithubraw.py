@@ -287,18 +287,14 @@ def download_dataset(repo_id="Kripi/Lean-Github-Raw"):
     os.makedirs(output_dir, exist_ok=True)
     
     print(f"Downloading dataset from {repo_id} to {output_dir}...")
-    try:
-        # Using snapshot_download is easier and more robust than manual requests for a folder
-        snapshot_download(
-            repo_id=repo_id,
-            repo_type="dataset",
-            local_dir=output_dir,
-            local_dir_use_symlinks=False,
-            ignore_patterns=["*.lock", "*.tmp"]
-        )
-        print("Download complete.")
-    except Exception as e:
-        print(f"Error downloading dataset: {e}")
+    snapshot_download(
+        repo_id=repo_id,
+        repo_type="dataset",
+        local_dir=output_dir,
+        local_dir_use_symlinks=False,
+        ignore_patterns=["*.lock", "*.tmp"]
+    )
+    print("Download complete.")
 
 def _show_dataset(split="train", B=4, T=512, offset=0, num_batches=10):
     """Show the first N batches from the dataset."""

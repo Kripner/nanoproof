@@ -57,6 +57,12 @@ python -m nanoproof.data.download minif2f proofnet leantree
 python -m nanoproof.data.download sft rl
 ```
 
+`leangithubraw` is not published to HuggingFace; build it locally from the source repos listed in [nanoproof/data/midtrain/leangithub_urls.txt](nanoproof/data/midtrain/leangithub_urls.txt):
+
+```
+python -m nanoproof.data.midtrain.leangithubraw build
+```
+
 The RL datasets (`leanworkbook`, `numinamath`, `deepseek_prover`) also pull a pre-computed whitelist from [data/whitelists/](data/whitelists/) alongside the source file, which `list_theorems(split, lean_version=...)` uses to skip theorems that don't initialize under the given Lean toolchain. Currently shipped for Lean `v4.27.0`; regenerate for other versions with each module's `check-init` CLI action (requires a running Lean server).
 
 Build the tokenizer (GPT-2 BPE with extra Lean/math special tokens):
