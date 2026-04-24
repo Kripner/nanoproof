@@ -1,15 +1,13 @@
 # Source: https://github.com/karpathy/nanochat/blob/master/nanochat/tokenizer.py
 """
-BPE Tokenizer in the style of GPT-4.
-
-Two implementations are available:
-1) HuggingFace Tokenizer that can do both training and inference but is really confusing
-2) Our own RustBPE Tokenizer for training and tiktoken for efficient inference
+Tokenizer wrapper: GPT-2 BPE + extra special tokens for Lean / math.
+Built by scripts/tok_build.py.
 """
 
 import os
 
 import torch
+from tokenizers import Tokenizer as HFTokenizer
 
 from nanoproof.common import GLOBAL_CONFIG, get_base_dir
 
@@ -23,18 +21,6 @@ SPECIAL_TOKENS = [
     "ˢ", "ˣ", "Γ", "Δ", "Λ", "Π", "Σ", "Φ", "Ω", "δ", "ζ", "η", "θ", "φ", "χ", "ψ", "ϕ", "ᵈ", "ᵐ", "ᵒ", "ᵖ", "ᵢ", "ᵣ", "ᵥ", "ᶜ", "ᶠ", "‖", "‹", "›", "⁅", "⁆", "⁰", "⁻", "₀", "₁", "₂", "₃", "₄", "₊", "ₐ", "ₑ", "ₗ", "ₘ", "ₙ", "ₚ", "ₛ", "ₜ", "ℂ", "ℕ", "ℚ", "ℝ", "ℤ", "ℱ", "←", "↔", "↦", "↪", "⇑", "∀", "∂", "∃", "∅", "∈", "∉", "∏", "∑", "∘", "∞", "∣", "∧", "∨", "∩", "∪", "∫", "≃", "≅", "≠", "≡", "≤", "≥", "≪", "≫", "⊆", "⊓", "⊔", "⊕", "⊗", "⊢", "⊤", "⊥", "⋂", "⋃", "⋆", "⋙", "▷", "▸", "◁", "⟦", "⟧", "⟨", "⟩", "⟪", "⟫", "⟶", "⥤", "⦃", "⦄", "⧸", "⨅", "⨆", "𝒜", "𝒰", "𝓘", "𝓝", "𝔖", "𝕜", "𝟙",
     # these are left out because they are already in GPT2 tokenizer (although weirdly not reported in tok_show): "¬", "¹"
 ]
-
-# NOTE: this split pattern deviates from GPT-4 in that we use \p{N}{1,2} instead of \p{N}{1,3}
-# I did this because I didn't want to "waste" too many tokens on numbers for smaller vocab sizes.
-# I haven't validated that this is actually a good idea, TODO.
-SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
-
-# -----------------------------------------------------------------------------
-# Generic GPT-4-style tokenizer based on HuggingFace Tokenizer
-from tokenizers import Tokenizer as HFTokenizer
-from tokenizers import pre_tokenizers, decoders, Regex
-from tokenizers.models import BPE
-from tokenizers.trainers import BpeTrainer
 
 class HuggingFaceTokenizer:
     """Light wrapper around HuggingFace Tokenizer for some utilities"""
@@ -53,43 +39,6 @@ class HuggingFaceTokenizer:
         # init from a local directory on disk (e.g. "out/tokenizer")
         tokenizer_path = os.path.join(tokenizer_dir, "tokenizer.json")
         tokenizer = HFTokenizer.from_file(tokenizer_path)
-        return cls(tokenizer)
-
-    @classmethod
-    def train_from_iterator(cls, text_iterator, vocab_size):
-        # train from an iterator of text
-        # Configure the HuggingFace Tokenizer
-        tokenizer = HFTokenizer(BPE(
-            byte_fallback=True, # needed!
-            unk_token=None,
-            fuse_unk=False,
-        ))
-        # Normalizer: None
-        tokenizer.normalizer = None
-        # Pre-tokenizer: GPT-4 style
-        # the regex pattern used by GPT-4 to split text into groups before BPE
-        # NOTE: The pattern was changed from \p{N}{1,3} to \p{N}{1,2} because I suspect it is harmful to
-        # very small models and smaller vocab sizes, because it is a little bit wasteful in the token space.
-        # (but I haven't validated this! TODO)
-        gpt4_split_regex = Regex(SPLIT_PATTERN) # huggingface demands that you wrap it in Regex!!
-        tokenizer.pre_tokenizer = pre_tokenizers.Sequence([
-            pre_tokenizers.Split(pattern=gpt4_split_regex, behavior="isolated", invert=False),
-            pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False)
-        ])
-        # Decoder: ByteLevel (it pairs together with the ByteLevel pre-tokenizer)
-        tokenizer.decoder = decoders.ByteLevel()
-        # Post-processor: None
-        tokenizer.post_processor = None
-        # Trainer: BPE
-        trainer = BpeTrainer(
-            vocab_size=vocab_size,
-            show_progress=True,
-            min_frequency=0, # no minimum frequency
-            initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
-            special_tokens=SPECIAL_TOKENS,
-        )
-        # Kick off the training
-        tokenizer.train_from_iterator(text_iterator, trainer)
         return cls(tokenizer)
 
     def get_vocab_size(self):
@@ -183,7 +132,7 @@ def get_token_bytes(device="cpu"):
     base_dir = get_base_dir()
     tokenizer_dir = os.path.join(base_dir, "tokenizer")
     token_bytes_path = os.path.join(tokenizer_dir, "token_bytes.pt")
-    assert os.path.exists(token_bytes_path), f"Token bytes not found at {token_bytes_path}? It gets written by tok_train.py"
+    assert os.path.exists(token_bytes_path), f"Token bytes not found at {token_bytes_path}? It gets written by tok_build.py"
     with open(token_bytes_path, "rb") as f:
         token_bytes = torch.load(f, map_location=device)
     return token_bytes

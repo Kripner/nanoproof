@@ -59,10 +59,10 @@ python -m nanoproof.data.download sft rl
 
 The RL datasets (`leanworkbook`, `numinamath`, `deepseek_prover`) also pull a pre-computed whitelist from [data/whitelists/](data/whitelists/) alongside the source file, which `list_theorems(split, lean_version=...)` uses to skip theorems that don't initialize under the given Lean toolchain. Currently shipped for Lean `v4.27.0`; regenerate for other versions with each module's `check-init` CLI action (requires a running Lean server).
 
-Train the tokenizer once the pretraining data is on disk:
+Build the tokenizer (GPT-2 BPE with extra Lean/math special tokens):
 
 ```
-python -m scripts.tok_train
+python -m scripts.tok_build
 ```
 
 Pretrain:
