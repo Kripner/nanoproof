@@ -1031,15 +1031,18 @@ class WebMonitor:
                         f = self._inference_timeline_file
                         for ev in data.get("events", []):
                             self._llm_out_seq += 1
+                            trigger = ev.get("trigger", "unknown")
                             buf_events.append({
                                 "start": ev["start"],
                                 "end": ev["end"],
                                 "seq": self._llm_out_seq,
+                                "trigger": trigger,
                             })
                             if f is not None:
                                 f.write(json.dumps({
                                     "type": "event", "rank": rank,
                                     "start": ev["start"], "end": ev["end"],
+                                    "trigger": trigger,
                                 }) + "\n")
                         for s in data.get("samples", []):
                             self._llm_out_seq += 1
@@ -1293,11 +1296,13 @@ class WebMonitor:
                     # parallel arrays for samples. Same compact shape as the
                     # actor profiler so the frontend rendering is familiar.
                     ev_flat: list[float] = []
+                    ev_triggers: list[str] = []
                     for ev in self.llm_events.get(rank, ()):
                         if ev["seq"] <= since:
                             continue
                         ev_flat.append(ev["start"])
                         ev_flat.append(ev["end"])
+                        ev_triggers.append(ev.get("trigger", "unknown"))
                         if ev["seq"] > max_cursor:
                             max_cursor = ev["seq"]
                     sample_ts: list[float] = []
@@ -1311,6 +1316,7 @@ class WebMonitor:
                             max_cursor = s["seq"]
                     out_ranks[str(rank)] = {
                         "inferencing": ev_flat,
+                        "inferencing_trigger": ev_triggers,
                         "sample_t": sample_ts,
                         "sample_n": sample_ns,
                     }
@@ -1367,6 +1373,7 @@ class WebMonitor:
 
             if cached_body is None:
                 rank_events: dict[int, list[float]] = {}
+                rank_triggers: dict[int, list[str]] = {}
                 rank_sample_t: dict[int, list[float]] = {}
                 rank_sample_n: dict[int, list[int]] = {}
                 phases: list[dict] = []
@@ -1382,6 +1389,8 @@ class WebMonitor:
                             if t == "event":
                                 rank_events.setdefault(rank, []).extend(
                                     [entry["start"], entry["end"]])
+                                rank_triggers.setdefault(rank, []).append(
+                                    entry.get("trigger", "unknown"))
                             elif t == "sample":
                                 rank_sample_t.setdefault(rank, []).append(entry["t"])
                                 rank_sample_n.setdefault(rank, []).append(entry["n"])
@@ -1420,6 +1429,7 @@ class WebMonitor:
                 for r in rank_ids:
                     out_ranks[str(r)] = {
                         "inferencing": rank_events.get(r, []),
+                        "inferencing_trigger": rank_triggers.get(r, []),
                         "sample_t": rank_sample_t.get(r, []),
                         "sample_n": rank_sample_n.get(r, []),
                     }

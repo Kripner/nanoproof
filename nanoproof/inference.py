@@ -482,7 +482,11 @@ class BlockingTacticModel:
             for ev in self._llm_events:
                 if ev["seq"] <= since:
                     continue
-                events.append({"start": ev["start"], "end": ev["end"]})
+                events.append({
+                    "start": ev["start"],
+                    "end": ev["end"],
+                    "trigger": ev.get("trigger", "unknown"),
+                })
                 if ev["seq"] > max_cursor:
                     max_cursor = ev["seq"]
             for s in self._llm_samples:
@@ -499,6 +503,10 @@ class BlockingTacticModel:
             return
 
         trigger_reason = self._trigger_reason() or "forced"
+        # Compact category for the LLM profiler UI: the full trigger_reason
+        # carries a quantitative tail (e.g. "time (300 ms >= 500 ms)") that
+        # bloats the wire payload; we keep only the leading word.
+        trigger_category = trigger_reason.split(" ", 1)[0]
 
         self._batch_in_progress = True
         self._total_batches += 1
@@ -590,6 +598,7 @@ class BlockingTacticModel:
                 "start": inference_start_time,
                 "end": time.time(),
                 "seq": self._llm_seq,
+                "trigger": trigger_category,
             })
             self._batch_ready.notify_all()
 

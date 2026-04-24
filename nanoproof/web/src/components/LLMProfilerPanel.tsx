@@ -40,6 +40,7 @@ interface WirePhase {
 
 interface WireRank {
   inferencing: number[]; // flat [s0,e0,s1,e1,...]
+  inferencing_trigger?: string[]; // one entry per pair, parallel to inferencing
   sample_t: number[];
   sample_n: number[];
 }
@@ -52,9 +53,10 @@ interface WireData {
 }
 
 interface RankData {
-  inferencing: Float64Array; // sorted by start
-  sampleT: Float64Array;     // sorted ascending
-  sampleN: Float64Array;     // aligned with sampleT
+  inferencing: Float64Array;     // sorted by start
+  triggers: string[];            // one per pair in inferencing
+  sampleT: Float64Array;         // sorted ascending
+  sampleN: Float64Array;         // aligned with sampleT
 }
 
 interface LLMData {
@@ -71,31 +73,42 @@ interface Props {
   mode: 'live' | 'standalone';
 }
 
-function sortPairs(flat: number[]): Float64Array {
+function sortPairs(flat: number[], triggers: string[] | undefined): { pairs: Float64Array; triggers: string[] } {
   const n = flat.length >> 1;
   const idx = new Array<number>(n);
   for (let i = 0; i < n; i++) idx[i] = i;
   idx.sort((a, b) => flat[a * 2] - flat[b * 2]);
-  const out = new Float64Array(n * 2);
+  const outPairs = new Float64Array(n * 2);
+  const outTriggers = new Array<string>(n);
   for (let i = 0; i < n; i++) {
-    out[i * 2] = flat[idx[i] * 2];
-    out[i * 2 + 1] = flat[idx[i] * 2 + 1];
+    outPairs[i * 2] = flat[idx[i] * 2];
+    outPairs[i * 2 + 1] = flat[idx[i] * 2 + 1];
+    outTriggers[i] = triggers?.[idx[i]] ?? 'unknown';
   }
-  return out;
+  return { pairs: outPairs, triggers: outTriggers };
 }
 
-function mergeSortedPairs(a: Float64Array, b: Float64Array): Float64Array {
-  if (a.length === 0) return b;
-  if (b.length === 0) return a;
-  const out = new Float64Array(a.length + b.length);
-  let i = 0, j = 0, k = 0;
+function mergeSortedPairs(
+  a: Float64Array, aTrig: string[],
+  b: Float64Array, bTrig: string[],
+): { pairs: Float64Array; triggers: string[] } {
+  if (a.length === 0) return { pairs: b, triggers: bTrig };
+  if (b.length === 0) return { pairs: a, triggers: aTrig };
+  const outPairs = new Float64Array(a.length + b.length);
+  const outTrig = new Array<string>((a.length + b.length) >> 1);
+  let i = 0, j = 0, k = 0, ti = 0, tj = 0, tk = 0;
   while (i < a.length && j < b.length) {
-    if (a[i] <= b[j]) { out[k++] = a[i++]; out[k++] = a[i++]; }
-    else              { out[k++] = b[j++]; out[k++] = b[j++]; }
+    if (a[i] <= b[j]) {
+      outPairs[k++] = a[i++]; outPairs[k++] = a[i++];
+      outTrig[tk++] = aTrig[ti++];
+    } else {
+      outPairs[k++] = b[j++]; outPairs[k++] = b[j++];
+      outTrig[tk++] = bTrig[tj++];
+    }
   }
-  while (i < a.length) out[k++] = a[i++];
-  while (j < b.length) out[k++] = b[j++];
-  return out;
+  while (i < a.length) { outPairs[k++] = a[i++]; outPairs[k++] = a[i++]; outTrig[tk++] = aTrig[ti++]; }
+  while (j < b.length) { outPairs[k++] = b[j++]; outPairs[k++] = b[j++]; outTrig[tk++] = bTrig[tj++]; }
+  return { pairs: outPairs, triggers: outTrig };
 }
 
 // Samples arrive in time order per rank (server uses a monotonic seq on top of
@@ -122,7 +135,8 @@ function buildRankData(w: WireRank): RankData {
   const n = new Float64Array(w.sample_n.length);
   for (let i = 0; i < w.sample_t.length; i++) t[i] = w.sample_t[i];
   for (let i = 0; i < w.sample_n.length; i++) n[i] = w.sample_n[i];
-  return { inferencing: sortPairs(w.inferencing), sampleT: t, sampleN: n };
+  const { pairs, triggers } = sortPairs(w.inferencing, w.inferencing_trigger);
+  return { inferencing: pairs, triggers, sampleT: t, sampleN: n };
 }
 
 function firstVisiblePair(arr: Float64Array, t: number): number {
@@ -195,6 +209,7 @@ export function LLMProfilerPanel({ mode }: Props) {
   const [dragging, setDragging] = useState(false);
   const [hoverX, setHoverX] = useState<number | null>(null);
   const [hoverPlot, setHoverPlot] = useState<{ depth: number; lineY: number } | null>(null);
+  const [hoverTrigger, setHoverTrigger] = useState<{ trigger: string; y: number; x: number } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -233,8 +248,13 @@ export function LLMProfilerPanel({ mode }: Props) {
             mergedRanks[rid] = incoming;
           } else {
             const samples = appendSamples(existing.sampleT, existing.sampleN, w.sample_t, w.sample_n);
+            const merged = mergeSortedPairs(
+              existing.inferencing, existing.triggers,
+              incoming.inferencing, incoming.triggers,
+            );
             mergedRanks[rid] = {
-              inferencing: mergeSortedPairs(existing.inferencing, incoming.inferencing),
+              inferencing: merged.pairs,
+              triggers: merged.triggers,
               sampleT: samples.t,
               sampleN: samples.n,
             };
@@ -553,6 +573,7 @@ export function LLMProfilerPanel({ mode }: Props) {
     if (x < LABEL_WIDTH || x > rect.width) {
       setHoverX(null);
       setHoverPlot(null);
+      setHoverTrigger(null);
       return;
     }
     setHoverX(x);
@@ -560,11 +581,13 @@ export function LLMProfilerPanel({ mode }: Props) {
     const bodyCanvas = bodyCanvasRef.current;
     if (!bodyCanvas) {
       setHoverPlot(null);
+      setHoverTrigger(null);
       return;
     }
     const bodyRect = bodyCanvas.getBoundingClientRect();
     if (e.clientY < bodyRect.top || e.clientY > bodyRect.bottom) {
       setHoverPlot(null);
+      setHoverTrigger(null);
       return;
     }
     const yInBody = e.clientY - bodyRect.top;
@@ -572,41 +595,89 @@ export function LLMProfilerPanel({ mode }: Props) {
     const rankIdx = Math.floor(yInBody / rowPitch);
     if (rankIdx < 0 || rankIdx >= data.rankIds.length) {
       setHoverPlot(null);
+      setHoverTrigger(null);
       return;
     }
     const yInRow = yInBody - rankIdx * rowPitch;
     const plotTopLocal = 2;
     const plotHeightLocal = ROW_HEIGHT - STATE_BAR_HEIGHT - 4;
-    if (yInRow < plotTopLocal || yInRow > plotTopLocal + plotHeightLocal) {
-      setHoverPlot(null);
-      return;
-    }
+    const stateBarTopLocal = ROW_HEIGHT - STATE_BAR_HEIGHT;
+
     const timelineWidth = rect.width - LABEL_WIDTH;
     const duration = viewEnd - viewStart;
     const t = viewStart + ((x - LABEL_WIDTH) / timelineWidth) * duration;
     const rid = data.rankIds[rankIdx];
     const rank = data.ranks[rid];
-    const idx = findSampleAt(rank.sampleT, t);
-    if (idx < 0) {
+
+    // Queue-depth hover (line plot area).
+    if (yInRow >= plotTopLocal && yInRow <= plotTopLocal + plotHeightLocal) {
+      const idx = findSampleAt(rank.sampleT, t);
+      if (idx < 0) {
+        setHoverPlot(null);
+      } else {
+        const depth = rank.sampleN[idx];
+        const absPlotTop = rankIdx * rowPitch + plotTopLocal;
+        const maxQ = Math.max(data.maxQueueDepth, 1);
+        const lineY = absPlotTop + plotHeightLocal - (depth / maxQ) * plotHeightLocal;
+        setHoverPlot({ depth, lineY });
+      }
+    } else {
       setHoverPlot(null);
-      return;
     }
-    const depth = rank.sampleN[idx];
-    const absPlotTop = rankIdx * rowPitch + plotTopLocal;
-    const maxQ = Math.max(data.maxQueueDepth, 1);
-    const lineY = absPlotTop + plotHeightLocal - (depth / maxQ) * plotHeightLocal;
-    setHoverPlot({ depth, lineY });
+
+    // Trigger-dot hover (state bar area). The dot radius scales with the
+    // batch's pixel width (see paintIntervalStarts); we mirror that here so
+    // the hit box matches what the user sees. Pick the nearest dot whose
+    // hit circle contains the cursor.
+    if (yInRow >= stateBarTopLocal && yInRow <= ROW_HEIGHT) {
+      const timeToX = (tt: number) => LABEL_WIDTH + ((tt - viewStart) / duration) * timelineWidth;
+      const absStateBarCy = rankIdx * rowPitch + stateBarTopLocal + STATE_BAR_HEIGHT / 2;
+      const dy = yInBody - absStateBarCy;
+      const startIdx = firstVisiblePair(rank.inferencing, viewStart);
+      const n = rank.inferencing.length >> 1;
+      let bestTrigger: string | null = null;
+      let bestDistSq = Infinity;
+      let bestX = 0;
+      for (let i = startIdx; i < n; i++) {
+        const s = rank.inferencing[i * 2];
+        if (s > viewEnd) break;
+        const eTime = rank.inferencing[i * 2 + 1];
+        const xs = timeToX(s);
+        const pxWidth = Math.max(0, timeToX(eTime) - xs);
+        const radius = Math.max(2, Math.min(pxWidth * 0.4, STATE_BAR_HEIGHT));
+        // Add a small grace so tiny dots remain catchable; the extra pixels
+        // only matter when dots are closer together than the grace distance,
+        // and we break ties by squared distance anyway.
+        const hit = radius + 2;
+        const dx = x - xs;
+        const distSq = dx * dx + dy * dy;
+        if (distSq <= hit * hit && distSq < bestDistSq) {
+          bestDistSq = distSq;
+          bestTrigger = rank.triggers[i] ?? 'unknown';
+          bestX = xs;
+        }
+      }
+      if (bestTrigger !== null) {
+        setHoverTrigger({ trigger: bestTrigger, y: absStateBarCy, x: bestX });
+      } else {
+        setHoverTrigger(null);
+      }
+    } else {
+      setHoverTrigger(null);
+    }
   }, [data, viewStart, viewEnd, dragging]);
 
   const handleChartMouseLeave = useCallback(() => {
     setHoverX(null);
     setHoverPlot(null);
+    setHoverTrigger(null);
   }, []);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     setAutoFollow(false);
     setHoverX(null);
     setHoverPlot(null);
+    setHoverTrigger(null);
     dragRef.current = {
       startX: e.clientX,
       startY: e.clientY,
@@ -711,7 +782,11 @@ export function LLMProfilerPanel({ mode }: Props) {
             style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
           >
             <div style={{ flexShrink: 0, borderBottom: `1px solid ${COLORS.grid}`, background: COLORS.background }}>
-              <canvas ref={headerCanvasRef} style={{ display: 'block' }} />
+              <canvas
+                ref={headerCanvasRef}
+                onMouseMove={handleChartMouseMove}
+                style={{ display: 'block' }}
+              />
             </div>
             <div
               ref={scrollRef}
@@ -720,11 +795,16 @@ export function LLMProfilerPanel({ mode }: Props) {
               <canvas
                 ref={bodyCanvasRef}
                 onMouseDown={handleMouseDown}
+                onMouseMove={handleChartMouseMove}
                 style={{ display: 'block', cursor: dragging ? 'grabbing' : 'grab' }}
               />
               <QueueDepthOverlay
                 hoverX={hoverX}
                 hoverPlot={hoverPlot}
+                viewportWidth={viewportWidth}
+              />
+              <TriggerOverlay
+                hoverTrigger={hoverTrigger}
                 viewportWidth={viewportWidth}
               />
             </div>
@@ -792,9 +872,13 @@ function paintIntervals(
   if (runStart >= 0) ctx.fillRect(leftClip + runStart, y, timelineWidth - runStart, height);
 }
 
-// Draw a small red dot at each inference interval's start time. The state
+// Draw a red dot at each inference interval's start time. The state
 // bar's blue paint runs edge-to-edge when consecutive batches touch, so
 // without this the viewer can't tell one batch from the next.
+//
+// Radius scales with the batch's pixel width so zooming in makes dots
+// grow too (otherwise they turn into tiny specks on top of huge bars).
+// Floor keeps them visible at low zoom; cap keeps them from ballooning.
 function paintIntervalStarts(
   ctx: CanvasRenderingContext2D,
   arr: Float64Array,
@@ -811,11 +895,15 @@ function paintIntervalStarts(
   if (n === 0) return;
   const startIdx = firstVisiblePair(arr, viewStart);
   const cy = barY + barHeight / 2;
-  const radius = Math.min(barHeight / 2, 3);
+  const radiusFloor = 2;
+  const radiusCap = barHeight;
   ctx.fillStyle = color;
   for (let i = startIdx; i < n; i++) {
     const s = arr[i * 2];
     if (s > viewEnd) break;
+    const e = arr[i * 2 + 1];
+    const pxWidth = Math.max(0, timeToX(e) - timeToX(s));
+    const radius = Math.max(radiusFloor, Math.min(pxWidth * 0.4, radiusCap));
     const x = timeToX(s);
     if (x < leftClip - radius || x > rightClip + radius) continue;
     ctx.beginPath();
@@ -1091,6 +1179,47 @@ function QueueDepthOverlay({ hoverX, hoverPlot, viewportWidth }: QueueDepthOverl
       </div>
     </>
   );
+}
+
+interface TriggerOverlayProps {
+  hoverTrigger: { trigger: string; y: number; x: number } | null;
+  viewportWidth: number;
+}
+
+function TriggerOverlay({ hoverTrigger, viewportWidth }: TriggerOverlayProps) {
+  if (hoverTrigger === null || viewportWidth <= 0) return null;
+  const label = formatTriggerLabel(hoverTrigger.trigger);
+  const APPROX_LABEL_WIDTH = 80;
+  const flipLeft = hoverTrigger.x + 8 + APPROX_LABEL_WIDTH > viewportWidth - 4;
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        top: hoverTrigger.y - 22,
+        left: flipLeft ? undefined : hoverTrigger.x + 8,
+        right: flipLeft ? viewportWidth - hoverTrigger.x + 8 : undefined,
+        fontSize: 10,
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+        background: 'rgba(13, 17, 23, 0.9)',
+        color: COLORS.inferenceStart,
+        padding: '1px 5px',
+        borderRadius: 2,
+        border: `1px solid ${COLORS.grid}`,
+        pointerEvents: 'none',
+        whiteSpace: 'nowrap',
+        zIndex: 7,
+      }}
+    >
+      {label}
+    </div>
+  );
+}
+
+function formatTriggerLabel(trigger: string): string {
+  if (trigger === 'time') return 'timeout';
+  if (trigger === 'samples') return 'max samples';
+  if (trigger === 'forced') return 'forced';
+  return trigger;
 }
 
 // Find the largest i with sampleT[i] <= t. Queue depth is a step function
