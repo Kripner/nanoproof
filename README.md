@@ -25,8 +25,6 @@ The best score achieved so far is **38.5% on MiniF2F**.
 cd nanoproof
 uv sync --extra cpu --group dev
 source .venv/bin/activate
-
-hf auth login
 ```
 
 ## Datasets
@@ -43,6 +41,8 @@ nanoproof uses several datasets across pretraining, midtraining, SFT, RL, and ev
 | `deepseek_prover` | RL | DeepSeek-Prover-V1 formal statements |
 | `minif2f` | benchmark | MiniF2F (valid + test) |
 | `proofnet` | benchmark | ProofNet (valid + test) |
+
+`nemotron` is a gated HuggingFace dataset: accept the terms at [huggingface.co/datasets/nvidia/Nemotron-CC-Math-v1](https://huggingface.co/datasets/nvidia/Nemotron-CC-Math-v1) and run `hf auth login` before downloading. The other datasets need no authentication.
 
 Download them all with a single command:
 
@@ -136,7 +136,8 @@ Then add an import in the root module (e.g. `my_project/MyProject.lean`) so that
 actually builds the dependency:
 
 ```lean
-import FormalConjectures
+import FormalConjecturesForMathlib.Analysis.SpecialFunctions.NthRoot
+import FormalConjectures.Util.Answer
 ```
 
 Finally, run `lake update && lake build` in the project directory. The `lake update` step
