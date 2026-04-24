@@ -28,7 +28,7 @@ from nanoproof.inference import setup_distributed_inference
 from nanoproof.inference import TacticModel, BlockingTacticModel, compute_max_batch_prompt_tokens
 from nanoproof.optim import optimizer_to_cpu, optimizer_to_gpu
 from nanoproof.data.bench import minif2f
-from nanoproof.data.check_init import read_lean_version
+from nanoproof.data.check_init import read_lean_version, resolve_lean_project
 from nanoproof.data.bench import proofnet
 from nanoproof.cli import create_monitor, configure_logging, log, log0, set_ddp_info, set_tactic_sink
 from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
@@ -58,7 +58,7 @@ parser.add_argument("--load-buffer", type=str, default="", help="path to a previ
 
 # Infrastructure
 parser.add_argument("--lean-servers", type=str, nargs="+", required=True, help="Lean server addresses (e.g., 10.10.25.33:8000 10.10.25.34); port defaults to 8000")
-parser.add_argument("--lean-project", type=str, required=True, help="Path to the Lean project directory (contains lean-toolchain). The Lean version is read from this file and used to select per-dataset whitelists.")
+parser.add_argument("--lean-project", type=str, default=None, help="Path to the Lean project directory (contains lean-toolchain). The Lean version is read from this file and used to select per-dataset whitelists. Falls back to $LEAN_PROJECT_PATH if unset.")
 parser.add_argument("--inference-server-port", type=int, default=5000, help="base port for per-rank inference servers (rank N uses port base+1+N)")
 
 # Search / collection
@@ -154,6 +154,7 @@ log0(f"=> Setting grad accum steps: {grad_accum_steps}", component="Config")
 
 rank_seed = args.seed + ddp_rank
 
+args.lean_project = resolve_lean_project(args.lean_project)
 lean_version = read_lean_version(args.lean_project)
 log0(f"Lean version: {lean_version} (from {args.lean_project}/lean-toolchain)", component="Config")
 

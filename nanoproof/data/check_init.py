@@ -53,6 +53,16 @@ def read_lean_version(lean_project: str) -> str:
     return m.group(1)
 
 
+def resolve_lean_project(value: str | None) -> str:
+    """Return ``value`` if set, else fall back to ``$LEAN_PROJECT_PATH``."""
+    resolved = value or os.environ.get("LEAN_PROJECT_PATH")
+    if not resolved:
+        raise SystemExit(
+            "--lean-project is required (or set LEAN_PROJECT_PATH env var)"
+        )
+    return resolved
+
+
 # -----------------------------------------------------------------------------
 # Whitelist I/O
 # -----------------------------------------------------------------------------
@@ -253,7 +263,7 @@ def run_check_init_cli(
     theorems: list[BenchTheorem],
     dataset_file: str,
     lean_server: str,
-    lean_project: str,
+    lean_project: str | None,
     num_workers: int,
     limit: int | None,
     verbose: bool,
@@ -267,6 +277,7 @@ def run_check_init_cli(
     When ``save=False`` (benchmarks), failures are surfaced as a prominent
     warning since we never want to silently drop benchmark theorems.
     """
+    lean_project = resolve_lean_project(lean_project)
     lean_version = read_lean_version(lean_project)
     out_path = whitelist_path(dataset_file, lean_version) if save else None
 
@@ -320,9 +331,10 @@ def add_check_init_args(parser, default_jobs: int) -> None:
     parser.add_argument(
         "--lean-project",
         type=str,
-        required=True,
+        default=None,
         help="Path to the Lean project directory (contains lean-toolchain). "
-        "The Lean version from that file is baked into the whitelist filename.",
+        "The Lean version from that file is baked into the whitelist filename. "
+        "Falls back to $LEAN_PROJECT_PATH if unset.",
     )
     parser.add_argument(
         "--jobs",
