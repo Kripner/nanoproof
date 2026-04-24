@@ -469,7 +469,7 @@ def _compact_instrumentation(
 
     `since` is a monotonic sequence cursor (see ``WebMonitor._instr_seq``).
     Only events with seq > since are returned. Pass -inf to return everything
-    (e.g. initial load, or file mode where events don't carry a seq — missing
+    (e.g. initial load, or file mode where events don't carry a seq; missing
     seq is treated as 0, which is > -inf so everything passes).
     """
     out_actors: dict[str, dict[str, Any]] = {}
@@ -794,7 +794,7 @@ class WebMonitor:
         self._llm_out_seq = 0                             # outgoing monotonic seq for delta polls
         self._llm_poll_thread: threading.Thread | None = None
         self._llm_poll_interval = 2.0
-        # inference_timeline.jsonl — persistent log mirroring llm_events /
+        # inference_timeline.jsonl: persistent log mirroring llm_events /
         # llm_samples so the profiler tab works in standalone mode on a
         # finished run. Each line is either a "event" (inference interval)
         # or a "sample" (queue-depth sample). Phase events are read from

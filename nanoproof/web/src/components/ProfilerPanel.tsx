@@ -29,7 +29,7 @@ const COLORS = {
 };
 
 // Translucent fill between phase start and end markers. Kept low so
-// underlying bars stay legible — the user asked for "just a touch".
+// underlying bars stay legible; the user asked for "just a touch".
 const PHASE_OVERLAY_ALPHA = 0.07;
 
 type PhaseName = 'collect' | 'eval' | 'train' | string;
@@ -151,7 +151,7 @@ function computeBounds(data: ProfilerData | null): { min: number; max: number } 
 // removed. An event belongs to the attempt whose outcome comes next in
 // time; if that outcome is "interrupted", the event is dropped. The
 // interrupted outcome markers themselves are dropped too. Events with no
-// following outcome (in-flight attempt) are kept — we don't know yet
+// following outcome (in-flight attempt) are kept; we don't know yet
 // whether they'll be productive.
 function filterProductive(data: ProfilerData): ProfilerData {
   const filteredActors: Record<string, ActorData> = {};
@@ -319,8 +319,8 @@ export function ProfilerPanel({ mode }: Props) {
   // When "productive only" is on, hide events that belong to interrupted
   // proof attempts (abort from stop flag or pause for training). The
   // attempt a given event belongs to is inferred from the actor's outcome
-  // timestamps — all events between outcome[i-1] and outcome[i] are from
-  // attempt i — so we don't need per-event grouping on the wire.
+  // timestamps: all events between outcome[i-1] and outcome[i] are from
+  // attempt i, so we don't need per-event grouping on the wire.
   const view = useMemo(
     () => (productiveOnly && data ? filterProductive(data) : data),
     [data, productiveOnly],
@@ -353,7 +353,7 @@ export function ProfilerPanel({ mode }: Props) {
     [view?.phases],
   );
 
-  // Ticking clock for the "now" cursor line in live mode. 500ms cadence —
+  // Ticking clock for the "now" cursor line in live mode. 500ms cadence:
   // fast enough to feel smooth, slow enough not to burn CPU. The line is
   // rendered as an absolute-positioned div so updates don't repaint the
   // canvases.
@@ -564,7 +564,7 @@ export function ProfilerPanel({ mode }: Props) {
     ctx.globalAlpha = 1;
 
     // Outcome markers go last so they sit on top of the phase overlay
-    // tint and the phase vertical lines — the per-attempt verdict should
+    // tint and the phase vertical lines; the per-attempt verdict should
     // never be occluded by any background decoration.
     for (let i = 0; i < actorIds.length; i++) {
       const aid = actorIds[i];

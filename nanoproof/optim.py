@@ -377,7 +377,7 @@ class DistMuonAdamW(torch.optim.Optimizer):
 
 
 # -----------------------------------------------------------------------------
-# Optimizer state CPU ↔ GPU offloading
+# Optimizer state CPU / GPU offloading
 # -----------------------------------------------------------------------------
 
 def optimizer_to_cpu(optimizer: torch.optim.Optimizer):

@@ -105,8 +105,8 @@ class Prover:
         Uses short server-side timeouts so that abort_check is tested every
         *poll_interval* seconds.  Returns ``(process, reason)`` where reason
         is ``"ok"`` (process is not None), ``"aborted"`` (caller asked to
-        stop — typically end of a collect cycle), or ``"timeout"`` (waited
-        *max_wait* without success — real pool saturation).
+        stop, typically end of a collect cycle), or ``"timeout"`` (waited
+        *max_wait* without success, real pool saturation).
         """
         deadline = time.time() + max_wait
         while True:

@@ -66,7 +66,7 @@ GLOBAL_CONFIG = GlobalConfig()
 
 
 def get_lr_multiplier(progress: float, args) -> float:
-    """Linear warmup → flat → linear warmdown to ``final_lr_frac``.
+    """Linear warmup, flat, then linear warmdown to ``final_lr_frac``.
 
     ``progress`` is in [0, 1]. ``args`` must expose ``warmup_ratio``,
     ``warmdown_ratio`` and ``final_lr_frac`` (typically argparse Namespace).

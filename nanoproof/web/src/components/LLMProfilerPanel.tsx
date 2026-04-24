@@ -100,7 +100,7 @@ function mergeSortedPairs(a: Float64Array, b: Float64Array): Float64Array {
 
 // Samples arrive in time order per rank (server uses a monotonic seq on top of
 // an ordered deque). The delta shipped to us is therefore already sorted and
-// strictly after the previous batch — so concat is safe without a re-sort.
+// strictly after the previous batch, so concat is safe without a re-sort.
 function appendSamples(
   oldT: Float64Array, oldN: Float64Array,
   newT: number[], newN: number[],
@@ -452,7 +452,7 @@ export function LLMProfilerPanel({ mode }: Props) {
                           LABEL_WIDTH, width, stateBarY, STATE_BAR_HEIGHT,
                           COLORS.inferenceStart);
 
-      // Queue-depth line plot (step function — samples are every ~200ms and
+      // Queue-depth line plot (step function; samples are every ~200ms and
       // depth is a discrete integer count).
       paintQueuePlot(ctx, rank.sampleT, rank.sampleN, viewStart, viewEnd,
                      timeToX, LABEL_WIDTH, plotTop, plotHeight,

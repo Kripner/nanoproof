@@ -1,5 +1,5 @@
 """
-Experience collection: replay buffer, theorem sampling, and proof-tree → transitions pipeline.
+Experience collection: replay buffer, theorem sampling, and proof-tree-to-transitions pipeline.
 
 This module owns:
 - TheoremsSampler: weighted sampler over configured training datasets.
