@@ -236,11 +236,11 @@ def compute_max_batch_prompt_tokens(model_config, num_samples: int, device: torc
     # free_driver excludes PyTorch's caching-allocator reserved-but-unused
     # blocks, which are available for new allocations.  Add them back.
     reserved_unused = torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
-    # Use 70% of remaining VRAM for the KV cache.  The remaining 30% covers
+    # Use 65% of remaining VRAM for the KV cache.  The remaining 35% covers
     # per-prompt prefill KV caches, forward-pass activations, allocator
     # fragmentation, and NCCL communication buffers that may appear after
     # this measurement (lazily allocated on the first large all_reduce).
-    available = (free_driver + reserved_unused) * 0.70
+    available = (free_driver + reserved_unused) * 0.65
     dtype_bytes = 2  # bf16/fp16
     head_dim = model_config.n_embd // model_config.n_head
     kv_bytes_per_token = 2 * model_config.n_layer * model_config.n_kv_head * head_dim * dtype_bytes
