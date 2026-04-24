@@ -1,4 +1,5 @@
 import os
+import re
 import argparse
 import subprocess
 import shutil
@@ -30,8 +31,78 @@ from nanoproof.tokenizer import get_tokenizer
 # TODO: maybe look at/exclude repos that have thousands of emojis?
 
 URLS_FILE = os.path.join(os.path.dirname(__file__), "leangithub_urls.txt")
+README_FILE = os.path.join(os.path.dirname(__file__), "leangithubraw_README.md")
+LICENSE_FILE = os.path.join(os.path.dirname(__file__), "leangithubraw_LICENSE")
 BASE_DIR = get_base_dir()
 DATA_DIR = os.path.join(BASE_DIR, "data", "leangithubraw")
+
+_LICENSE_RE = re.compile(r"^(license|licence|copying)([._-].*)?$", re.IGNORECASE)
+_LICENSE_SKIP_DIRS = {".git", ".lake", "node_modules", "build", "_build", "target", "dist"}
+
+
+def _find_license_files(repo_path, max_depth=3):
+    """
+    Find license-like files in a repository.
+    Stage 1: look in the repo root only. If anything matches, return just those.
+    Stage 2: otherwise walk up to `max_depth` levels deep and return every match.
+    Returns a list of (abs_path, rel_path_from_repo_root).
+    """
+    root_hits = []
+    try:
+        root_entries = os.listdir(repo_path)
+    except OSError:
+        return []
+    for name in root_entries:
+        abs_path = os.path.join(repo_path, name)
+        if os.path.isfile(abs_path) and _LICENSE_RE.match(name):
+            root_hits.append((abs_path, name))
+    if root_hits:
+        return root_hits
+
+    repo_path_parts = Path(repo_path).parts
+    hits = []
+    for root, dirs, files in os.walk(repo_path):
+        rel_depth = len(Path(root).parts) - len(repo_path_parts)
+        if rel_depth >= max_depth:
+            dirs[:] = []
+            continue
+        dirs[:] = [d for d in dirs if d not in _LICENSE_SKIP_DIRS and not d.startswith(".")]
+        for name in files:
+            if _LICENSE_RE.match(name):
+                abs_path = os.path.join(root, name)
+                rel_path = os.path.relpath(abs_path, repo_path)
+                hits.append((abs_path, rel_path))
+    return hits
+
+
+def _collect_licenses(repo_path, repo_name, repo_url, commit_hash, licenses_dir):
+    """Copy repo license files into licenses/<repo_name>/, or write NO_LICENSE.md."""
+    target_dir = os.path.join(licenses_dir, repo_name)
+    os.makedirs(target_dir, exist_ok=True)
+
+    hits = _find_license_files(repo_path)
+    if hits:
+        for abs_path, rel_path in hits:
+            dest = os.path.join(target_dir, rel_path)
+            os.makedirs(os.path.dirname(dest) or target_dir, exist_ok=True)
+            shutil.copy2(abs_path, dest)
+        return
+
+    note = (
+        f"No LICENSE / LICENCE / COPYING file was found in {repo_url}\n"
+        f"at commit {commit_hash}.\n"
+        f"\n"
+        f"Per GitHub's documentation, when a repository is published without a\n"
+        f"license, default copyright law applies: the author reserves all rights,\n"
+        f"and no one may reproduce, distribute, or create derivative works without\n"
+        f"explicit permission.\n"
+        f"\n"
+        f"See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/licensing-a-repository#choosing-the-right-license\n"
+    )
+    with open(os.path.join(target_dir, "NO_LICENSE.md"), "w") as f:
+        f.write(note)
+    print(f"[license] {repo_name}: no license file found, wrote NO_LICENSE.md")
+
 
 def _build_dataset():
     """
@@ -50,9 +121,12 @@ def _build_dataset():
     print(f"Found {len(urls)} repositories to process.")
     
     repos_dir = os.path.join(DATA_DIR, "repos")
+    licenses_dir = os.path.join(DATA_DIR, "licenses")
     os.makedirs(repos_dir, exist_ok=True)
+    os.makedirs(licenses_dir, exist_ok=True)
     print(f"Cloning repositories into: {repos_dir}")
-    
+    print(f"Collecting license files into: {licenses_dir}")
+
     total_chars = 0
     total_bytes = 0
     total_files = 0
@@ -62,10 +136,14 @@ def _build_dataset():
     for repo_url in pbar:
         repo_name = repo_url.split('/')[-1].replace('.git', '')
         repo_parquet_path = os.path.join(output_dir, f"repo_{repo_name}.parquet")
-        if os.path.exists(repo_parquet_path):
+        repo_license_dir = os.path.join(licenses_dir, repo_name)
+        parquet_cached = os.path.exists(repo_parquet_path)
+        license_cached = os.path.isdir(repo_license_dir) and bool(os.listdir(repo_license_dir))
+
+        if parquet_cached and license_cached:
             parquet_files.append(repo_parquet_path)
             continue
-        
+
         repo_path = os.path.join(repos_dir, repo_name)
         try:
             subprocess.run(
@@ -77,8 +155,10 @@ def _build_dataset():
             )
         except subprocess.CalledProcessError as e:
             print(f"Failed to clone {repo_url}, skipping: {e}")
+            if parquet_cached:
+                parquet_files.append(repo_parquet_path)
             continue
-        
+
         # get commit hash
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -88,39 +168,45 @@ def _build_dataset():
             check=True
         )
         commit_hash = result.stdout.strip()
-        
-        repo_data = []
-        base_url = repo_url[:-4] if repo_url.endswith('.git') else repo_url
-        for root, _, files in os.walk(repo_path):
-            for file in files:
-                if not file.endswith(".lean"):
-                    continue
-                file_path = os.path.join(root, file)
-                rel_path = os.path.relpath(file_path, repo_path)
-                
-                with open(file_path, "rb") as f:
-                    content_bytes = f.read()
-                text = content_bytes.decode("utf-8")
-                full_url = f"{base_url}/blob/{commit_hash}/{rel_path}"
-                repo_data.append({
-                    "text": text,
-                    "url": full_url,
-                    "commit": commit_hash,
-                })
-                
-                total_bytes += len(content_bytes)
-                total_chars += len(text)
-                total_files += 1
 
-                mb = total_bytes / (1024 * 1024)
-                pbar.set_postfix_str(f"{repo_name}, total: {mb:.2f} MB, {total_files} files")
+        if not license_cached:
+            _collect_licenses(repo_path, repo_name, repo_url, commit_hash, licenses_dir)
 
-        if repo_data:
-            df_repo = pd.DataFrame(repo_data)
-            table = pa.Table.from_pandas(df_repo)
-            pq.write_table(table, repo_parquet_path)
+        if not parquet_cached:
+            repo_data = []
+            base_url = repo_url[:-4] if repo_url.endswith('.git') else repo_url
+            for root, _, files in os.walk(repo_path):
+                for file in files:
+                    if not file.endswith(".lean"):
+                        continue
+                    file_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(file_path, repo_path)
+
+                    with open(file_path, "rb") as f:
+                        content_bytes = f.read()
+                    text = content_bytes.decode("utf-8")
+                    full_url = f"{base_url}/blob/{commit_hash}/{rel_path}"
+                    repo_data.append({
+                        "text": text,
+                        "url": full_url,
+                        "commit": commit_hash,
+                    })
+
+                    total_bytes += len(content_bytes)
+                    total_chars += len(text)
+                    total_files += 1
+
+                    mb = total_bytes / (1024 * 1024)
+                    pbar.set_postfix_str(f"{repo_name}, total: {mb:.2f} MB, {total_files} files")
+
+            if repo_data:
+                df_repo = pd.DataFrame(repo_data)
+                table = pa.Table.from_pandas(df_repo)
+                pq.write_table(table, repo_parquet_path)
+                parquet_files.append(repo_parquet_path)
+        else:
             parquet_files.append(repo_parquet_path)
-            
+
         shutil.rmtree(repo_path)
 
     if not parquet_files:
@@ -158,14 +244,17 @@ def _build_dataset():
 def _publish_dataset(repo_id):
     """Uploads the dataset to Hugging Face Hub."""
     data_dir = DATA_DIR
-        
+
     if not os.path.exists(data_dir):
         print(f"Data directory {data_dir} does not exist. Build the dataset first.")
         return
 
+    assert os.path.exists(README_FILE), f"Missing README at {README_FILE}"
+    assert os.path.exists(LICENSE_FILE), f"Missing LICENSE at {LICENSE_FILE}"
+
     print(f"Uploading {data_dir} to {repo_id}...")
     api = HfApi()
-    
+
     try:
         create_repo(repo_id, repo_type="dataset", exist_ok=True)
         api.upload_folder(
@@ -174,6 +263,18 @@ def _publish_dataset(repo_id):
             repo_type="dataset",
             path_in_repo=".",
             ignore_patterns=["*.lock", "*.tmp"]
+        )
+        api.upload_file(
+            path_or_fileobj=README_FILE,
+            path_in_repo="README.md",
+            repo_id=repo_id,
+            repo_type="dataset",
+        )
+        api.upload_file(
+            path_or_fileobj=LICENSE_FILE,
+            path_in_repo="LICENSE",
+            repo_id=repo_id,
+            repo_type="dataset",
         )
         print(f"Successfully uploaded to https://huggingface.co/datasets/{repo_id}")
     except Exception as e:

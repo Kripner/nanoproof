@@ -1,0 +1,37 @@
+This LICENSE applies to the Lean-Github-Raw dataset compilation - that is,
+the selection of source repositories, schema, and metadata produced by the
+nanoproof project (https://github.com/Kripner/nanoproof).
+
+Each .lean sample in this dataset retains the license of its upstream
+source repository. See the licenses/<repo>/ subdirectory for the original
+license text of each source, and the `url` and `commit` columns of the
+parquet files to resolve the exact source file. Repositories that shipped
+no LICENSE file are under default copyright per standard copyright law:
+all rights reserved by the original authors. See
+https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/licensing-a-repository#choosing-the-right-license
+
+The compilation itself is released under the MIT License:
+
+----------------------------------------------------------------------
+
+MIT License
+
+Copyright (c) 2025 Matěj Kripner
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
