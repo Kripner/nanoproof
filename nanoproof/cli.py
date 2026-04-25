@@ -1886,7 +1886,7 @@ class WebMonitor:
     def lean_server_metrics(self) -> dict[str, float]:
         """Per-leanserver metrics flattened into a wandb-friendly dict.
 
-        Call once per training step and splat into ``wandb_run.log(...)``.
+        Call once per training step and splat into ``run_log.log(...)``.
         Returned keys look like::
 
             monitoring/lean/10_10_25_36/ram_percent

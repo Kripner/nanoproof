@@ -125,7 +125,7 @@ user_config["model_dir"] = model_dir
 configure_logging(output_dir)
 
 # metrics logging init
-wandb_run = create_metrics_logger("nanoproof-rl", args, master_process, user_config, log_dir=log_dir, save_code=True)
+run_log = create_metrics_logger("nanoproof-rl", args, master_process, user_config, log_dir=log_dir, save_code=True)
 
 # Enable memory profiling before model load so model weight allocations are captured.
 if args.memory_profile:
@@ -373,7 +373,7 @@ while True:
                 wandb_data["minif2f_errors"] = minif2f_results['errors']
             if proofnet_results['errors'] > 0:
                 wandb_data["proofnet_errors"] = proofnet_results['errors']
-            wandb_run.log(wandb_data)
+            run_log.log(wandb_data)
 
             save_eval_results_to_run_dir(output_dir, step, "minif2f", minif2f_results)
             save_eval_results_to_run_dir(output_dir, step, "proofnet", proofnet_results)
@@ -512,7 +512,7 @@ while True:
     rl_monitor.update_training(step, mean_loss, total_tokens)
     if master_process:
         log(f"Step {step:05d} | Training loss: {mean_loss:.6f} | num_tokens: {total_tokens:,} | replay_buffer_size: {len(replay_buffer.buffer)}", component="Train")
-    wandb_run.log({
+    run_log.log({
         "step": step,
         "train_loss": mean_loss,
         "num_tokens": total_tokens,

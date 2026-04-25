@@ -232,7 +232,7 @@ if total_batch_size % world_tokens_per_fwdbwd != 0:
 log_dir, model_dir = create_run_dirs("pretrain", args.run, args_dict=user_config)
 
 # metrics logging init
-wandb_run = create_metrics_logger("nanoproof", args, master_process, {**user_config, "log_dir": log_dir, "model_dir": model_dir}, log_dir=log_dir)
+run_log = create_metrics_logger("nanoproof", args, master_process, {**user_config, "log_dir": log_dir, "model_dir": model_dir}, log_dir=log_dir)
 
 # LR scaling for batch size
 batch_lr_scale = 1.0
@@ -345,7 +345,7 @@ while True:
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.6f}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
-        wandb_run.log({"step": step, "total_training_flops": flops_so_far, "total_training_time": total_training_time, "val/bpb": val_bpb})
+        run_log.log({"step": step, "total_training_flops": flops_so_far, "total_training_time": total_training_time, "val/bpb": val_bpb})
         model.train()
 
     # Sample from model
@@ -445,7 +445,7 @@ while True:
         total_training_time += dt
     print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | total time: {total_training_time/60:.2f}m")
     if step % 100 == 0:
-        wandb_run.log({
+        run_log.log({
             "step": step, "total_training_flops": flops_so_far, "total_training_time": total_training_time,
             "train/loss": debiased_smooth_loss, "train/lrm": lrm, "train/dt": dt, "train/tok_per_sec": tok_per_sec, "train/mfu": mfu,
         })
@@ -469,5 +469,5 @@ if val_bpb is not None:
     print0(f"Minimum validation bpb: {min_val_bpb:.6f}")
 
 # Cleanup
-wandb_run.finish()
+run_log.finish()
 compute_cleanup()

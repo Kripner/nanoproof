@@ -448,7 +448,8 @@ def add_logging_args(parser):
     """Add --run and --loggers arguments to an argparse parser."""
     parser.add_argument("--run", type=str, default="dummy",
                         help="Run name ('dummy' disables logging)")
-    parser.add_argument("--loggers", nargs="*", default=["wandb", "goodseed"],
+    parser.add_argument("--loggers", nargs="*", default=["wandb"],
+                        choices=["wandb", "goodseed"],
                         help="Logging backends to use (default: wandb goodseed)")
 
 

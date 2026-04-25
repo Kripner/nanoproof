@@ -73,7 +73,7 @@ get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else l
 log_dir, model_dir = create_run_dirs("midtrain", args.run, args_dict=user_config)
 
 # metrics logging init
-wandb_run = create_metrics_logger("nanoproof-mid", args, master_process, {**user_config, "log_dir": log_dir, "model_dir": model_dir}, log_dir=log_dir)
+run_log = create_metrics_logger("nanoproof-mid", args, master_process, {**user_config, "log_dir": log_dir, "model_dir": model_dir}, log_dir=log_dir)
 
 # Load the model and tokenizer
 model, tokenizer, meta = load_model(args.model_path, device, phase="train")
@@ -133,7 +133,7 @@ while True:
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
-        wandb_run.log({
+        run_log.log({
             "step": step,
             "total_training_flops": flops_so_far,
             "total_training_time": total_training_time,
@@ -206,7 +206,7 @@ while True:
         total_training_time += dt # only count the time after the first 10 steps
     print0(f"step {step:05d} ({pct_done_str}) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | total time: {total_training_time/60:.2f}m")
     if step % 10 == 0:
-        wandb_run.log({
+        run_log.log({
             "step": step,
             "total_training_flops": flops_so_far,
             "total_training_time": total_training_time,
@@ -223,5 +223,5 @@ print0(f"Total training time: {total_training_time/60:.2f}m")
 print0(f"Minimum validation bpb: {min_val_bpb:.4f}")
 
 # cleanup
-wandb_run.finish() # wandb run finish
+run_log.finish() # wandb run finish
 compute_cleanup()

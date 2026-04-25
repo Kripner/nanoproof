@@ -75,7 +75,7 @@ master_process = ddp_rank == 0
 log_dir, model_dir = create_run_dirs("sft", args.run, args_dict=user_config)
 
 # metrics logging init
-wandb_run = create_metrics_logger("nanoproof-sft", args, master_process, {**user_config, "log_dir": log_dir, "model_dir": model_dir}, log_dir=log_dir, save_code=True)
+run_log = create_metrics_logger("nanoproof-sft", args, master_process, {**user_config, "log_dir": log_dir, "model_dir": model_dir}, log_dir=log_dir, save_code=True)
 
 # Load the model and tokenizer
 if args.resume_from is not None:
@@ -170,7 +170,7 @@ while True:
         # Create confusion matrix for wandb
         bin_labels = [str(i) for i in range(1, 65)]
 
-        wandb_run.log({
+        run_log.log({
             "step": step,
             "val_loss": val_loss,
             "val_full_acc": tactic_results["full_acc"],
@@ -330,7 +330,7 @@ hx0 : P x0
     train_loss_item = train_loss.item()
     num_tokens_item = num_tokens.item()
     print0(f"Step {step:05d} ({pct_done_str}, ep {epoch:02d}/{args.num_epochs:02d}) | Training loss: {train_loss_item:.6f}| lrm: {lrm:.6f}| num_tokens: {num_tokens_item:,}")
-    wandb_run.log({
+    run_log.log({
         "step": step,
         "lrm": lrm,
         "train_loss": train_loss_item,
@@ -355,5 +355,5 @@ if master_process:
     print(f"Saved model checkpoint to {model_dir}")
 
 # Cleanup
-wandb_run.finish()
+run_log.finish()
 compute_cleanup()
