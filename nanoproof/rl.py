@@ -34,13 +34,9 @@ from nanoproof.cli import create_monitor, configure_logging, log, log0, set_ddp_
 from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
 from nanoproof.data.sft.leantree_dataloader import sft_data_generator
 
-# TODO: in each episode, save a sample of training data (right before it goes into the model)
-
 # TODO: matchmaker
 
 # TODO: maybe log numbers of OR and AND nodes in the proof searches
-
-# TODO: maybe migrate to newer Lean?
 
 # TODO: the eval is now a bit unfair, since when the prover finds an invalid (e.g. self-referential) proof, it's not allowed to continue
 
