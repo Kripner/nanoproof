@@ -162,7 +162,7 @@ parser.add_argument(
     default=1,
     help="number of optimizer updates per training step (i.e. per collection cycle)",
 )
-parser.add_argument("--fraction-sft", type=float, default=0.2)
+parser.add_argument("--fraction-sft", type=float, default=0.1)
 parser.add_argument("--augment-data", type=bool, default=True)
 parser.add_argument("--value-weight", type=float, default=0.01)
 

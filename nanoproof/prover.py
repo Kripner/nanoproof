@@ -375,7 +375,7 @@ class ProverWorker:
                 for i, state in enumerate(thread_states):
                     monitor.update_local_actor(i, state=state)
             loop_count[0] += 1
-            if loop_count[0] % 50 == 0:
+            if loop_count[0] % 100 == 0:
                 logger.info(
                     f"Progress: {experience.num_transitions()}/{target_transitions} transitions"
                 )
