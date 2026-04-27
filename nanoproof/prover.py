@@ -219,17 +219,17 @@ class ProverWorker:
     only in how they park actors on exit:
 
     - ``collect()`` parks with a *pause*: the installed job stays live, so
-      an actor that is blocked deep inside MCTS (waiting on paused
-      inference during a training step) resumes its proof on the same
-      tree when inference resumes. A completed proof is attributed to
-      whatever job is current at completion time, so mid-proof work from
-      step N naturally lands in step N+1's experience. Lean leases held
-      by mid-proof actors stay held across the training step.
-    - ``evaluate()`` parks with a *release*: the release event is raised,
-      mid-proof actors abort and return their Lean leases, and the job
-      is cleared. This keeps eval-theorem results from leaking into the
-      next collect cycle and ensures leases are not tied to theorems
-      that will never be completed in the new job.
+      an actor blocked deep inside MCTS (waiting on paused inference
+      during a training step) resumes its proof on the same tree when
+      inference resumes.
+    - ``evaluate()`` parks with a *release*: the release event is raised
+      so mid-proof actors abort, dropping their Lean leases and the
+      partially-built MCTS trees, then the job is cleared.
+
+    Each actor reports its result to the job that *issued* the theorem,
+    not to whatever job happens to be current at completion time. That
+    keeps a slow collect-cycle straggler from contaminating an eval that
+    starts before the straggler finishes.
 
     Actors carry a single abort signal (``_release_event``) and a single
     blocking point (paused inference inside ``sample_tactic``). There is
@@ -471,17 +471,13 @@ class ProverWorker:
     def _run_job(self, job: _Job, *, park: Literal["pause", "release"]):
         """Install *job*, drive the done-check loop, then park the pool.
 
-        ``park == "pause"`` leaves the job installed on exit so a
-        straggler completing after done_check fires (common for collect)
-        is attributed to whichever job is current when the proof lands.
-        Between ``collect()`` calls this lets step-N mid-proof work
-        become step-N+1 training data.
+        ``park == "pause"`` leaves the job installed on exit. Mid-proof
+        actors keep working and report back to the same job when they
+        finish (issuing-job attribution).
 
-        ``park == "release"`` raises the release event, waits for
-        mid-proof actors to abort, then clears the job. Eval uses it on
-        *both* ends: a pre-install release drains any collect stragglers
-        so their results do not get mis-attributed to eval's on_result;
-        a post-done release frees Lean leases that would otherwise sit
+        ``park == "release"`` raises the release event so mid-proof
+        actors abort, waits for them to drain, then clears the job.
+        Used by eval to free Lean leases that would otherwise sit
         idle tied to eval theorems that will never be resumed.
         """
         if park == "release":
@@ -601,29 +597,27 @@ class ProverWorker:
                                              actor=actor_id, lean=f"{lean_address}:{lean_port}")
                         traceback.print_exc()
                         break
+
+                # Report directly to the job that issued this theorem - NOT to
+                # whatever happens to be current now. Routing to "the current
+                # job" is racy: a collect-cycle actor whose proof finishes just
+                # as eval is installing its job would have its result appended
+                # to eval's results list, contaminating the eval JSONL with
+                # training-set theorems. The decrement below is in the same
+                # finally as the increment, so a concurrent _release_and_idle
+                # cannot complete (and thus eval cannot install its job) until
+                # this on_result call has finished.
+                if not skip_report:
+                    is_solved = bool(game and game.root and game.root.is_solved)
+                    logger.debug(f"Actor {actor_id}: {theorem_id} {'solved' if is_solved else 'unsolved'} in {game.num_iterations if game else 0} iters")
+                    if is_solved:
+                        logger.debug(f"Actor {actor_id}: proof tree for {theorem_id}:\n{game.root.pp_tree()}")
+                    if error is not None:
+                        self._set_thread_state(actor_id, "error")
+                    job.on_result(theorem_id, theorem, game, error)
             finally:
                 with self._lock:
                     self._actors_mid_proof -= 1
-
-            # Route the result to whichever job is current NOW, not the
-            # one this proof started under. For collect->train->collect
-            # that lets step-N mid-proof work land in step-N+1's
-            # experience. For eval, a pre-install release in _run_job
-            # guarantees no collect stragglers are alive at this point,
-            # so same-type attribution still holds. If current_job is
-            # None (released, between jobs) the straggler's result is
-            # dropped, which is the intended release semantic.
-            with self._lock:
-                current_job = self._current_job
-
-            if not skip_report and current_job is not None:
-                is_solved = bool(game and game.root and game.root.is_solved)
-                logger.debug(f"Actor {actor_id}: {theorem_id} {'solved' if is_solved else 'unsolved'} in {game.num_iterations if game else 0} iters")
-                if is_solved:
-                    logger.debug(f"Actor {actor_id}: proof tree for {theorem_id}:\n{game.root.pp_tree()}")
-                if error is not None:
-                    self._set_thread_state(actor_id, "error")
-                current_job.on_result(theorem_id, theorem, game, error)
 
             # Always flush the timeline, including for aborted proofs:
             # the LLM/Lean work they did belongs on the profiler, and
