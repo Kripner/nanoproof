@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 import enum
 import logging
-from typing import Self
+from typing import Callable, Self
 import math
 import uuid
 
@@ -10,7 +10,7 @@ from leantree.repl_adapter.interaction import LeanProcess, LeanProcessException
 from leantree.utils import RemoteException
 
 from nanoproof.common import pretty_print_tree, ValueOrError, theorem_to_example, Player, TimelineRecorder
-from nanoproof.cli import get_monitor, log_tactic, log
+from nanoproof.cli import get_monitor, log
 from nanoproof.inference import TacticModel, BlockingTacticModel
 
 logger = logging.getLogger(__name__)
@@ -345,23 +345,33 @@ class MCTSAbortedError(Exception):
     pass
 
 
-def run_mcts(config: SearchConfig, game: Game, model: "TacticModel | BlockingTacticModel", expansion_callback=None, tactic_callback=None, abort_check=None, timeline: TimelineRecorder | None = None) -> int:
+def run_mcts(
+    config: SearchConfig,
+    game: Game,
+    model: "TacticModel | BlockingTacticModel",
+    expansion_callback=None,
+    abort_check=None,
+    timeline: TimelineRecorder | None = None,
+    tactic_sink: Callable[[str, str, str], None] | None = None,
+) -> int:
     """
     Run MCTS to find a proof.
-    
+
     Args:
         config: MCTS configuration
         game: The game to solve
         model: Tactic model (local or remote)
         expansion_callback: Optional callable() to call on each expansion
-        tactic_callback: Optional callable(state_str, tactic, success) to call on each tactic
         abort_check: Optional callable() -> bool that returns True if MCTS should abort early.
                      This is checked each iteration and allows callers to cancel search
                      (e.g., when prover is paused and needs to free Lean processes).
-    
+        tactic_sink: Optional ``(state, tactic, status)`` callback fired once
+                     per tactic attempt during expansion. ``status`` is one of
+                     ``"error"`` / ``"cycle"`` / ``"success"``.
+
     Returns:
         The number of iterations (simulations) that were run.
-    
+
     Raises:
         MCTSAbortedError: If abort_check returns True during search.
     """
@@ -396,7 +406,8 @@ def run_mcts(config: SearchConfig, game: Game, model: "TacticModel | BlockingTac
         value = -value  # convert to MCTS value scale (negative proof depth)
 
         expand_node(node, tactics, tactic_logprobs, config.prior_temperature,
-                    timeline=timeline, abort_check=abort_check)
+                    timeline=timeline, abort_check=abort_check,
+                    tactic_sink=tactic_sink)
 
         # Record expansion for monitoring
         monitor = get_monitor()
@@ -404,13 +415,6 @@ def run_mcts(config: SearchConfig, game: Game, model: "TacticModel | BlockingTac
             monitor.record_expansion()
         if expansion_callback is not None:
             expansion_callback()
-        
-        # Record tactics for monitoring (if we have children, tactics were applied)
-        if tactic_callback is not None and node.children:
-            for tactic, child in node.children.items():
-                # A tactic is successful if it led to a valid state
-                success = child.state is not None and len(child.state) > 0
-                tactic_callback(str(node.state[0].state).strip(), tactic, success)
 
         backpropagate(
             search_path,
@@ -487,6 +491,7 @@ def expand_node(
         temperature: float,
         timeline: TimelineRecorder | None = None,
         abort_check=None,
+        tactic_sink: "Callable[[str, str, str], None] | None" = None,
 ):
     node.evaluations += 1
     policy = {
@@ -495,6 +500,11 @@ def expand_node(
     }
     node.children = {}
     state_str = str(node.state[0].state).strip() if len(node.state) == 1 else "<multi-branch>"
+
+    def _emit(status: str) -> None:
+        if tactic_sink is not None:
+            tactic_sink(state_str, action, status)
+
     for action, p in policy.items():
         if abort_check is not None and abort_check():
             raise MCTSAbortedError("MCTS aborted during node expansion")
@@ -518,14 +528,13 @@ def expand_node(
             raise
         if not new_branches.is_success():
             # Invalid action encountered.
-            log_tactic(state_str, action, status="error")
-            #print(f"TACTIC ERROR (action='{action}'): '{new_branches.error}'")
+            _emit("error")
             continue
         if is_cycling(node, new_branches.value):
             # Cycle detected.
-            log_tactic(state_str, action, status="cycle")
+            _emit("cycle")
             continue
-        log_tactic(state_str, action, status="success")
+        _emit("success")
         # new_branches = [b for b in new_branches.value if not b.state.is_solved()]
         new_branches = new_branches.value
         child = Node(

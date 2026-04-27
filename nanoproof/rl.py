@@ -30,7 +30,7 @@ from nanoproof.optim import optimizer_to_cpu, optimizer_to_gpu
 from nanoproof.data.bench import minif2f
 from nanoproof.data.check_init import read_lean_version, resolve_lean_project
 from nanoproof.data.bench import proofnet
-from nanoproof.cli import create_monitor, configure_logging, log, log0, set_ddp_info, set_tactic_sink
+from nanoproof.cli import create_monitor, configure_logging, log, log0, set_ddp_info
 from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
 from nanoproof.data.sft.leantree_dataloader import sft_data_generator
 
@@ -320,7 +320,6 @@ while True:
         model.eval()
         rl_monitor.set_phase("evaluating")
         eval_experience = CollectedExperience()
-        set_tactic_sink(eval_experience.record_tactic)
 
         # Policy evaluation (all ranks, uses DDP collectives internally)
         eval_steps = 200
@@ -339,9 +338,13 @@ while True:
             proofnet_theorems = proofnet.list_theorems(split="valid")
 
             log(f"Evaluating on {len(minif2f_theorems)} theorems from MiniF2F", component="Eval")
-            minif2f_results = prover.evaluate(minif2f_theorems, dataset_name="MiniF2F", num_simulations=args.num_simulations_eval)
+            minif2f_results = prover.evaluate(minif2f_theorems, dataset_name="MiniF2F",
+                                              num_simulations=args.num_simulations_eval,
+                                              tactic_sink=eval_experience.record_tactic)
             log(f"Evaluating on {len(proofnet_theorems)} theorems from ProofNet", component="Eval")
-            proofnet_results = prover.evaluate(proofnet_theorems, dataset_name="ProofNet", num_simulations=args.num_simulations_eval)
+            proofnet_results = prover.evaluate(proofnet_theorems, dataset_name="ProofNet",
+                                               num_simulations=args.num_simulations_eval,
+                                               tactic_sink=eval_experience.record_tactic)
 
             rl_monitor.record_eval(step, "MiniF2F", minif2f_results['success_rate'],
                                    minif2f_results['solved'], minif2f_results['total'], minif2f_results['errors'])
@@ -404,7 +407,6 @@ while True:
         # Prover eval can take many minutes; no timeout (use SIGUSR1 to debug).
         active_barrier(f"prover_eval_{step}", timeout=None)
 
-        set_tactic_sink(None)
         if master_process:
             eval_experience.save(eval_dir(output_dir, step))
 
@@ -419,12 +421,13 @@ while True:
         timer.start("collect")
         rl_monitor.record_phase_event("collect", "start")
         experience = CollectedExperience()
-        set_tactic_sink(experience.record_tactic)
         model.eval()
         rl_monitor.set_step(step)
 
         if master_process:
-            prover.collect(theorems_sampler, args.collect_transitions, experience, num_simulations=args.num_simulations_collect)
+            prover.collect(theorems_sampler, args.collect_transitions, experience,
+                           num_simulations=args.num_simulations_collect,
+                           tactic_sink=experience.record_tactic)
 
         model.train()
         timer.end("collect")
@@ -439,7 +442,6 @@ while True:
 
         # Rank 0 contributes its experience's transitions; workers pass [].
         replay_buffer.extend_and_sync(experience.transitions() if master_process else [])
-        set_tactic_sink(None)
 
         if master_process:
             rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))

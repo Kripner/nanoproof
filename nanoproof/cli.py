@@ -49,29 +49,6 @@ _ddp_rank: int = 0  # DDP rank for logging
 _error_dedup: dict[tuple[str, str], tuple[float, int]] = {}
 _error_dedup_window_seconds: float = 60.0
 
-# Tactic-attempt sink. MCTS (``nanoproof.search``) calls ``log_tactic`` from
-# inside ``expand_node``; a higher-level owner (typically a
-# ``CollectedExperience``) registers its receiver via ``set_tactic_sink`` at
-# phase start, and unregisters with ``set_tactic_sink(None)`` at phase end.
-# Stray writes outside a phase are dropped.
-_tactic_sink: "Callable[[str, str, str], None] | None" = None
-
-
-def set_tactic_sink(sink: "Callable[[str, str, str], None] | None") -> None:
-    """Register (or clear) the receiver of :func:`log_tactic` events."""
-    global _tactic_sink
-    _tactic_sink = sink
-
-
-def log_tactic(state: str, tactic: str, status: str) -> None:
-    """Forward a tactic attempt to the registered sink, or drop it.
-
-    Lock-free: the sink is responsible for thread safety on its end.
-    """
-    sink = _tactic_sink
-    if sink is not None:
-        sink(state, tactic, status)
-
 # In-memory log buffers for web streaming
 _log_buffers: dict[str, deque] = {}
 _log_buffers_lock = threading.Lock()

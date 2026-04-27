@@ -7,9 +7,10 @@ This module owns:
   sampled during training.
 - CollectedExperience: per-phase accumulator of full proof trees (plus their
   simplified versions and extracted transitions) and generated tactics.
-  ``record_tactic`` is the receiver side of :mod:`nanoproof.tactic_sink`;
-  the RL loop calls ``set_tactic_sink(exp.record_tactic)`` at phase start.
-  Also owns the disk-save of ``collected.jsonl`` / ``generated_tactics.jsonl``.
+  ``record_tactic`` is wired up as the per-job ``tactic_sink`` passed to
+  ``prover.collect()`` / ``prover.evaluate()``; results are written to disk
+  by :meth:`CollectedExperience.save` (``collected.jsonl`` /
+  ``generated_tactics.jsonl``).
 - compute_value_target: assigns regression targets to nodes of a solved proof tree
 - extract_transitions: walks a solved proof tree and yields training transitions
 - prune_redundant_nodes / prune_redundant_node: tree-editing pass that removes
@@ -179,10 +180,11 @@ class CollectedExperience:
 
     Proofs and tactics are populated by worker threads during the phase:
     :meth:`record_proof` is called once per successful proof from the prover
-    callback; :meth:`record_tactic` is called from inside parallel MCTS
-    expansion for every attempted tactic. At the end of the phase the RL
-    loop pulls :meth:`transitions` into :class:`ReplayBuffer` and calls
-    :meth:`save` to write ``collected.jsonl`` and ``generated_tactics.jsonl``.
+    callback; :meth:`record_tactic` is wired in as the job's per-call
+    ``tactic_sink`` and fires for every attempted tactic during MCTS
+    expansion. At the end of the phase the RL loop pulls :meth:`transitions`
+    into :class:`ReplayBuffer` and calls :meth:`save` to write
+    ``collected.jsonl`` and ``generated_tactics.jsonl``.
     """
 
     TRAIN_SUBSAMPLE_K = 100

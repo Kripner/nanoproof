@@ -122,7 +122,8 @@ class Prover:
 
     def prove(self, client: LeanClient, theorem: BenchTheorem, expansion_callback: Callable[[], None] | None = None,
               abort_check: Callable[[], bool] | None = None,
-              timeline: TimelineRecorder | None = None) -> Game | None:
+              timeline: TimelineRecorder | None = None,
+              tactic_sink: Callable[[str, str, str], None] | None = None) -> Game | None:
         """Run a single MCTS proof game.
 
         Returns a :class:`Game` with results, or ``None`` if Lean setup fails.
@@ -161,6 +162,7 @@ class Prover:
                 expansion_callback=expansion_callback,
                 abort_check=abort_check,
                 timeline=timeline,
+                tactic_sink=tactic_sink,
             )
             if game.root.is_solved:
                 verify_err = verify_node(game.root, timeout=self.config.verify_timeout)
@@ -196,11 +198,11 @@ class Prover:
 class _Job:
     """One unit of work delivered to the actor pool.
 
-    Actors read ``get_theorem`` / ``on_result`` from the CURRENTLY installed
-    job at each boundary (before fetching, after a proof completes), not
-    from the job that was current when a proof started. That is what lets a
-    mid-MCTS actor whose proof started in step N deliver its result into
-    step N+1's experience once training is done.
+    Each actor captures the job at theorem-issue time and uses it for the
+    full lifecycle (``get_theorem`` -> prove -> ``on_result`` /
+    ``tactic_sink``). A late-completing straggler from a finished job thus
+    keeps reporting back to that job, never to whatever job is current
+    now.
     """
     get_theorem: Callable[[], Optional[tuple[str, BenchTheorem]]]
     on_result: Callable[[str, BenchTheorem, Optional[Game], Optional[str]], None]
@@ -208,6 +210,7 @@ class _Job:
     poll_callback: Optional[Callable[[list[str]], None]]
     record_timeline: bool
     prover: Prover
+    tactic_sink: Optional[Callable[[str, str, str], None]] = None
 
 
 class ProverWorker:
@@ -311,6 +314,7 @@ class ProverWorker:
         target_transitions: int,
         experience: CollectedExperience,
         num_simulations: int,
+        tactic_sink: Callable[[str, str, str], None] | None = None,
     ) -> int:
         """Record successful proofs into ``experience`` until the target
         number of transitions is reached. Parks with *pause* on exit."""
@@ -357,6 +361,7 @@ class ProverWorker:
             poll_callback=poll_callback,
             record_timeline=True,
             prover=Prover(SearchConfig(num_simulations=num_simulations), self.tactic_model),
+            tactic_sink=tactic_sink,
         )
         self._run_job(job, park="pause")
 
@@ -370,7 +375,8 @@ class ProverWorker:
     @torch.no_grad()
     def evaluate(self, theorems: list[BenchTheorem], dataset_name: str, num_simulations: int,
                  progress_callback: Callable[[int, int, int, int], None] | None = None,
-                 verify_timeout: int = 5000) -> dict:
+                 verify_timeout: int = 5000,
+                 tactic_sink: Callable[[str, str, str], None] | None = None) -> dict:
         """Evaluate theorems using MCTS. Returns metrics dict. Parks with
         *release* on exit so eval state does not leak into the next job
         and Lean leases are returned.
@@ -454,6 +460,7 @@ class ProverWorker:
             poll_callback=None,
             record_timeline=True,
             prover=Prover(SearchConfig(num_simulations=num_simulations, verify_timeout=verify_timeout), self.tactic_model),
+            tactic_sink=tactic_sink,
         )
         self._run_job(job, park="release")
 
@@ -568,6 +575,7 @@ class ProverWorker:
                             client, theorem,
                             abort_check=self._release_event.is_set,
                             timeline=timeline,
+                            tactic_sink=job.tactic_sink,
                         )
                         consecutive_errors = 0
                         break
