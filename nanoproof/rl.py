@@ -131,7 +131,7 @@ parser.add_argument("--num-sampled-tactics", type=int, default=6)
 parser.add_argument("--num-simulations-eval", type=int, default=64)
 parser.add_argument("--collect-every", type=int, default=1)
 parser.add_argument("--collect-transitions", type=int, default=100)
-parser.add_argument("--replay-buffer-window-size", type=int, default=60_000_000)
+parser.add_argument("--replay-buffer-window-size", type=int, default=250_000)
 parser.add_argument("--batch-time-limit", type=float, default=0.5)
 parser.add_argument(
     "--batch-max-gen-samples",
