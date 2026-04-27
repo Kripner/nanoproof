@@ -28,10 +28,10 @@ import torch
 from flask import Flask, request, jsonify
 
 from nanoproof.checkpoints import load_model
-from nanoproof.cli import log, log0, log_actionable_error
+from nanoproof.cli import log_actionable_error
 
 logger = logging.getLogger(__name__)
-from nanoproof.common import ValueOrError, GLOBAL_CONFIG, get_dist_info
+from nanoproof.common import ValueOrError, GLOBAL_CONFIG, get_dist_info, info0
 from nanoproof.engine import Engine
 from nanoproof.tokenizer import HuggingFaceTokenizer
 from nanoproof.model import Transformer
@@ -630,7 +630,7 @@ class BlockingTacticModel:
                 event.set()
 
         except Exception as e:
-            log(f"Batch #{batch_num}: FAILED - {e}", component="BlockingTacticModel")
+            logger.error(f"Batch #{batch_num}: FAILED - {e}")
             log_actionable_error(
                 "BlockingTacticModel",
                 str(e),
@@ -985,7 +985,7 @@ def start_inference_server(
             f"Port may be in use - kill the old process or use a different --inference-server-port."
         )
 
-    log0(f"Inference server started on port {port}", component="InferenceServer")
+    info0(logger, f"Inference server started on port {port}")
     return thread
 
 

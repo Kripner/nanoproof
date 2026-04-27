@@ -16,7 +16,7 @@ from nanoproof.common import (
     Player,
     TimelineRecorder,
 )
-from nanoproof.cli import get_monitor, log
+from nanoproof.cli import get_monitor
 from nanoproof.inference import TacticModel, BlockingTacticModel
 
 logger = logging.getLogger(__name__)
@@ -618,7 +618,7 @@ def expand_node(
             TimeoutError,
         ) as e:
             short_err = str(e).split("\n", 1)[0]
-            log(f"Lean crash on tactic {action!r}: {short_err}", component="Search")
+            logger.warning(f"Lean crash on tactic {action!r}: {short_err}")
             raise
         if not new_branches.is_success():
             # Invalid action encountered.

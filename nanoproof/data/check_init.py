@@ -15,6 +15,7 @@ flagged as ``whitelist stale`` rather than silently dropped.
 import concurrent.futures
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
@@ -22,9 +23,10 @@ from urllib.request import urlopen
 
 from leantree.repl_adapter.server import LeanClient
 
-from nanoproof.cli import log, log0
-from nanoproof.common import theorem_to_example
+from nanoproof.common import info0, theorem_to_example
 from nanoproof.data.bench.common import BenchTheorem
+
+logger = logging.getLogger(__name__)
 
 
 def theorem_hash(theorem: BenchTheorem) -> str:
@@ -117,7 +119,7 @@ def filter_by_whitelist(
             f"Whitelist not found: {whitelist_file}. "
             f"Generate it via the {dataset_name!r} module's `check-init` CLI action."
         )
-        log(msg, component="Whitelist")
+        logger.error(msg)
         raise FileNotFoundError(msg)
 
     passing = wl["passing"]
@@ -141,16 +143,16 @@ def filter_by_whitelist(
 
     if unknown:
         example = unknown[0].source[:200].replace("\n", " ")
-        log0(
+        info0(
+            logger,
             f"{dataset_name}: {len(unknown)} theorems not in whitelist {whitelist_file} "
             f"(stale whitelist?). Example: {example!r}",
-            component="Whitelist",
         )
 
-    log0(
+    info0(
+        logger,
         f"{dataset_name}: {num_passing} passing + {len(unknown)} unknown kept, "
         f"{num_failing} dropped (whitelist {wl['lean_version']})",
-        component="Whitelist",
     )
     return kept
 

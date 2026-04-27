@@ -32,6 +32,7 @@ from nanoproof.common import (
     get_lr_multiplier,
 )
 from nanoproof.checkpoints import load_model, save_checkpoint
+from nanoproof.cli import configure_logging, set_ddp_info
 from nanoproof.engine import Engine
 from nanoproof.data.sft.leantree import leantree_transitions
 from nanoproof.data.sft.leantree_dataloader import sft_data_generator
@@ -160,6 +161,10 @@ master_process = ddp_rank == 0
 
 # Run directories
 log_dir, model_dir = create_run_dirs("sft", args.run, args_dict=user_config)
+
+# Per-rank errors.jsonl + fd-level tee of stdout/stderr into log_dir.
+set_ddp_info(rank=ddp_rank)
+configure_logging(log_dir)
 
 # metrics logging init
 run_log = create_metrics_logger(

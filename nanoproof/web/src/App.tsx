@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { MonitorState, LogEntry } from './types'
+import { MonitorState } from './types'
 import { StatsPanel } from './components/StatsPanel'
 import { ProverGrid } from './components/ProverGrid'
 import { GPUPanel } from './components/GPUPanel'
@@ -13,11 +13,10 @@ const POLL_INTERVAL = 1000;
 
 function App() {
   const [state, setState] = useState<MonitorState | null>(null);
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [logComponents, setLogComponents] = useState<string[]>([]);
+  const [stdoutLines, setStdoutLines] = useState<string[]>([]);
+  const [stderrLines, setStderrLines] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const [selectedActor, setSelectedActor] = useState<string | null>(null);
   const [tab, setTab] = useState<'monitor' | 'profiler' | 'llm' | 'data'>('monitor');
 
   // Default to profiler tab in standalone mode
@@ -36,10 +35,6 @@ function App() {
     }
   }, [state?.output_dir]);
 
-  const handleActorClick = useCallback((actorId: number) => {
-    setSelectedActor(`actor_${actorId}`);
-  }, []);
-
   useEffect(() => {
     const fetchState = async () => {
       try {
@@ -55,38 +50,32 @@ function App() {
 
     const fetchLogs = async () => {
       try {
-        const res = await fetch('/api/logs/_merged');
-        if (!res.ok) return;
-        const data = await res.json();
-        setLogs(data.logs.slice(-500));
+        const [stdoutRes, stderrRes] = await Promise.all([
+          fetch('/api/stdout'),
+          fetch('/api/stderr'),
+        ]);
+        if (stdoutRes.ok) {
+          const data = await stdoutRes.json();
+          setStdoutLines(data.lines || []);
+        }
+        if (stderrRes.ok) {
+          const data = await stderrRes.json();
+          setStderrLines(data.lines || []);
+        }
       } catch (e) {
         // Ignore log fetch errors
       }
     };
 
-    const fetchLogComponents = async () => {
-      try {
-        const res = await fetch('/api/logs');
-        if (!res.ok) return;
-        const data = await res.json();
-        setLogComponents(data.components || []);
-      } catch (e) {
-        // Ignore errors
-      }
-    };
-
     fetchState();
     fetchLogs();
-    fetchLogComponents();
 
     const stateInterval = setInterval(fetchState, POLL_INTERVAL);
     const logsInterval = setInterval(fetchLogs, POLL_INTERVAL);
-    const componentsInterval = setInterval(fetchLogComponents, POLL_INTERVAL * 5);
 
     return () => {
       clearInterval(stateInterval);
       clearInterval(logsInterval);
-      clearInterval(componentsInterval);
     };
   }, []);
 
@@ -170,10 +159,7 @@ function App() {
             {Object.keys(state.local_actors).length > 0 && (
               <div className="card">
                 <div className="card-title">Provers</div>
-                <ProverGrid
-                  localActors={state.local_actors}
-                  onActorClick={handleActorClick}
-                />
+                <ProverGrid localActors={state.local_actors} />
               </div>
             )}
 
@@ -188,10 +174,8 @@ function App() {
           {/* Row 3: Logs */}
           <div className="row row-logs">
             <LogViewer
-              logs={logs}
-              components={logComponents}
-              selectedActor={selectedActor}
-              onActorSelect={setSelectedActor}
+              stdoutLines={stdoutLines}
+              stderrLines={stderrLines}
             />
           </div>
         </div>

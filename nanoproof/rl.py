@@ -58,7 +58,10 @@ from nanoproof.optim import optimizer_to_cpu, optimizer_to_gpu
 from nanoproof.data.bench import minif2f
 from nanoproof.data.check_init import read_lean_version, resolve_lean_project
 from nanoproof.data.bench import proofnet
-from nanoproof.cli import create_monitor, configure_logging, log, log0, set_ddp_info
+from nanoproof.cli import create_monitor, configure_logging, set_ddp_info
+from nanoproof.common import info0
+
+logger = logging.getLogger(__name__)
 from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
 from nanoproof.data.sft.leantree_dataloader import sft_data_generator
 
@@ -175,15 +178,16 @@ parser.add_argument("--eval-every", type=int, default=100)
 parser.add_argument("--eval-start", type=int, default=0)
 parser.add_argument("--save-every", type=int, default=500)
 parser.add_argument(
-    "--verbose",
-    action="store_true",
-    help="enable debug logging for inference and proving",
+    "--log-level",
+    type=str,
+    default="INFO",
+    choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+    help="log level for the nanoproof package logger",
 )
 args = parser.parse_args()
 user_config = vars(args).copy()
 
-if args.verbose:
-    logging.getLogger("nanoproof").setLevel(logging.DEBUG)
+logging.getLogger("nanoproof").setLevel(args.log_level.upper())
 
 
 # -----------------------------------------------------------------------------
@@ -194,7 +198,7 @@ args.device_type = (
 )
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(args.device_type)
 master_process = ddp_rank == 0
-set_ddp_info(is_master=master_process, rank=ddp_rank)
+set_ddp_info(rank=ddp_rank)
 
 # `kill -USR1 <pid>` on any rank dumps all-thread Python tracebacks to stderr.
 faulthandler.register(signal.SIGUSR1, all_threads=True)
@@ -232,25 +236,25 @@ model = tactic_model.network
 # DataLoader
 
 examples_per_step = args.device_batch_size * ddp_world_size
-log0(f"Target examples per step: {args.target_examples_per_step}", component="Config")
-log0(f"Device batch size: {args.device_batch_size}", component="Config")
-log0(
+info0(logger, f"Target examples per step: {args.target_examples_per_step}")
+info0(logger, f"Device batch size: {args.device_batch_size}")
+info0(
+    logger,
     f"Examples per step is device_batch_size * ddp_world_size: {examples_per_step}",
-    component="Config",
 )
 assert args.target_examples_per_step % examples_per_step == 0, (
     "Target examples per step must be divisible by examples per step"
 )
 grad_accum_steps = args.target_examples_per_step // examples_per_step
-log0(f"=> Setting grad accum steps: {grad_accum_steps}", component="Config")
+info0(logger, f"=> Setting grad accum steps: {grad_accum_steps}")
 
 rank_seed = args.seed + ddp_rank
 
 args.lean_project = resolve_lean_project(args.lean_project)
 lean_version = read_lean_version(args.lean_project)
-log0(
+info0(
+    logger,
     f"Lean version: {lean_version} (from {args.lean_project}/lean-toolchain)",
-    component="Config",
 )
 
 replay_buffer = ReplayBuffer(window_size=args.replay_buffer_window_size, seed=rank_seed)
@@ -272,9 +276,9 @@ if balancer:
         prover.num_actors * args.num_sampled_tactics / ddp_world_size
     )
     tactic_model.max_gen_samples = max_gen_samples
-    log0(
+    info0(
+        logger,
         f"Batch max gen samples: {max_gen_samples} ({prover.num_actors} actors * {args.num_sampled_tactics} samples / {ddp_world_size} ranks)",
-        component="Config",
     )
 else:
     prover = None
@@ -306,12 +310,12 @@ tactic_model.max_batch_prompt_tokens = max_prompt_tokens
 if ddp:
     all_max_prompt_tokens = [None] * ddp_world_size
     dist.all_gather_object(all_max_prompt_tokens, max_prompt_tokens)
-    log0(
+    info0(
+        logger,
         f"Batch max prompt tokens per rank ({source}): {all_max_prompt_tokens}",
-        component="Config",
     )
 else:
-    log0(f"Batch max prompt tokens: {max_prompt_tokens} ({source})", component="Config")
+    info0(logger, f"Batch max prompt tokens: {max_prompt_tokens} ({source})")
 
 
 # Create the RL monitor (master only)
@@ -418,14 +422,14 @@ proofnet_results = None
 
 def cleanup():
     """Cleanup function to ensure resources are released on shutdown."""
-    log0("Shutting down...", component="Main")
+    info0(logger, "Shutting down...")
     # Shutdown inference FIRST so any actor blocked in sample_tactic
     # (e.g. waiting on a paused model after Ctrl+C during training)
     # unblocks; otherwise prover.close() would time out on those threads.
     tactic_model.shutdown()
     if prover is not None:
         prover.close()
-    log0("Shutdown complete", component="Main")
+    info0(logger, "Shutdown complete")
 
 
 atexit.register(cleanup)
@@ -459,13 +463,11 @@ while True:
         )
 
         if master_process:
-            log(
-                f"Step {step:05d} | Tactic full acc: {tactic_results['full_acc']:.4%} | Tactic first acc: {tactic_results['first_token_acc']:.4%} | Critic argmax MSE: {critic_results['argmax_mse']:.4f} | Critic soft MSE: {critic_results['soft_mse']:.4f}",
-                component="Eval",
+            logger.info(
+                f"Step {step:05d} | Tactic full acc: {tactic_results['full_acc']:.4%} | Tactic first acc: {tactic_results['first_token_acc']:.4%} | Critic argmax MSE: {critic_results['argmax_mse']:.4f} | Critic soft MSE: {critic_results['soft_mse']:.4f}"
             )
-            log(
-                f"  Entropy - Tactic first: {tactic_results['first_token_entropy']:.4f} | Tactic all: {tactic_results['all_tokens_entropy']:.4f} | Critic: {critic_results['entropy']:.4f}",
-                component="Eval",
+            logger.info(
+                f"  Entropy - Tactic first: {tactic_results['first_token_entropy']:.4f} | Tactic all: {tactic_results['all_tokens_entropy']:.4f} | Critic: {critic_results['entropy']:.4f}"
             )
 
         # Prover evaluation (rank 0 only).
@@ -474,9 +476,8 @@ while True:
             minif2f_theorems = minif2f.list_theorems(split="valid")
             proofnet_theorems = proofnet.list_theorems(split="valid")
 
-            log(
-                f"Evaluating on {len(minif2f_theorems)} theorems from MiniF2F",
-                component="Eval",
+            logger.info(
+                f"Evaluating on {len(minif2f_theorems)} theorems from MiniF2F"
             )
             minif2f_results = prover.evaluate(
                 minif2f_theorems,
@@ -484,9 +485,8 @@ while True:
                 num_simulations=args.num_simulations_eval,
                 tactic_sink=eval_experience.record_tactic,
             )
-            log(
-                f"Evaluating on {len(proofnet_theorems)} theorems from ProofNet",
-                component="Eval",
+            logger.info(
+                f"Evaluating on {len(proofnet_theorems)} theorems from ProofNet"
             )
             proofnet_results = prover.evaluate(
                 proofnet_theorems,
@@ -514,10 +514,7 @@ while True:
 
             minif2f_status = f"minif2f: {minif2f_results['success_rate']:.4%} ({minif2f_results['solved']}/{minif2f_results['total']}, errors={minif2f_results['errors']})"
             proofnet_status = f"proofnet: {proofnet_results['success_rate']:.4%} ({proofnet_results['solved']}/{proofnet_results['total']}, errors={proofnet_results['errors']})"
-            log(
-                f"Step {step:05d} | {minif2f_status} | {proofnet_status}",
-                component="Eval",
-            )
+            logger.info(f"Step {step:05d} | {minif2f_status} | {proofnet_status}")
 
             wandb_data = {
                 "step": step,
@@ -715,9 +712,8 @@ while True:
     mean_loss = total_loss / args.num_updates_per_step
     rl_monitor.update_training(step, mean_loss, total_tokens)
     if master_process:
-        log(
-            f"Step {step:05d} | Training loss: {mean_loss:.6f} | num_tokens: {total_tokens:,} | replay_buffer_size: {len(replay_buffer.buffer)}",
-            component="Train",
+        logger.info(
+            f"Step {step:05d} | Training loss: {mean_loss:.6f} | num_tokens: {total_tokens:,} | replay_buffer_size: {len(replay_buffer.buffer)}"
         )
     run_log.log(
         {

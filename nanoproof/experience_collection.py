@@ -21,6 +21,7 @@ Tree-walking helpers depend on Node / Player / execute_tree from search.py.
 
 import glob
 import json
+import logging
 import os
 import random
 import threading
@@ -28,8 +29,9 @@ from dataclasses import dataclass, asdict
 
 import torch.distributed as dist
 
-from nanoproof.cli import log, log0
-from nanoproof.common import get_dist_info, Player, GLOBAL_CONFIG
+from nanoproof.common import get_dist_info, Player, GLOBAL_CONFIG, info0
+
+logger = logging.getLogger(__name__)
 from nanoproof.data.bench.common import BenchTheorem
 from nanoproof.data.rl import deepseek_prover, leanworkbook, numinamath
 from nanoproof.search import Node, execute_tree
@@ -122,7 +124,7 @@ class TheoremsSampler:
         self._lock = threading.Lock()
 
         for name, theorems in self.datasets.items():
-            log0(f"Loaded {len(theorems)} theorems from {name}", component="Sampler")
+            info0(logger, f"Loaded {len(theorems)} theorems from {name}")
 
     def sample_theorem(self) -> BenchTheorem:
         with self._lock:
@@ -165,15 +167,12 @@ class ReplayBuffer:
         needed. FIFO-truncates to ``window_size`` to match the eviction
         policy of the live buffer.
         """
-        log0(f"Loading replay buffer from {run_dir}", component="ReplayBuffer")
+        info0(logger, f"Loading replay buffer from {run_dir}")
         transitions = load_collected_transitions(run_dir)
         if len(transitions) > self.window_size:
             transitions = transitions[-self.window_size :]
         self.buffer = transitions
-        log0(
-            f"Loaded {len(self.buffer)} transitions from {run_dir}",
-            component="ReplayBuffer",
-        )
+        info0(logger, f"Loaded {len(self.buffer)} transitions from {run_dir}")
 
     def sample_transition(self) -> tuple[str, str, float]:
         return self.rng.choice(self.buffer)

@@ -11,16 +11,11 @@ import torch
 
 from nanoproof.model import Transformer, NetworkConfig
 from nanoproof.tokenizer import get_tokenizer
-from nanoproof.common import get_base_dir, setup_default_logging
+from nanoproof.common import get_base_dir, setup_default_logging, info0
 
 # Set up logging
 setup_default_logging()
 logger = logging.getLogger(__name__)
-
-
-def log0(message):
-    if int(os.environ.get("RANK", 0)) == 0:
-        logger.info(message)
 
 
 def save_checkpoint(
@@ -123,7 +118,7 @@ def build_model(checkpoint_dir, step, device, phase):
     # Hack: fix torch compile issue, which prepends all keys with _orig_mod.
     model_data = {k.removeprefix("_orig_mod."): v for k, v in model_data.items()}
     model_config_kwargs = meta_data["model_config"]
-    log0(f"Building model with config: {model_config_kwargs}")
+    info0(logger, f"Building model with config: {model_config_kwargs}")
     # Filter to known NetworkConfig fields so older checkpoints (which carried
     # extra fields like num_value_bins / max_tactic_len) still load.
     valid_fields = {f.name for f in fields(NetworkConfig)}
@@ -285,5 +280,5 @@ def load_model(model_path: str, device, phase: str):
         load_model("pretrain/10-49-50_07-04-26_baseline/model_005000.pt", device, "train")
     """
     checkpoint_dir, step = parse_checkpoint_path(model_path)
-    log0(f"Loading model from {checkpoint_dir} (step {step})")
+    info0(logger, f"Loading model from {checkpoint_dir} (step {step})")
     return build_model(checkpoint_dir, step, device, phase)

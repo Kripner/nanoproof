@@ -34,6 +34,7 @@ from nanoproof.common import (
 )
 from nanoproof.tokenizer import get_token_bytes
 from nanoproof.checkpoints import save_checkpoint
+from nanoproof.cli import configure_logging, set_ddp_info
 from nanoproof.loss_eval import evaluate_bpb
 from nanoproof.checkpoints import load_model
 from nanoproof.data.midtrain.leangithubraw import leangithubraw_batches
@@ -150,6 +151,10 @@ get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else l
 
 # Run directories
 log_dir, model_dir = create_run_dirs("midtrain", args.run, args_dict=user_config)
+
+# Per-rank errors.jsonl + fd-level tee of stdout/stderr into log_dir.
+set_ddp_info(rank=ddp_rank)
+configure_logging(log_dir)
 
 # metrics logging init
 run_log = create_metrics_logger(

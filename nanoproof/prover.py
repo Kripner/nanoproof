@@ -12,7 +12,6 @@ import faulthandler
 import logging
 import threading
 import time
-import traceback
 from dataclasses import dataclass
 from typing import Callable, Literal, Optional
 import json as json_mod
@@ -30,7 +29,7 @@ from nanoproof.common import (
     linearize_proof,
     theorem_to_example,
 )
-from nanoproof.cli import get_monitor, log, log_actionable_error
+from nanoproof.cli import get_monitor, log_actionable_error
 from nanoproof.data.bench.common import BenchTheorem
 from nanoproof.experience_collection import (
     TheoremsSampler,
@@ -116,9 +115,8 @@ class Prover:
             # release event so mid-proof actors drop their Lean leases);
             # only surface true pool-saturation timeouts.
             if reason == "timeout":
-                log(
-                    f"FAILED: Could not get Lean process for theorem (300s pool timeout)",
-                    component="Prover",
+                logger.warning(
+                    "FAILED: Could not get Lean process for theorem (300s pool timeout)"
                 )
             return None
 
@@ -131,9 +129,8 @@ class Prover:
                     if hasattr(init_branch, "error")
                     else "unknown error"
                 )
-                log(
-                    f"FAILED: Could not initialize proof - {err}\nLean code:\n{example}",
-                    component="Prover",
+                logger.warning(
+                    f"FAILED: Could not initialize proof - {err}\nLean code:\n{example}"
                 )
                 return None
             init_branch = init_branch.value
@@ -160,9 +157,8 @@ class Prover:
             if game.root.is_solved:
                 verify_err = verify_node(game.root, timeout=self.config.verify_timeout)
                 if verify_err:
-                    log(
-                        f"FAILED: Verification failed after {game.num_iterations} iterations: '{verify_err}'\nTheorem: '{theorem.source}'\nProof tree:\n{game.root.pp_tree()}",
-                        component="Prover",
+                    logger.warning(
+                        f"FAILED: Verification failed after {game.num_iterations} iterations: '{verify_err}'\nTheorem: '{theorem.source}'\nProof tree:\n{game.root.pp_tree()}"
                     )
                     game.root.is_solved = False
                     return game
@@ -173,9 +169,8 @@ class Prover:
 
                 verify_err = verify_node(game.root, timeout=self.config.verify_timeout)
                 if verify_err:
-                    log(
-                        f"FAILED: Post-prune verification failed after {game.num_iterations} iterations: '{verify_err}'\nTheorem: '{theorem.source}'\nProof tree:\n{game.root.pp_tree()}",
-                        component="Prover",
+                    logger.warning(
+                        f"FAILED: Post-prune verification failed after {game.num_iterations} iterations: '{verify_err}'\nTheorem: '{theorem.source}'\nProof tree:\n{game.root.pp_tree()}"
                     )
                     game.root.is_solved = False
                     return game
@@ -184,9 +179,8 @@ class Prover:
                 tactics = linearize_proof(game.root)
                 proof_source = construct_proof_source(theorem.source, tactics)
                 if not env.is_valid_source(proof_source):
-                    log(
-                        f'FAILED: Linearized proof verification failed after {game.num_iterations} iterations:\n"""\n{proof_source}\n"""\n... proof tree:\n{game.root.pp_tree()}\n',
-                        component="Prover",
+                    logger.warning(
+                        f'FAILED: Linearized proof verification failed after {game.num_iterations} iterations:\n"""\n{proof_source}\n"""\n... proof tree:\n{game.root.pp_tree()}\n'
                     )
                     game.root.is_solved = False
 
@@ -314,10 +308,7 @@ class ProverWorker:
                 raise ConnectionError(
                     f"Lean server {addr} reports 0 available processes"
                 )
-            log(
-                f"Lean server {host}:{port}: {max_procs} processes",
-                component="LeanPool",
-            )
+            logger.info(f"Lean server {host}:{port}: {max_procs} processes")
             servers.extend([(host, port)] * max_procs)
         return servers
 
@@ -333,9 +324,8 @@ class ProverWorker:
             t.join(timeout=max(0.0, deadline - time.time()))
         alive = sum(1 for t in self._threads if t.is_alive())
         if alive:
-            log(
-                f"WARNING: {alive}/{len(self._threads)} actor threads still alive after close",
-                component="Prover",
+            logger.warning(
+                f"{alive}/{len(self._threads)} actor threads still alive after close"
             )
             faulthandler.dump_traceback()
 
@@ -352,9 +342,8 @@ class ProverWorker:
         number of transitions is reached. Parks with *pause* on exit."""
         monitor = get_monitor()
 
-        log(
-            f"Starting collection with {self.num_actors} actors, target={target_transitions} transitions",
-            component="Collection",
+        logger.info(
+            f"Starting collection with {self.num_actors} actors, target={target_transitions} transitions"
         )
 
         theorem_counter = [0]
@@ -387,9 +376,8 @@ class ProverWorker:
                     monitor.update_local_actor(i, state=state)
             loop_count[0] += 1
             if loop_count[0] % 50 == 0:
-                log(
-                    f"Progress: {experience.num_transitions()}/{target_transitions} transitions",
-                    component="Collection",
+                logger.info(
+                    f"Progress: {experience.num_transitions()}/{target_transitions} transitions"
                 )
 
         job = _Job(
@@ -409,7 +397,7 @@ class ProverWorker:
             monitor.clear_local_actors()
 
         total = experience.num_transitions()
-        log(f"Collection complete: {total} transitions", component="Collection")
+        logger.info(f"Collection complete: {total} transitions")
         return total
 
     @torch.no_grad()
@@ -570,9 +558,8 @@ class ProverWorker:
             if mid == 0:
                 break
             if time.time() > deadline:
-                log(
-                    f"WARNING: release timed out with {mid} actors still mid-proof",
-                    component="Prover",
+                logger.warning(
+                    f"release timed out with {mid} actors still mid-proof"
                 )
                 break
             time.sleep(0.05)
@@ -645,17 +632,15 @@ class ProverWorker:
                         if attempt < max_retries - 1:
                             self._set_thread_state(actor_id, "retry")
                             short_err = str(e).split("\n", 1)[0]
-                            log(
-                                f"[Actor {actor_id}] Connection error (attempt {attempt + 1}/{max_retries}): '{short_err}', reconnecting...",
-                                component="Prover",
+                            logger.warning(
+                                f"[Actor {actor_id}] Connection error (attempt {attempt + 1}/{max_retries}): '{short_err}', reconnecting..."
                             )
                             time.sleep(1.0 * (attempt + 1))
                         else:
                             error = str(e)
                             consecutive_errors += 1
-                            log(
-                                f"[Actor {actor_id}] Error (lean={lean_address}:{lean_port}): {e}",
-                                component="Prover",
+                            logger.error(
+                                f"[Actor {actor_id}] Error (lean={lean_address}:{lean_port}): {e}"
                             )
                             log_actionable_error(
                                 "Prover",
@@ -671,9 +656,8 @@ class ProverWorker:
                     except Exception as e:
                         error = str(e)
                         consecutive_errors += 1
-                        log(
-                            f"[Actor {actor_id}] Error (lean={lean_address}:{lean_port}): {e}",
-                            component="Prover",
+                        logger.exception(
+                            f"[Actor {actor_id}] Error (lean={lean_address}:{lean_port}): {e}"
                         )
                         log_actionable_error(
                             "Prover",
@@ -681,7 +665,6 @@ class ProverWorker:
                             actor=actor_id,
                             lean=f"{lean_address}:{lean_port}",
                         )
-                        traceback.print_exc()
                         break
 
                 # Report directly to the job that issued this theorem - NOT to
@@ -719,9 +702,8 @@ class ProverWorker:
                 )
 
             if consecutive_errors >= max_consecutive_errors:
-                log(
-                    f"[Actor {actor_id}] {consecutive_errors} consecutive errors; backing off 60s",
-                    component="Prover",
+                logger.warning(
+                    f"[Actor {actor_id}] {consecutive_errors} consecutive errors; backing off 60s"
                 )
                 time.sleep(60.0)
                 consecutive_errors = 0

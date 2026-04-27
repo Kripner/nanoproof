@@ -50,13 +50,6 @@ export interface EvalProgress {
   progress_percent: number;
 }
 
-export interface LogEntry {
-  timestamp: string;
-  component: string;
-  message: string;
-  level: string;
-}
-
 export interface MonitorState {
   mode: 'live' | 'standalone';
   phase: 'idle' | 'collecting' | 'evaluating' | 'training';

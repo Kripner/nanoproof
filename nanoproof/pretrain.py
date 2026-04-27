@@ -53,6 +53,7 @@ from nanoproof.checkpoints import (
     load_checkpoint,
     parse_checkpoint_path,
 )
+from nanoproof.cli import configure_logging, set_ddp_info
 from nanoproof.engine import Engine
 from nanoproof.loss_eval import evaluate_bpb
 from nanoproof.flash_attention import HAS_FA3
@@ -398,6 +399,10 @@ if total_batch_size % world_tokens_per_fwdbwd != 0:
 
 # Run directories (now that user_config reflects the resolved total_batch_size)
 log_dir, model_dir = create_run_dirs("pretrain", args.run, args_dict=user_config)
+
+# Per-rank errors.jsonl + fd-level tee of stdout/stderr into log_dir.
+set_ddp_info(rank=ddp_rank)
+configure_logging(log_dir)
 
 # metrics logging init
 run_log = create_metrics_logger(

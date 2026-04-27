@@ -6,7 +6,7 @@ Provides a real-time web dashboard showing:
 - Prover server status with thread-level indicators
 - GPU utilization and memory
 - Inference wait times
-- Log streams (per-component and merged)
+- Tail of stdout.log / stderr.log from the run dir
 
 The monitor runs a Flask server in a background thread. The web app polls
 for state updates every second.
@@ -20,7 +20,6 @@ import subprocess
 import sys
 import threading
 import time
-import traceback
 import urllib.request
 from collections import deque
 from dataclasses import dataclass, field, asdict
@@ -31,17 +30,22 @@ from queue import Queue
 
 from flask import Flask, jsonify, Response, send_from_directory, request
 
-from nanoproof.common import TimelineEvent
+from nanoproof.common import TimelineEvent, is_master
 
 # -----------------------------------------------------------------------------
 # Logging utilities
 # -----------------------------------------------------------------------------
+#
+# One logging path: stdlib `logging` for text, plus an fd-level tee of stdout
+# and stderr into <output_dir>/{stdout,stderr}.log so that anything any
+# process (including C extensions / subprocesses inheriting fd 1 or 2) writes
+# is persisted. Stderr carries the StreamHandler installed by
+# common.setup_default_logging, so logger.* records flow into stderr.log
+# automatically.
 
-_log_lock = threading.Lock()
-_log_file: TextIO | None = None
+_errors_lock = threading.Lock()
 _errors_file: TextIO | None = None
-_is_master_process: bool = True  # Default to True for non-DDP usage
-_ddp_rank: int = 0  # DDP rank for logging
+_ddp_rank: int = 0
 
 # Dedup state for log_actionable_error: maps (component, error_first_line) ->
 # (last_write_monotonic, suppressed_count). Without this, a dead Lean server
@@ -49,61 +53,65 @@ _ddp_rank: int = 0  # DDP rank for logging
 _error_dedup: dict[tuple[str, str], tuple[float, int]] = {}
 _error_dedup_window_seconds: float = 60.0
 
-# In-memory log buffers for web streaming
-_log_buffers: dict[str, deque] = {}
-_log_buffers_lock = threading.Lock()
-MAX_LOG_BUFFER_SIZE = 2000
 
-
-def _get_log_buffer(component: str) -> deque:
-    """Get or create a log buffer for a component."""
-    with _log_buffers_lock:
-        if component not in _log_buffers:
-            _log_buffers[component] = deque(maxlen=MAX_LOG_BUFFER_SIZE)
-        return _log_buffers[component]
-
-
-def _add_to_log_buffer(component: str, entry: dict):
-    """Add a log entry to the component's buffer and the merged buffer."""
-    buffer = _get_log_buffer(component)
-    buffer.append(entry)
-    # Also add to merged buffer
-    merged = _get_log_buffer("_merged")
-    merged.append(entry)
-
-
-def set_ddp_info(is_master: bool, rank: int = 0):
-    """
-    Set DDP info for logging.
-
-    Args:
-        is_master: Whether this process is the master (rank 0)
-        rank: The DDP rank of this process
-    """
-    global _is_master_process, _ddp_rank
-    _is_master_process = is_master
+def set_ddp_info(rank: int = 0):
+    """Record this process's DDP rank for the per-rank errors.jsonl filename."""
+    global _ddp_rank
     _ddp_rank = rank
 
 
+def _tee_fd(target_fd: int, log_path: str, line_prefix: bytes) -> None:
+    """Redirect ``target_fd`` through a pipe; a reader thread writes everything
+    that flows through to ``log_path`` and echoes it to the original fd so the
+    terminal still shows live output. With a non-empty ``line_prefix``, the
+    prefix is prepended to every line written to the file (terminal echo
+    inherits the prefix too, which is fine - it disambiguates rank > 0)."""
+    saved_fd = os.dup(target_fd)
+    r, w = os.pipe()
+    os.dup2(w, target_fd)
+    os.close(w)
+
+    def _reader():
+        f = open(log_path, "ab", buffering=0)
+        buf = b""
+        while True:
+            chunk = os.read(r, 65536)
+            if not chunk:
+                break
+            os.write(saved_fd, chunk)
+            if line_prefix:
+                buf += chunk
+                while b"\n" in buf:
+                    line, _, buf = buf.partition(b"\n")
+                    f.write(line_prefix + line + b"\n")
+            else:
+                f.write(chunk)
+
+    threading.Thread(target=_reader, daemon=True, name=f"tee-fd{target_fd}").start()
+
+
+def tee_stdio(output_dir: str, rank: int) -> None:
+    """Tee fd 1/2 to stdout.log/stderr.log under ``output_dir``. Call once per
+    process, after the run dir is created and before logging that should be
+    persisted. Rank-0 lines go in unprefixed; rank > 0 lines get a
+    ``[rank{N}] `` prefix so the merged file remains readable."""
+    prefix = b"" if rank == 0 else f"[rank{rank}] ".encode()
+    _tee_fd(1, os.path.join(output_dir, "stdout.log"), prefix)
+    _tee_fd(2, os.path.join(output_dir, "stderr.log"), prefix)
+    # Reopen sys.stdout/sys.stderr against the now-redirected fds with line
+    # buffering so prints flush promptly into the pipe (and thus the file).
+    sys.stdout = os.fdopen(1, "w", buffering=1)
+    sys.stderr = os.fdopen(2, "w", buffering=1)
+
+
 def configure_logging(output_dir: str | None):
-    """
-    Configure logging to write to files in the output directory.
+    """Open the per-rank ``rank{N}_errors.jsonl`` and tee stdout/stderr.
 
-    Opens per-rank log and errors files under ``<output_dir>/logging/``. The
-    rank is read from the module-level ``_ddp_rank`` set by
-    :func:`set_ddp_info`, so call it first.
+    ``set_ddp_info`` must be called first so the rank is correct. ``output_dir``
+    None disables file output (useful for ad-hoc invocations / tests)."""
+    global _errors_file
 
-    Args:
-        output_dir: Directory where log files will be written.
-                   If None, logging goes to console only.
-    """
-    global _log_file, _errors_file
-
-    with _log_lock:
-        # Close any existing files
-        if _log_file is not None:
-            _log_file.close()
-            _log_file = None
+    with _errors_lock:
         if _errors_file is not None:
             _errors_file.close()
             _errors_file = None
@@ -111,101 +119,24 @@ def configure_logging(output_dir: str | None):
         if output_dir is not None:
             logging_dir = os.path.join(output_dir, "logging")
             os.makedirs(logging_dir, exist_ok=True)
-            _log_file = open(os.path.join(logging_dir, f"rank{_ddp_rank}.log"), "a")
             _errors_file = open(
                 os.path.join(logging_dir, f"rank{_ddp_rank}_errors.jsonl"), "a"
             )
-
-
-def log(msg: str, component: str | None = None, actor_id: int | None = None):
-    """
-    Thread-safe logging with optional component/actor prefix.
-    Writes to log file, console, and in-memory buffer for web streaming.
-
-    Args:
-        msg: The message to log
-        component: Component name (e.g., "TacticModel", "Collection")
-        actor_id: Actor thread ID if applicable
-    """
-    if actor_id is not None:
-        prefix = f"[Actor {actor_id}]"
-        log_component = f"actor_{actor_id}"
-    elif component is not None:
-        prefix = f"[{component}]"
-        log_component = component
-    else:
-        prefix = ""
-        log_component = "main"
-
-    timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-
-    with _log_lock:
-        line = f"[{timestamp}] {prefix} {msg}" if prefix else f"[{timestamp}] {msg}"
-
-        # Write to file if configured
-        if _log_file is not None:
-            _log_file.write(line + "\n")
-            _log_file.flush()
-
-        # Always print to console
-        print(line, flush=True)
-
-        # Add to in-memory buffer for web streaming
-        entry = {
-            "timestamp": timestamp,
-            "component": log_component,
-            "message": msg,
-            "level": "info",
-        }
-        _add_to_log_buffer(log_component, entry)
-
-
-def log0(msg: str, component: str | None = None, actor_id: int | None = None):
-    """
-    Log only if this is the master process (rank 0).
-
-    Use this for informational messages that should only appear once in DDP.
-    For errors or per-rank diagnostics, use regular log().
-    """
-    if _is_master_process:
-        log(msg, component=component, actor_id=actor_id)
-
-
-def log_error(
-    msg: str,
-    exception: Exception | None = None,
-    component: str | None = None,
-    actor_id: int | None = None,
-):
-    """Log an error with optional exception details."""
-    if exception is not None:
-        error_detail = f"{type(exception).__name__}: {exception}"
-        full_msg = f"ERROR: {msg} - {error_detail}"
-    else:
-        full_msg = f"ERROR: {msg}"
-
-    log(full_msg, component=component, actor_id=actor_id)
-
-    if exception is not None:
-        with _log_lock:
-            if _log_file is not None:
-                traceback.print_exc(file=_log_file)
-                _log_file.flush()
-            traceback.print_exc()
+            tee_stdio(output_dir, _ddp_rank)
 
 
 def log_actionable_error(component: str, error: str, **extra):
-    """Append a structured error to errors.jsonl in the run directory.
+    """Append a structured error to ``rank{N}_errors.jsonl`` in the run dir.
 
-    Use this for errors that may need human attention (OOM, repeated actor
-    failures, etc.) -- not for routine per-theorem failures.
+    Use for errors that may need human attention (OOM, repeated actor
+    failures, etc.) - not for routine per-theorem failures.
 
     Identical errors (same component + first line) are deduplicated within
     a 60s window so a stuck/dead Lean server cannot fill the file with
     hundreds of thousands of duplicate entries; the next emitted entry
-    carries `suppressed_since_last` with the count of skipped duplicates.
+    carries ``suppressed_since_last`` with the count of skipped duplicates.
     """
-    with _log_lock:
+    with _errors_lock:
         if _errors_file is None:
             return
         key = (component, error.split("\n", 1)[0][:200])
@@ -226,6 +157,26 @@ def log_actionable_error(component: str, error: str, **extra):
             entry["suppressed_since_last"] = suppressed
         _errors_file.write(json.dumps(entry) + "\n")
         _errors_file.flush()
+
+
+def _tail_lines(path: str, n: int) -> list[str]:
+    """Return the last ``n`` lines of ``path`` as a list of strings (no trailing
+    newlines). Reads backward in 64 KiB chunks; missing files return []."""
+    if not os.path.exists(path):
+        return []
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        end = f.tell()
+        chunk = 65536
+        data = b""
+        while end > 0 and data.count(b"\n") <= n:
+            read = min(chunk, end)
+            end -= read
+            f.seek(end)
+            data = f.read(read) + data
+    text = data.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    return lines[-n:]
 
 
 # -----------------------------------------------------------------------------
@@ -1178,38 +1129,13 @@ class WebMonitor:
         def get_state():
             return jsonify(self._get_state())
 
-        @app.route("/api/logs")
-        def list_log_components():
-            with _log_buffers_lock:
-                components = list(_log_buffers.keys())
-            return jsonify({"components": components})
+        @app.route("/api/stdout")
+        def get_stdout():
+            return jsonify({"lines": self._tail_run_log("stdout.log", 1000)})
 
-        @app.route("/api/logs/<component>")
-        def get_logs(component: str):
-            """Get recent logs for a component."""
-            buffer = _get_log_buffer(component)
-            with _log_buffers_lock:
-                logs = list(buffer)
-            return jsonify({"logs": logs})
-
-        @app.route("/api/logs/<component>/stream")
-        def stream_logs(component: str):
-            """SSE stream for logs."""
-
-            def generate():
-                buffer = _get_log_buffer(component)
-                last_len = 0
-                while True:
-                    with _log_buffers_lock:
-                        current_len = len(buffer)
-                        if current_len > last_len:
-                            new_logs = list(buffer)[last_len:]
-                            last_len = current_len
-                            for entry in new_logs:
-                                yield f"data: {json.dumps(entry)}\n\n"
-                    time.sleep(0.5)
-
-            return Response(generate(), mimetype="text/event-stream")
+        @app.route("/api/stderr")
+        def get_stderr():
+            return jsonify({"lines": self._tail_run_log("stderr.log", 1000)})
 
         @app.route("/api/collections")
         def list_collections():
@@ -1692,26 +1618,34 @@ class WebMonitor:
             
             // Logs
             html += `<div class="card">
-                <h3>Logs <button onclick="fetchLogs()">Refresh</button></h3>
-                <div id="logs" class="logs" style="max-height: 200px; overflow-y: auto;"></div>
+                <h3>stderr <button onclick="fetchLogs()">Refresh</button></h3>
+                <div id="stderr-log" class="logs" style="max-height: 240px; overflow-y: auto;"></div>
+                <h3 style="margin-top: 16px;">stdout</h3>
+                <div id="stdout-log" class="logs" style="max-height: 240px; overflow-y: auto;"></div>
             </div>`;
-            
+
             document.getElementById('app').innerHTML = html;
             fetchLogs();
         }
-        
-        async function fetchLogs() {
+
+        async function _fillPane(url, paneId) {
             try {
-                const res = await fetch('/api/logs/_merged');
+                const res = await fetch(url);
                 const data = await res.json();
-                const logsDiv = document.getElementById('logs');
-                if (logsDiv) {
-                    logsDiv.innerHTML = data.logs.slice(-50).map(l => 
-                        `<div class="log-entry"><span class="log-time">${l.timestamp}</span> <span class="log-component">[${l.component}]</span> ${l.message}</div>`
-                    ).join('');
-                    logsDiv.scrollTop = logsDiv.scrollHeight;
-                }
+                const pane = document.getElementById(paneId);
+                if (!pane) return;
+                pane.innerHTML = data.lines.slice(-1000).map(line =>
+                    `<div class="log-entry">${line.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</div>`
+                ).join('');
+                pane.scrollTop = pane.scrollHeight;
             } catch (e) {}
+        }
+
+        async function fetchLogs() {
+            await Promise.all([
+                _fillPane('/api/stderr', 'stderr-log'),
+                _fillPane('/api/stdout', 'stdout-log'),
+            ]);
         }
         
         fetchState();
@@ -1842,6 +1776,14 @@ class WebMonitor:
         if not output_dir:
             return None
         return os.path.join(output_dir, subdir, filename)
+
+    def _tail_run_log(self, filename: str, n: int) -> list[str]:
+        """Tail the last ``n`` lines of ``<output_dir>/<filename>``."""
+        with self._lock:
+            output_dir = self.output_dir
+        if not output_dir:
+            return []
+        return _tail_lines(os.path.join(output_dir, filename), n)
 
     def set_output_dir(self, output_dir: str):
         with self._lock:
@@ -2118,7 +2060,7 @@ class WebMonitor:
         8 near-duplicate entries per transition (one per process) into the
         shared timeline.jsonl.
         """
-        if not _is_master_process:
+        if not is_master():
             return
         with self._lock:
             self._instr_seq += 1

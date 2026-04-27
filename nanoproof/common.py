@@ -118,6 +118,10 @@ class ColoredFormatter(logging.Formatter):
             record.levelname = (
                 f"{self.COLORS[levelname]}{self.BOLD}{levelname}{self.RESET}"
             )
+        # Display the leaf logger name (e.g., "prover" instead of "nanoproof.prover").
+        # Internal name is unchanged so logging.getLogger("nanoproof").setLevel(...) still works.
+        if record.name.startswith("nanoproof."):
+            record.name = record.name[len("nanoproof.") :]
         # Format the message
         message = super().format(record)
         # Add color to specific parts of the message
@@ -148,6 +152,17 @@ setup_default_logging()
 logger = logging.getLogger(__name__)
 
 
+def is_master() -> bool:
+    """True on rank 0 (or when not running under torchrun)."""
+    return int(os.environ.get("RANK", 0)) == 0
+
+
+def info0(_logger: logging.Logger, msg: str, *args, **kwargs) -> None:
+    """logger.info, but only on rank 0. Replaces the old cli.log0 helper."""
+    if is_master():
+        _logger.info(msg, *args, **kwargs)
+
+
 def get_base_dir():
     base = os.environ.get("NANOPROOF_HOME") or os.path.join(
         os.path.expanduser("~"), ".nanoproof"
@@ -171,7 +186,7 @@ def create_run_dirs(stage: str, run: str, args_dict: dict | None = None):
         (log_dir, model_dir) - absolute paths
     """
     ddp = is_ddp_initialized()
-    master = int(os.environ.get("RANK", 0)) == 0
+    master = is_master()
 
     if master:
         base_dir = get_base_dir()
