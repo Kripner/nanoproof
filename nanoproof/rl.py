@@ -152,31 +152,54 @@ parser.add_argument(
     help="if set, record CUDA memory history and dump snapshot to this dir on first OOM",
 )
 
-# Matchmaker (AlphaProof Sup. Table 7 defaults; prove-only -- no disprove)
-_mm_defaults = MatchmakerConfig()
-parser.add_argument("--mm-trust-count", type=int, default=_mm_defaults.trust_count)
+# Matchmaker
 parser.add_argument(
-    "--mm-trust-count-proved", type=int, default=_mm_defaults.trust_count_proved
+    "--mm-trust-count",
+    type=int,
+    default=8,
+    help="window size (in decided proven/unproven outcomes) used for weight tier classification and per-attempt simulation budget",
 )
 parser.add_argument(
-    "--mm-weight-interesting", type=float, default=_mm_defaults.weight_interesting
+    "--mm-trust-count-proved",
+    type=int,
+    default=12,
+    help="number of recent consecutive proven outcomes that demote a theorem to the fully-proved (low) weight tier",
 )
 parser.add_argument(
-    "--mm-weight-undecided", type=float, default=_mm_defaults.weight_undecided
+    "--mm-weight-interesting",
+    type=float,
+    default=1.0,
+    help="sampling weight for theorems still in the interesting tier (unseen, under-trusted, or recently mixed)",
 )
 parser.add_argument(
-    "--mm-weight-fully-proved", type=float, default=_mm_defaults.weight_fully_proved
+    "--mm-weight-undecided",
+    type=float,
+    default=0.1,
+    help="sampling weight for theorems with no proofs in the trust window (look unprovable for now)",
 )
 parser.add_argument(
-    "--mm-base-simulations", type=int, default=_mm_defaults.base_simulations
+    "--mm-weight-fully-proved",
+    type=float,
+    default=1e-3,
+    help="sampling weight for theorems consistently proven over the last trust_count_proved attempts",
+)
+parser.add_argument(
+    "--mm-base-simulations",
+    type=int,
+    default=250,
+    help="baseline per-attempt simulation budget before failure-based scaling",
 )
 parser.add_argument(
     "--mm-failure-multiplier",
     type=float,
-    default=_mm_defaults.failure_multiplier,
+    default=1.17,
+    help="simulation budget multiplier applied per unproven outcome in the trust window",
 )
 parser.add_argument(
-    "--mm-cap-simulations", type=int, default=_mm_defaults.cap_simulations
+    "--mm-cap-simulations",
+    type=int,
+    default=16000,
+    help="hard upper bound on the per-attempt simulation budget after failure scaling",
 )
 
 # Training

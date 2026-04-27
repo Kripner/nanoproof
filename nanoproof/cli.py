@@ -1315,7 +1315,6 @@ class WebMonitor:
             display the running weight after each attempt.
             """
             from nanoproof.experience_collection import (  # local import: keeps cli.py decoupled at import time
-                MatchmakerConfig,
                 TheoremStats,
                 list_step_shards,
             )
@@ -1325,7 +1324,9 @@ class WebMonitor:
                 return jsonify({"error": "No output dir"}), 404
 
             mm = self.matchmaker
-            config = mm.config if mm is not None else MatchmakerConfig()
+            if mm is None:
+                return jsonify({"error": "Matchmaker not ready"}), 503
+            config = mm.config
 
             stats = TheoremStats()
             history: list[dict] = []

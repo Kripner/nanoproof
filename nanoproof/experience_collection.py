@@ -121,14 +121,14 @@ class MatchmakerConfig:
     drop the theorem permanently.
     """
 
-    trust_count: int = 8
-    trust_count_proved: int = 12
-    weight_interesting: float = 1.0
-    weight_undecided: float = 0.1
-    weight_fully_proved: float = 1e-3
-    base_simulations: int = 250
-    failure_multiplier: float = 1.17
-    cap_simulations: int = 16000
+    trust_count: int
+    trust_count_proved: int
+    weight_interesting: float
+    weight_undecided: float
+    weight_fully_proved: float
+    base_simulations: int
+    failure_multiplier: float
+    cap_simulations: int
 
 
 @dataclass
