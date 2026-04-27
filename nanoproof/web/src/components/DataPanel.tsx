@@ -486,6 +486,7 @@ function TrainSampleRow({ sample }: { sample: TrainSample }) {
   const sourceClass =
     sample.source === 'sft' ? 'train-sample-kind-sft' : sample.source === 'rl' ? 'train-sample-kind-rl' : '';
   const sourceLabel = sample.source ?? '?';
+  const renderedTokens = decodeBpeTokens(sample.tokens);
   return (
     <div className="train-sample">
       <span className={`train-sample-kind ${sourceClass}`}>
@@ -493,7 +494,7 @@ function TrainSampleRow({ sample }: { sample: TrainSample }) {
         {sample.is_value && ' · value'}
       </span>
       <div className="train-sample-tokens">
-        {sample.tokens.map((tok, i) => {
+        {renderedTokens.map((text, i) => {
           const loss = sample.losses[i];
           const alpha = loss == null ? 0 : Math.min(loss / TRAIN_LOSS_CLAMP, 1);
           const style =
@@ -501,7 +502,7 @@ function TrainSampleRow({ sample }: { sample: TrainSample }) {
           const title = loss == null ? undefined : `loss=${loss.toFixed(3)}`;
           return (
             <span key={i} className="train-token" style={style} title={title}>
-              {renderTokenText(tok)}
+              {text}
             </span>
           );
         })}
@@ -510,12 +511,53 @@ function TrainSampleRow({ sample }: { sample: TrainSample }) {
   );
 }
 
-function renderTokenText(tok: string): string {
-  // HF BPE tokenizers emit a leading "Ġ" for a real space; flip it back so the
-  // UI's white-space: pre-wrap shows the space naturally.
-  if (tok.startsWith('Ġ')) return ' ' + tok.slice(1);
-  if (tok.startsWith('Ċ')) return '\n' + tok.slice(1);
-  return tok;
+const BYTE_DECODER: Map<string, number> = (() => {
+  // Inverse of HuggingFace tokenizers' byte_to_unicode: each printable char
+  // in a BPE token maps back to the single source byte it stood for.
+  const bs: number[] = [];
+  for (let b = 33; b <= 126; b++) bs.push(b);
+  for (let b = 161; b <= 172; b++) bs.push(b);
+  for (let b = 174; b <= 255; b++) bs.push(b);
+  const inBs = new Set(bs);
+  const cs: number[] = [...bs];
+  let n = 0;
+  for (let b = 0; b < 256; b++) {
+    if (!inBs.has(b)) {
+      bs.push(b);
+      cs.push(256 + n);
+      n++;
+    }
+  }
+  const m = new Map<string, number>();
+  for (let i = 0; i < bs.length; i++) m.set(String.fromCodePoint(cs[i]), bs[i]);
+  return m;
+})();
+
+function decodeBpeTokens(tokens: string[]): string[] {
+  // Decode HF byte-level BPE tokens back to UTF-8 strings. Multi-byte chars
+  // sometimes straddle token boundaries (e.g. ↔ split into "âĨ" + "Ķ"), so we
+  // run a single TextDecoder in stream mode across all tokens; the char ends
+  // up attributed to the token whose final byte completes the sequence.
+  const decoder = new TextDecoder('utf-8');
+  const utf8 = new TextEncoder();
+  const out: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    const bytes: number[] = [];
+    for (const ch of tok) {
+      const b = BYTE_DECODER.get(ch);
+      if (b !== undefined) {
+        bytes.push(b);
+      } else {
+        // Special tokens (e.g. <|tactic|>, ↔ when added as a single special
+        // token) bypass byte-level encoding; pass them through as raw UTF-8.
+        for (const eb of utf8.encode(ch)) bytes.push(eb);
+      }
+    }
+    const isLast = i === tokens.length - 1;
+    out.push(decoder.decode(new Uint8Array(bytes), { stream: !isLast }));
+  }
+  return out;
 }
 
 function TreeView({ node }: { node: NodeDict | null }) {
