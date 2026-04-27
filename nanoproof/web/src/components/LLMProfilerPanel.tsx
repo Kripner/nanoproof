@@ -16,7 +16,10 @@ const NAV_STEP = 1800;
 const COLORS = {
   inferencing: '#58a6ff',
   waiting: '#484f58',
-  inferenceStart: '#f85149',
+  trigger_samples: '#f85149',
+  trigger_time: '#f0883e',
+  trigger_forced: '#ffd866',
+  trigger_unknown: '#8b949e',
   queueLine: '#f0c64a',
   phase_collect: '#3fb950',
   phase_eval: '#d29922',
@@ -27,6 +30,26 @@ const COLORS = {
   grid: '#21262d',
   nowCursor: 'rgba(230, 237, 243, 0.55)',
 };
+
+// Diameter target ~ROW_HEIGHT/3 so the dot is readable but doesn't dwarf
+// the state bar. Floor of 2 keeps it visible on tiny batches.
+const BATCH_DOT_RADIUS_CAP = Math.floor(ROW_HEIGHT / 6);
+const BATCH_DOT_RADIUS_FLOOR = 2;
+
+function triggerCategory(trigger: string): string {
+  if (!trigger) return 'unknown';
+  const space = trigger.indexOf(' ');
+  return space < 0 ? trigger : trigger.slice(0, space);
+}
+
+function triggerColor(trigger: string): string {
+  switch (triggerCategory(trigger)) {
+    case 'samples': return COLORS.trigger_samples;
+    case 'time': return COLORS.trigger_time;
+    case 'forced': return COLORS.trigger_forced;
+    default: return COLORS.trigger_unknown;
+  }
+}
 
 const PHASE_OVERLAY_ALPHA = 0.07;
 
@@ -468,9 +491,8 @@ export function LLMProfilerPanel({ mode }: Props) {
 
       // Red dots at every inference start, so batch boundaries are visible
       // even when consecutive batches paint a continuous blue bar.
-      paintIntervalStarts(ctx, rank.inferencing, viewStart, viewEnd, timeToX,
-                          LABEL_WIDTH, width, stateBarY, STATE_BAR_HEIGHT,
-                          COLORS.inferenceStart);
+      paintIntervalStarts(ctx, rank.inferencing, rank.triggers, viewStart, viewEnd, timeToX,
+                          LABEL_WIDTH, width, stateBarY, STATE_BAR_HEIGHT);
 
       // Queue-depth line plot (step function; samples are every ~200ms and
       // depth is a discrete integer count).
@@ -644,7 +666,7 @@ export function LLMProfilerPanel({ mode }: Props) {
         const eTime = rank.inferencing[i * 2 + 1];
         const xs = timeToX(s);
         const pxWidth = Math.max(0, timeToX(eTime) - xs);
-        const radius = Math.max(2, Math.min(pxWidth * 0.4, STATE_BAR_HEIGHT));
+        const radius = Math.max(BATCH_DOT_RADIUS_FLOOR, Math.min(pxWidth * 0.4, BATCH_DOT_RADIUS_CAP));
         // Add a small grace so tiny dots remain catchable; the extra pixels
         // only matter when dots are closer together than the grace distance,
         // and we break ties by squared distance anyway.
@@ -745,7 +767,12 @@ export function LLMProfilerPanel({ mode }: Props) {
           <div className="card-title" style={{ margin: 0 }}>LLM Inference Timelines</div>
           <div style={{ display: 'flex', gap: 12, fontSize: 'var(--font-sm)', flexWrap: 'wrap' }}>
             <LegendSwatch color={COLORS.inferencing} label="Inferencing" />
-            <LegendDot color={COLORS.inferenceStart} label="Batch start" />
+            <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ color: 'var(--text-secondary)' }}>Batch start:</span>
+              <LegendDot color={COLORS.trigger_samples} label="samples" />
+              <LegendDot color={COLORS.trigger_time} label="time" />
+              <LegendDot color={COLORS.trigger_forced} label="forced" />
+            </span>
             <LegendSwatch color={COLORS.waiting} label="Waiting" />
             <LegendLine color={COLORS.queueLine} label={`Queue depth (max ${data.maxQueueDepth})`} />
             <LegendDash color={COLORS.phase_collect} label="collect" />
@@ -882,6 +909,7 @@ function paintIntervals(
 function paintIntervalStarts(
   ctx: CanvasRenderingContext2D,
   arr: Float64Array,
+  triggers: string[],
   viewStart: number,
   viewEnd: number,
   timeToX: (t: number) => number,
@@ -889,23 +917,20 @@ function paintIntervalStarts(
   rightClip: number,
   barY: number,
   barHeight: number,
-  color: string,
 ) {
   const n = arr.length >> 1;
   if (n === 0) return;
   const startIdx = firstVisiblePair(arr, viewStart);
   const cy = barY + barHeight / 2;
-  const radiusFloor = 2;
-  const radiusCap = barHeight;
-  ctx.fillStyle = color;
   for (let i = startIdx; i < n; i++) {
     const s = arr[i * 2];
     if (s > viewEnd) break;
     const e = arr[i * 2 + 1];
     const pxWidth = Math.max(0, timeToX(e) - timeToX(s));
-    const radius = Math.max(radiusFloor, Math.min(pxWidth * 0.4, radiusCap));
+    const radius = Math.max(BATCH_DOT_RADIUS_FLOOR, Math.min(pxWidth * 0.4, BATCH_DOT_RADIUS_CAP));
     const x = timeToX(s);
     if (x < leftClip - radius || x > rightClip + radius) continue;
+    ctx.fillStyle = triggerColor(triggers[i] ?? 'unknown');
     ctx.beginPath();
     ctx.arc(x, cy, radius, 0, Math.PI * 2);
     ctx.fill();
@@ -1201,7 +1226,7 @@ function TriggerOverlay({ hoverTrigger, viewportWidth }: TriggerOverlayProps) {
         fontSize: 10,
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
         background: 'rgba(13, 17, 23, 0.9)',
-        color: COLORS.inferenceStart,
+        color: triggerColor(hoverTrigger.trigger),
         padding: '1px 5px',
         borderRadius: 2,
         border: `1px solid ${COLORS.grid}`,
@@ -1216,9 +1241,14 @@ function TriggerOverlay({ hoverTrigger, viewportWidth }: TriggerOverlayProps) {
 }
 
 function formatTriggerLabel(trigger: string): string {
+  // Backend now sends the full reason (e.g. "samples (24 >= 24)" or
+  // "time (502 ms >= 500 ms)"); pre-fix backends sent just the category
+  // ("samples", "time", "forced"). Keep both readable.
   if (trigger === 'time') return 'timeout';
   if (trigger === 'samples') return 'max samples';
   if (trigger === 'forced') return 'forced';
+  if (trigger.startsWith('time ')) return 'timeout ' + trigger.slice(5);
+  if (trigger.startsWith('samples ')) return 'max samples ' + trigger.slice(8);
   return trigger;
 }
 

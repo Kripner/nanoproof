@@ -551,10 +551,6 @@ class BlockingTacticModel:
             return
 
         trigger_reason = self._trigger_reason() or "forced"
-        # Compact category for the LLM profiler UI: the full trigger_reason
-        # carries a quantitative tail (e.g. "time (300 ms >= 500 ms)") that
-        # bloats the wire payload; we keep only the leading word.
-        trigger_category = trigger_reason.split(" ", 1)[0]
 
         self._batch_in_progress = True
         self._total_batches += 1
@@ -595,6 +591,29 @@ class BlockingTacticModel:
 
         self._pending = remaining
         self._first_request_time = time.time() if remaining else None
+
+        # Pin the queue-depth line graph to the batch-start dot. The 200ms
+        # periodic sampler would otherwise leave a stale plateau between
+        # samples, making the rendered drop lag the actual drain by up to
+        # one sample period. Emit a peak sample just before the drop and a
+        # post-drain sample at the drain moment so the rendered step
+        # function spikes and drops at exactly the dot position.
+        self._llm_seq += 1
+        self._llm_samples.append(
+            {
+                "t": inference_start_time - 1e-6,
+                "n": pending_len_at_start,
+                "seq": self._llm_seq,
+            }
+        )
+        self._llm_seq += 1
+        self._llm_samples.append(
+            {
+                "t": inference_start_time,
+                "n": len(remaining),
+                "seq": self._llm_seq,
+            }
+        )
 
         # Release lock during inference
         self._lock.release()
@@ -652,7 +671,7 @@ class BlockingTacticModel:
                     "start": inference_start_time,
                     "end": time.time(),
                     "seq": self._llm_seq,
-                    "trigger": trigger_category,
+                    "trigger": trigger_reason,
                 }
             )
             self._batch_ready.notify_all()
