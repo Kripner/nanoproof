@@ -128,7 +128,7 @@ parser.add_argument(
     help="which theorem datasets to sample from",
 )
 parser.add_argument("--num-sampled-tactics", type=int, default=6)
-parser.add_argument("--num-simulations-eval", type=int, default=50)
+parser.add_argument("--num-simulations-eval", type=int, default=64)
 parser.add_argument("--collect-every", type=int, default=1)
 parser.add_argument("--collect-transitions", type=int, default=100)
 parser.add_argument("--replay-buffer-window-size", type=int, default=60_000_000)
@@ -156,13 +156,13 @@ parser.add_argument(
 parser.add_argument(
     "--mm-trust-count",
     type=int,
-    default=8,
+    default=4,
     help="window size (in decided proven/unproven outcomes) used for weight tier classification and per-attempt simulation budget",
 )
 parser.add_argument(
     "--mm-trust-count-proved",
     type=int,
-    default=12,
+    default=6,
     help="number of recent consecutive proven outcomes that demote a theorem to the fully-proved (low) weight tier",
 )
 parser.add_argument(
@@ -186,19 +186,19 @@ parser.add_argument(
 parser.add_argument(
     "--mm-base-simulations",
     type=int,
-    default=250,
+    default=64,
     help="baseline per-attempt simulation budget before failure-based scaling",
 )
 parser.add_argument(
     "--mm-failure-multiplier",
     type=float,
-    default=1.17,
+    default=1.5,
     help="simulation budget multiplier applied per unproven outcome in the trust window",
 )
 parser.add_argument(
     "--mm-cap-simulations",
     type=int,
-    default=16000,
+    default=1024,
     help="hard upper bound on the per-attempt simulation budget after failure scaling",
 )
 
