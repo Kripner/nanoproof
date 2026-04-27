@@ -89,44 +89,12 @@ def _outcome_kind(*, game, error, interrupted) -> str | None:
     return None
 
 
-# -----------------------------------------------------------------------------
-# Prover
-# -----------------------------------------------------------------------------
-
-
 class Prover:
     """Runs proof search on a single theorem. Stateless and thread-safe."""
 
     def __init__(self, config: SearchConfig, tactic_model: InferenceBalancer):
         self.config = config
         self.tactic_model = tactic_model
-
-    @staticmethod
-    def _get_process_interruptible(
-        client: LeanClient,
-        abort_check: Callable[[], bool] | None,
-        poll_interval: float = 10.0,
-        max_wait: float = 300.0,
-    ) -> tuple:
-        """Get a Lean process, polling abort_check between short blocking calls.
-
-        Uses short server-side timeouts so that abort_check is tested every
-        *poll_interval* seconds.  Returns ``(process, reason)`` where reason
-        is ``"ok"`` (process is not None), ``"aborted"`` (caller asked to
-        stop, typically end of a collect cycle), or ``"timeout"`` (waited
-        *max_wait* without success, real pool saturation).
-        """
-        deadline = time.time() + max_wait
-        while True:
-            if abort_check is not None and abort_check():
-                return None, "aborted"
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                return None, "timeout"
-            timeout = min(poll_interval, remaining)
-            process = client.get_process(timeout=timeout)
-            if process is not None:
-                return process, "ok"
 
     def prove(
         self,
@@ -137,8 +105,8 @@ class Prover:
         timeline: TimelineRecorder | None = None,
         tactic_sink: Callable[[str, str, str], None] | None = None,
     ) -> Game | None:
-        """Run a single MCTS proof game.
-
+        """
+        Run a single MCTS proof game.
         Returns a :class:`Game` with results, or ``None`` if Lean setup fails.
         """
         logger.debug(f"Proving: {theorem.source[:80]}...")
@@ -198,6 +166,7 @@ class Prover:
                     )
                     game.root.is_solved = False
                     return game
+
                 game.unsimplified_root = game.root.clone()
                 prune_redundant_nodes(game.root)
                 compute_value_target(game.root)
@@ -223,10 +192,32 @@ class Prover:
 
             return game
 
+    @staticmethod
+    def _get_process_interruptible(
+        client: LeanClient,
+        abort_check: Callable[[], bool] | None,
+        poll_interval: float = 10.0,
+        max_wait: float = 300.0,
+    ) -> tuple:
+        """Get a Lean process, polling abort_check between short blocking calls.
 
-# -----------------------------------------------------------------------------
-# ProverWorker
-# -----------------------------------------------------------------------------
+        Uses short server-side timeouts so that abort_check is tested every
+        *poll_interval* seconds.  Returns ``(process, reason)`` where reason
+        is ``"ok"`` (process is not None), ``"aborted"`` (caller asked to
+        stop, typically end of a collect cycle), or ``"timeout"`` (waited
+        *max_wait* without success, real pool saturation).
+        """
+        deadline = time.time() + max_wait
+        while True:
+            if abort_check is not None and abort_check():
+                return None, "aborted"
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return None, "timeout"
+            timeout = min(poll_interval, remaining)
+            process = client.get_process(timeout=timeout)
+            if process is not None:
+                return process, "ok"
 
 
 @dataclass
@@ -264,11 +255,6 @@ class ProverWorker:
     - ``evaluate()`` parks with a *release*: the release event is raised
       so mid-proof actors abort, dropping their Lean leases and the
       partially-built MCTS trees, then the job is cleared.
-
-    Each actor reports its result to the job that *issued* the theorem,
-    not to whatever job happens to be current at completion time. That
-    keeps a slow collect-cycle straggler from contaminating an eval that
-    starts before the straggler finishes.
 
     Actors carry a single abort signal (``_release_event``) and a single
     blocking point (paused inference inside ``sample_tactic``). There is
