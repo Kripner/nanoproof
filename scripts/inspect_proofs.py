@@ -382,27 +382,28 @@ def cmd_simplify(args):
             print()
 
 
-def cmd_check(args):
-    """Check that an eval JSONL file contains exactly the benchmark theorems."""
-    bench_loaders = {
-        "minif2f": lambda: minif2f.list_theorems(split="valid"),
-        "proofnet": lambda: proofnet.list_theorems(split="valid"),
-    }
+_BENCH_LOADERS = {
+    "minif2f": lambda: minif2f.list_theorems(split="valid"),
+    "proofnet": lambda: proofnet.list_theorems(split="valid"),
+}
 
-    path = Path(args.path)
+
+def _check_eval_file(path: Path, indent: str = "") -> bool:
+    """Compare an eval JSONL against its benchmark; prints findings.
+
+    Returns True iff the file contains exactly the benchmark theorems
+    (no duplicates, no missing, no extras). Returns True without checking
+    if the dataset can't be inferred from the filename, after printing a
+    note - so callers can use this as a soft pre-flight.
+    """
     stem = path.stem.lower()
-    dataset = next((name for name in bench_loaders if name in stem), None)
+    dataset = next((name for name in _BENCH_LOADERS if name in stem), None)
     if dataset is None:
-        print(f"Cannot determine dataset from filename: {path.name}")
-        print(f"Expected one of: {', '.join(bench_loaders)}")
-        return
+        print(f"{indent}Skipping check: cannot infer dataset from {path.name}")
+        return True
 
-    bench_theorems = bench_loaders[dataset]()
+    bench_theorems = _BENCH_LOADERS[dataset]()
     proofs = load_proofs(str(path))
-
-    print(f"Dataset: {dataset} (split=valid)")
-    print(f"Expected: {len(bench_theorems)} theorems")
-    print(f"In file:  {len(proofs)} records")
 
     expected = {t.source for t in bench_theorems}
     file_sources = [p.get("theorem", "") for p in proofs]
@@ -412,26 +413,35 @@ def cmd_check(args):
     missing = expected - file_set
     extra = file_set - expected
 
+    print(
+        f"{indent}Check {dataset}: expected {len(bench_theorems)}, file has {len(proofs)} "
+        f"(unique {len(file_set)})"
+    )
     if duplicates == 0 and not missing and not extra:
-        print("OK: file contains exactly the benchmark theorems.")
-        return
+        print(f"{indent}  OK: contains exactly the benchmark theorems.")
+        return True
 
-    print()
-    print("MISMATCH:")
+    print(f"{indent}  MISMATCH:")
     if duplicates:
-        print(f"  Duplicate records: {duplicates}")
+        print(f"{indent}    Duplicate records: {duplicates}")
     if missing:
-        print(f"  Missing from file: {len(missing)}")
+        print(f"{indent}    Missing from file: {len(missing)}")
         for s in sorted(missing)[:5]:
-            print(f"    - {_one_line_preview(s)}")
+            print(f"{indent}      - {_one_line_preview(s)}")
         if len(missing) > 5:
-            print(f"    ... ({len(missing) - 5} more)")
+            print(f"{indent}      ... ({len(missing) - 5} more)")
     if extra:
-        print(f"  Extra in file (not in benchmark): {len(extra)}")
+        print(f"{indent}    Extra in file (not in benchmark): {len(extra)}")
         for s in sorted(extra)[:5]:
-            print(f"    - {_one_line_preview(s)}")
+            print(f"{indent}      - {_one_line_preview(s)}")
         if len(extra) > 5:
-            print(f"    ... ({len(extra) - 5} more)")
+            print(f"{indent}      ... ({len(extra) - 5} more)")
+    return False
+
+
+def cmd_check(args):
+    """Check that an eval JSONL file contains exactly the benchmark theorems."""
+    _check_eval_file(Path(args.path))
 
 
 def _one_line_preview(source: str, max_len: int = 120) -> str:
@@ -475,6 +485,8 @@ def cmd_gather_lean(args):
             jsonl_path = step_dir / f"{dataset}.jsonl"
             if not jsonl_path.exists():
                 continue
+
+            _check_eval_file(jsonl_path, indent="  ")
 
             proofs = load_proofs(str(jsonl_path))
 
