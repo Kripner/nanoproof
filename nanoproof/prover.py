@@ -104,7 +104,7 @@ class Prover:
         expansion_callback: Callable[[], None] | None = None,
         abort_check: Callable[[], bool] | None = None,
         timeline: TimelineRecorder | None = None,
-        tactic_sink: Callable[[str, str, str], None] | None = None,
+        tactic_sink: Callable[[str, list[tuple[str, str]]], None] | None = None,
     ) -> Game | None:
         """
         Run a single MCTS proof game with the supplied per-call simulation budget.
@@ -237,7 +237,7 @@ class _Job:
     poll_callback: Optional[Callable[[list[str]], None]]
     record_timeline: bool
     prover: Prover
-    tactic_sink: Optional[Callable[[str, str, str], None]] = None
+    tactic_sink: Optional[Callable[[str, list[tuple[str, str]]], None]] = None
 
 
 class ProverWorker:
@@ -341,7 +341,7 @@ class ProverWorker:
         matchmaker: Matchmaker,
         target_transitions: int,
         experience: CollectedExperience,
-        tactic_sink: Callable[[str, str, str], None] | None = None,
+        tactic_sink: Callable[[str, list[tuple[str, str]]], None] | None = None,
     ) -> int:
         """Drive the actor pool until ``experience`` accumulates
         ``target_transitions`` transitions. Records every attempt
@@ -418,7 +418,7 @@ class ProverWorker:
         num_simulations: int,
         progress_callback: Callable[[int, int, int, int], None] | None = None,
         verify_timeout: int = 5000,
-        tactic_sink: Callable[[str, str, str], None] | None = None,
+        tactic_sink: Callable[[str, list[tuple[str, str]]], None] | None = None,
     ) -> dict:
         """Evaluate theorems using MCTS. Returns metrics dict. Parks with
         *release* on exit so eval state does not leak into the next job

@@ -420,7 +420,7 @@ def run_mcts(
     expansion_callback=None,
     abort_check=None,
     timeline: TimelineRecorder | None = None,
-    tactic_sink: Callable[[str, str, str], None] | None = None,
+    tactic_sink: Callable[[str, list[tuple[str, str]]], None] | None = None,
 ) -> int:
     """
     Run MCTS to find a proof.
@@ -433,9 +433,10 @@ def run_mcts(
         abort_check: Optional callable() -> bool that returns True if MCTS should abort early.
                      This is checked each iteration and allows callers to cancel search
                      (e.g., when prover is paused and needs to free Lean processes).
-        tactic_sink: Optional ``(state, tactic, status)`` callback fired once
-                     per tactic attempt during expansion. ``status`` is one of
-                     ``"error"`` / ``"cycle"`` / ``"success"``.
+        tactic_sink: Optional ``(state, [(tactic, status), ...])`` callback
+                     fired once per node expansion with the full batch of
+                     attempted tactics. ``status`` is one of ``"error"`` /
+                     ``"cycle"`` / ``"success"``.
 
     Returns:
         The number of iterations (simulations) that were run.
@@ -578,7 +579,7 @@ def expand_node(
     temperature: float,
     timeline: TimelineRecorder | None = None,
     abort_check=None,
-    tactic_sink: "Callable[[str, str, str], None] | None" = None,
+    tactic_sink: "Callable[[str, list[tuple[str, str]]], None] | None" = None,
 ):
     node.evaluations += 1
     policy = {
@@ -590,72 +591,77 @@ def expand_node(
         str(node.state[0].state).strip() if len(node.state) == 1 else "<multi-branch>"
     )
 
-    def _emit(status: str) -> None:
-        if tactic_sink is not None:
-            tactic_sink(state_str, action, status)
-
-    for action, p in policy.items():
-        if abort_check is not None and abort_check():
-            raise MCTSAbortedError("MCTS aborted during node expansion")
-        # Check if action is duplicate.
-        if action in node.children:
-            node.children[action].prior += p  # TODO: wtf is this?
-            continue
-        # Immediately apply the actions in the environment.
-        assert len(node.state) == 1
-        branch = node.state[0]
-        # TODO (!): investigate how often this times out; log timeout errors differently
-        try:
-            if timeline:
-                with timeline.record("lean"):
+    # Collect (tactic, status) pairs for this expansion and emit once at the
+    # end so the sink sees the whole batch generated for this state together.
+    # We use try/finally so any partial results survive an abort or Lean
+    # crash mid-expansion.
+    tactic_results: list[tuple[str, str]] = []
+    try:
+        for action, p in policy.items():
+            if abort_check is not None and abort_check():
+                raise MCTSAbortedError("MCTS aborted during node expansion")
+            # Check if action is duplicate.
+            if action in node.children:
+                node.children[action].prior += p  # TODO: wtf is this?
+                continue
+            # Immediately apply the actions in the environment.
+            assert len(node.state) == 1
+            branch = node.state[0]
+            # TODO (!): investigate how often this times out; log timeout errors differently
+            try:
+                if timeline:
+                    with timeline.record("lean"):
+                        new_branches = branch.try_apply_tactic(action)
+                else:
                     new_branches = branch.try_apply_tactic(action)
-            else:
-                new_branches = branch.try_apply_tactic(action)
-        except (
-            RemoteException,
-            LeanProcessException,
-            ConnectionError,
-            TimeoutError,
-        ) as e:
-            short_err = str(e).split("\n", 1)[0]
-            logger.warning(f"Lean crash on tactic {action!r}: {short_err}")
-            raise
-        if not new_branches.is_success():
-            # Invalid action encountered.
-            _emit("error")
-            continue
-        if is_cycling(node, new_branches.value):
-            # Cycle detected.
-            _emit("cycle")
-            continue
-        _emit("success")
-        # new_branches = [b for b in new_branches.value if not b.state.is_solved()]
-        new_branches = new_branches.value
-        child = Node(
-            parent=node,
-            action=action,
-            prior=p,
-            state=new_branches,
-            to_play=Player.AND if len(new_branches) > 1 else Player.OR,
-            reward=-1.0,
-        )
-        if child.is_terminal:
-            child.is_solved = True
-            node.is_solved = True
-        node.children[action] = child
-        if len(new_branches) > 1:
-            # For AND nodes, immediately add children with pseudo-actions to focus on each goal.
-            child.children = {}
-            for i, branch in enumerate(new_branches):
-                grandchild = Node(
-                    parent=child,
-                    action=i,
-                    prior=1.0 / len(new_branches),
-                    state=[branch],
-                    to_play=Player.OR,
-                    reward=0.0,
-                )
-                child.children[i] = grandchild
+            except (
+                RemoteException,
+                LeanProcessException,
+                ConnectionError,
+                TimeoutError,
+            ) as e:
+                short_err = str(e).split("\n", 1)[0]
+                logger.warning(f"Lean crash on tactic {action!r}: {short_err}")
+                raise
+            if not new_branches.is_success():
+                # Invalid action encountered.
+                tactic_results.append((action, "error"))
+                continue
+            if is_cycling(node, new_branches.value):
+                # Cycle detected.
+                tactic_results.append((action, "cycle"))
+                continue
+            tactic_results.append((action, "success"))
+            # new_branches = [b for b in new_branches.value if not b.state.is_solved()]
+            new_branches = new_branches.value
+            child = Node(
+                parent=node,
+                action=action,
+                prior=p,
+                state=new_branches,
+                to_play=Player.AND if len(new_branches) > 1 else Player.OR,
+                reward=-1.0,
+            )
+            if child.is_terminal:
+                child.is_solved = True
+                node.is_solved = True
+            node.children[action] = child
+            if len(new_branches) > 1:
+                # For AND nodes, immediately add children with pseudo-actions to focus on each goal.
+                child.children = {}
+                for i, branch in enumerate(new_branches):
+                    grandchild = Node(
+                        parent=child,
+                        action=i,
+                        prior=1.0 / len(new_branches),
+                        state=[branch],
+                        to_play=Player.OR,
+                        reward=0.0,
+                    )
+                    child.children[i] = grandchild
+    finally:
+        if tactic_sink is not None and tactic_results:
+            tactic_sink(state_str, tactic_results)
 
 
 # At the end of a simulation, we propagate the evaluation all the way up the

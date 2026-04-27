@@ -347,18 +347,40 @@ export function DataPanel() {
                 ) : tactics.length === 0 ? (
                   <div className="replay-empty">No tactics at this step</div>
                 ) : (
-                  tactics.map((t, i) => {
-                    const statusClass =
-                      t.status === 'success' ? 'success' : t.status === 'cycle' ? 'cycle' : 'failure';
-                    const statusIcon =
-                      t.status === 'success' ? '✓' : t.status === 'cycle' ? '↻' : '✗';
+                  tactics.map((entry, i) => {
+                    const successCount = entry.tactics.filter(
+                      (t) => t.status === 'success',
+                    ).length;
                     return (
-                      <div key={i} className={`tactic-item ${statusClass}`}>
-                        <span className="tactic-status">{statusIcon}</span>
-                        <span className="tactic-text">{t.tactic}</span>
-                        <span className="tactic-state" title={t.state}>
-                          {t.state}
-                        </span>
+                      <div key={i} className="tactic-group">
+                        <div className="tactic-group-state" title={entry.state}>
+                          <span className="tactic-group-count">
+                            {successCount}/{entry.tactics.length}
+                          </span>
+                          {entry.state}
+                        </div>
+                        <div className="tactic-group-tactics">
+                          {entry.tactics.map((t, j) => {
+                            const statusClass =
+                              t.status === 'success'
+                                ? 'success'
+                                : t.status === 'cycle'
+                                ? 'cycle'
+                                : 'failure';
+                            const statusIcon =
+                              t.status === 'success'
+                                ? '✓'
+                                : t.status === 'cycle'
+                                ? '↻'
+                                : '✗';
+                            return (
+                              <div key={j} className={`tactic-item ${statusClass}`}>
+                                <span className="tactic-status">{statusIcon}</span>
+                                <span className="tactic-text">{t.tactic}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
                       </div>
                     );
                   })

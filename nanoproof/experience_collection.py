@@ -360,8 +360,9 @@ class CollectedExperience:
     Attempts and tactics are populated by worker threads during the phase:
     :meth:`record_attempt` is called once per attempt (proven/unproven/error)
     from the prover callback; :meth:`record_tactic` is wired in as the
-    job's per-call ``tactic_sink`` and fires for every attempted tactic
-    during MCTS expansion. At the end of the phase the RL loop pulls
+    job's per-expansion ``tactic_sink`` and fires once per MCTS expansion
+    with the full batch of (tactic, status) pairs generated for that
+    state. At the end of the phase the RL loop pulls
     :meth:`transitions` into :class:`ReplayBuffer` and calls :meth:`save`
     to write ``theorems.jsonl`` and ``generated_tactics.jsonl``.
     """
@@ -414,13 +415,19 @@ class CollectedExperience:
         with self._lock:
             self.attempts.append(attempt)
 
-    def record_tactic(self, state: str, tactic: str, status: str) -> None:
-        """Buffer a tactic attempt. Lock-free (list.append is atomic under the GIL)."""
+    def record_tactic(
+        self, state: str, tactics_with_status: list[tuple[str, str]]
+    ) -> None:
+        """Buffer one node-expansion's worth of tactic attempts as a single
+        ``{state, tactics: [{tactic, status}, ...]}`` entry. Lock-free
+        (``list.append`` is atomic under the GIL)."""
         self.tactics.append(
             {
-                "status": status,
                 "state": state.replace("\n", "\\n"),
-                "tactic": tactic,
+                "tactics": [
+                    {"tactic": tactic, "status": status}
+                    for tactic, status in tactics_with_status
+                ],
             }
         )
 

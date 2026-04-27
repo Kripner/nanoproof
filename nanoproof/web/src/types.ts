@@ -66,10 +66,14 @@ export interface MonitorState {
   lean_servers: LeanServerStatus[];
 }
 
-export interface TacticEntry {
-  status: 'success' | 'error' | 'cycle';
-  state: string;
+export interface TacticAttempt {
   tactic: string;
+  status: 'success' | 'error' | 'cycle';
+}
+
+export interface TacticEntry {
+  state: string;
+  tactics: TacticAttempt[];
 }
 
 export interface LocalActor {

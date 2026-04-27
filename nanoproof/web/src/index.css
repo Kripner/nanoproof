@@ -645,16 +645,44 @@ body {
   text-align: center;
 }
 
+.tactic-group {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.tactic-group:last-child {
+  border-bottom: none;
+}
+
+.tactic-group-state {
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  margin-bottom: 4px;
+}
+
+.tactic-group-count {
+  display: inline-block;
+  background: var(--bg-secondary);
+  color: var(--accent-blue);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.85em;
+  font-weight: 500;
+  margin-right: 6px;
+  min-width: 36px;
+  text-align: center;
+}
+
+.tactic-group-tactics {
+  padding-left: 12px;
+  border-left: 2px solid var(--border);
+}
+
 .tactic-item {
   display: flex;
   gap: 8px;
-  padding: 3px 0;
-  border-bottom: 1px solid var(--border);
+  padding: 2px 0;
   align-items: flex-start;
-}
-
-.tactic-item:last-child {
-  border-bottom: none;
 }
 
 .tactic-status {
@@ -676,12 +704,8 @@ body {
 
 .tactic-text {
   color: var(--accent-cyan);
-  flex-shrink: 0;
-}
-
-.tactic-state {
-  color: var(--text-muted);
   flex: 1;
+  white-space: pre-wrap;
 }
 
 /* Lean Server Panel */
