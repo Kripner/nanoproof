@@ -42,15 +42,27 @@ def main():
         description="Benchmark tactic-generation throughput on one GPU",
         allow_abbrev=False,
     )
-    parser.add_argument("--input", type=str, required=True,
-                        help="Path to a generated_tactics.jsonl file")
+    parser.add_argument(
+        "--input",
+        type=str,
+        required=True,
+        help="Path to a generated_tactics.jsonl file",
+    )
     parser.add_argument("--model-path", type=str, required=True)
-    parser.add_argument("--batch-size", type=int, default=8,
-                        help="Static batch size (number of prompts per batch)")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=8,
+        help="Static batch size (number of prompts per batch)",
+    )
     parser.add_argument("--warmup-seconds", type=float, default=5.0)
     parser.add_argument("--benchmark-seconds", type=float, default=30.0)
-    parser.add_argument("--gen-tokens", type=int, default=8,
-                        help="Tokens to generate per sample (sets both min_tokens and max_tokens so every batch generates the same amount)")
+    parser.add_argument(
+        "--gen-tokens",
+        type=int,
+        default=8,
+        help="Tokens to generate per sample (sets both min_tokens and max_tokens so every batch generates the same amount)",
+    )
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
@@ -65,7 +77,9 @@ def main():
     assert len(raw_states) > 0, "no states found"
 
     print(f"Loading model from {args.model_path}")
-    model = TacticModel.create(num_samples=1, model_path=args.model_path, seed=args.seed)
+    model = TacticModel.create(
+        num_samples=1, model_path=args.model_path, seed=args.seed
+    )
 
     # Pre-tokenize every state once; drop ones that exceed the prompt budget.
     prompts = []
@@ -75,12 +89,15 @@ def main():
             continue
         prompts.append(tokens)
     print(f"Usable prompts: {len(prompts)} / {len(raw_states)}")
-    assert len(prompts) >= args.batch_size, \
+    assert len(prompts) >= args.batch_size, (
         f"not enough usable prompts ({len(prompts)}) for batch size {args.batch_size}"
+    )
 
     prompt_lens = [len(p) for p in prompts]
-    print(f"Prompt length: min={min(prompt_lens)}, max={max(prompt_lens)}, "
-          f"mean={sum(prompt_lens) / len(prompt_lens):.1f}")
+    print(
+        f"Prompt length: min={min(prompt_lens)}, max={max(prompt_lens)}, "
+        f"mean={sum(prompt_lens) / len(prompt_lens):.1f}"
+    )
 
     def run_one_batch(batch_prompts, seed):
         results, masks = model.engine.generate_batch(
@@ -121,12 +138,16 @@ def main():
             n_generated += gen
             n_samples += args.batch_size
         elapsed = time.perf_counter() - phase_start
-        print(f"[{label}] {elapsed:.2f}s elapsed, {n_batches} batches, "
-              f"{n_samples} samples, {n_generated} generated tokens")
+        print(
+            f"[{label}] {elapsed:.2f}s elapsed, {n_batches} batches, "
+            f"{n_samples} samples, {n_generated} generated tokens"
+        )
         return cursor, n_batches, n_samples, n_generated, latencies, elapsed
 
-    print(f"\nBatch size: {args.batch_size}, gen_tokens: {args.gen_tokens}, "
-          f"temperature: {args.temperature}")
+    print(
+        f"\nBatch size: {args.batch_size}, gen_tokens: {args.gen_tokens}, "
+        f"temperature: {args.temperature}"
+    )
     print(f"Warmup: {args.warmup_seconds}s, benchmark: {args.benchmark_seconds}s\n")
 
     cursor = 0
@@ -145,8 +166,10 @@ def main():
     print(f"samples/sec : {n_samples / elapsed:.2f}")
     print(f"gen tok/sec : {n_generated / elapsed:.1f}")
     print(f"tok/sample  : {n_generated / n_samples:.2f}")
-    print(f"batch latency: mean={mean_lat * 1000:.1f}ms  "
-          f"p50={p50 * 1000:.1f}ms  p95={p95 * 1000:.1f}ms")
+    print(
+        f"batch latency: mean={mean_lat * 1000:.1f}ms  "
+        f"p50={p50 * 1000:.1f}ms  p95={p95 * 1000:.1f}ms"
+    )
 
     compute_cleanup()
 

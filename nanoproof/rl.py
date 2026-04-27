@@ -17,15 +17,43 @@ import torch.distributed as dist
 import leantree.augmentations
 from leantree.core.lean import LeanGoal
 
-from nanoproof.common import compute_init, compute_cleanup, get_base_dir, create_metrics_logger, add_logging_args, autodetect_device_type, SimpleTimer, flush, create_run_dirs, active_barrier, broadcast_value, enable_memory_profiling
-from nanoproof.checkpoints import load_model, save_checkpoint, save_eval_results_to_run_dir, save_eval_summary_to_run_dir
+from nanoproof.common import (
+    compute_init,
+    compute_cleanup,
+    get_base_dir,
+    create_metrics_logger,
+    add_logging_args,
+    autodetect_device_type,
+    SimpleTimer,
+    flush,
+    create_run_dirs,
+    active_barrier,
+    broadcast_value,
+    enable_memory_profiling,
+)
+from nanoproof.checkpoints import (
+    load_model,
+    save_checkpoint,
+    save_eval_results_to_run_dir,
+    save_eval_summary_to_run_dir,
+)
 from nanoproof.engine import Engine
 from nanoproof.data.sft.leantree import leantree_transitions
 from nanoproof.data.sft.leantree_dataloader import rl_data_generator
-from nanoproof.experience_collection import ReplayBuffer, TheoremsSampler, CollectedExperience, collection_dir, eval_dir
+from nanoproof.experience_collection import (
+    ReplayBuffer,
+    TheoremsSampler,
+    CollectedExperience,
+    collection_dir,
+    eval_dir,
+)
 from nanoproof.prover import ProverWorker
 from nanoproof.inference import setup_distributed_inference
-from nanoproof.inference import TacticModel, BlockingTacticModel, compute_max_batch_prompt_tokens
+from nanoproof.inference import (
+    TacticModel,
+    BlockingTacticModel,
+    compute_max_batch_prompt_tokens,
+)
 from nanoproof.optim import optimizer_to_cpu, optimizer_to_gpu
 from nanoproof.data.bench import minif2f
 from nanoproof.data.check_init import read_lean_version, resolve_lean_project
@@ -43,23 +71,59 @@ from nanoproof.data.sft.leantree_dataloader import sft_data_generator
 
 # -----------------------------------------------------------------------------
 # RL Hyperparameters
-parser = argparse.ArgumentParser(description="RL training for nanoproof", allow_abbrev=False)
+parser = argparse.ArgumentParser(
+    description="RL training for nanoproof", allow_abbrev=False
+)
 
 # General
 add_logging_args(parser)
 parser.add_argument("--seed", type=int, default=0)
-parser.add_argument("--model-path", type=str, required=True, help="path to model_NNNNNN.pt to load from (relative to models/ or absolute)")
-parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
-parser.add_argument("--load-buffer", type=str, default="", help="path to a previous RL run dir; at startup, seed the replay buffer with every transition found in its collection_*/collected.jsonl shards (FIFO-truncated to --replay-buffer-window-size). Independent of training resumption - does not affect the step counter or model checkpoint.")
+parser.add_argument(
+    "--model-path",
+    type=str,
+    required=True,
+    help="path to model_NNNNNN.pt to load from (relative to models/ or absolute)",
+)
+parser.add_argument(
+    "--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)"
+)
+parser.add_argument(
+    "--load-buffer",
+    type=str,
+    default="",
+    help="path to a previous RL run dir; at startup, seed the replay buffer with every transition found in its collection_*/collected.jsonl shards (FIFO-truncated to --replay-buffer-window-size). Independent of training resumption - does not affect the step counter or model checkpoint.",
+)
 
 # Infrastructure
-parser.add_argument("--lean-servers", type=str, nargs="+", required=True, help="Lean server addresses (e.g., 10.10.25.33:8000 10.10.25.34); port defaults to 8000")
-parser.add_argument("--lean-project", type=str, default=None, help="Path to the Lean project directory (contains lean-toolchain). The Lean version is read from this file and used to select per-dataset whitelists. Falls back to $LEAN_PROJECT_PATH if unset.")
-parser.add_argument("--inference-server-port", type=int, default=5000, help="base port for per-rank inference servers (rank N uses port base+1+N)")
+parser.add_argument(
+    "--lean-servers",
+    type=str,
+    nargs="+",
+    required=True,
+    help="Lean server addresses (e.g., 10.10.25.33:8000 10.10.25.34); port defaults to 8000",
+)
+parser.add_argument(
+    "--lean-project",
+    type=str,
+    default=None,
+    help="Path to the Lean project directory (contains lean-toolchain). The Lean version is read from this file and used to select per-dataset whitelists. Falls back to $LEAN_PROJECT_PATH if unset.",
+)
+parser.add_argument(
+    "--inference-server-port",
+    type=int,
+    default=5000,
+    help="base port for per-rank inference servers (rank N uses port base+1+N)",
+)
 
 # Search / collection
 ALL_DATASETS = ["leanworkbook", "deepseek_prover", "numinamath"]
-parser.add_argument("--datasets", nargs="+", default=ALL_DATASETS, choices=ALL_DATASETS, help="which theorem datasets to sample from (default: all three)")
+parser.add_argument(
+    "--datasets",
+    nargs="+",
+    default=ALL_DATASETS,
+    choices=ALL_DATASETS,
+    help="which theorem datasets to sample from (default: all three)",
+)
 parser.add_argument("--num-sampled-tactics", type=int, default=6)
 parser.add_argument("--num-simulations-collect", type=int, default=50)
 parser.add_argument("--num-simulations-eval", type=int, default=50)
@@ -67,17 +131,34 @@ parser.add_argument("--collect-every", type=int, default=1)
 parser.add_argument("--collect-transitions", type=int, default=100)
 parser.add_argument("--replay-buffer-window-size", type=int, default=60_000_000)
 parser.add_argument("--batch-time-limit", type=float, default=0.5)
-parser.add_argument("--batch-max-gen-samples", type=int, default=None,
-                    help="max generation samples per batch (default: num_actors * num_sampled_tactics)")
-parser.add_argument("--batch-max-prompt-tokens", type=int, default=None,
-                    help="max estimated prompt tokens per batch (default: auto from VRAM)")
-parser.add_argument("--memory-profile", type=str, default=None,
-                    help="if set, record CUDA memory history and dump snapshot to this dir on first OOM")
+parser.add_argument(
+    "--batch-max-gen-samples",
+    type=int,
+    default=None,
+    help="max generation samples per batch (default: num_actors * num_sampled_tactics)",
+)
+parser.add_argument(
+    "--batch-max-prompt-tokens",
+    type=int,
+    default=None,
+    help="max estimated prompt tokens per batch (default: auto from VRAM)",
+)
+parser.add_argument(
+    "--memory-profile",
+    type=str,
+    default=None,
+    help="if set, record CUDA memory history and dump snapshot to this dir on first OOM",
+)
 
 # Training
 parser.add_argument("--device-batch-size", type=int, default=8)
 parser.add_argument("--target-examples-per-step", type=int, default=512)
-parser.add_argument("--num-updates-per-step", type=int, default=1, help="number of optimizer updates per training step (i.e. per collection cycle)")
+parser.add_argument(
+    "--num-updates-per-step",
+    type=int,
+    default=1,
+    help="number of optimizer updates per training step (i.e. per collection cycle)",
+)
 parser.add_argument("--fraction-sft", type=float, default=0.2)
 parser.add_argument("--augment-data", type=bool, default=True)
 parser.add_argument("--value-weight", type=float, default=0.01)
@@ -93,7 +174,11 @@ parser.add_argument("--init-lr-frac", type=float, default=0.02)
 parser.add_argument("--eval-every", type=int, default=100)
 parser.add_argument("--eval-start", type=int, default=0)
 parser.add_argument("--save-every", type=int, default=500)
-parser.add_argument("--verbose", action="store_true", help="enable debug logging for inference and proving")
+parser.add_argument(
+    "--verbose",
+    action="store_true",
+    help="enable debug logging for inference and proving",
+)
 args = parser.parse_args()
 user_config = vars(args).copy()
 
@@ -104,7 +189,9 @@ if args.verbose:
 # -----------------------------------------------------------------------------
 # Compute init
 
-args.device_type = autodetect_device_type() if args.device_type == "" else args.device_type
+args.device_type = (
+    autodetect_device_type() if args.device_type == "" else args.device_type
+)
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(args.device_type)
 master_process = ddp_rank == 0
 set_ddp_info(is_master=master_process, rank=ddp_rank)
@@ -121,14 +208,18 @@ user_config["model_dir"] = model_dir
 configure_logging(output_dir)
 
 # metrics logging init
-run_log = create_metrics_logger("nanoproof-rl", args, master_process, user_config, log_dir=log_dir, save_code=True)
+run_log = create_metrics_logger(
+    "nanoproof-rl", args, master_process, user_config, log_dir=log_dir, save_code=True
+)
 
 # Enable memory profiling before model load so model weight allocations are captured.
 if args.memory_profile:
     enable_memory_profiling(args.memory_profile)
 
 # Create the policy/critic model.
-inner_tactic_model = TacticModel.create(num_samples=args.num_sampled_tactics, model_path=args.model_path)
+inner_tactic_model = TacticModel.create(
+    num_samples=args.num_sampled_tactics, model_path=args.model_path
+)
 tactic_model = BlockingTacticModel(
     inner_model=inner_tactic_model,
     timeout_seconds=args.batch_time_limit,
@@ -143,8 +234,13 @@ model = tactic_model.network
 examples_per_step = args.device_batch_size * ddp_world_size
 log0(f"Target examples per step: {args.target_examples_per_step}", component="Config")
 log0(f"Device batch size: {args.device_batch_size}", component="Config")
-log0(f"Examples per step is device_batch_size * ddp_world_size: {examples_per_step}", component="Config")
-assert args.target_examples_per_step % examples_per_step == 0, "Target examples per step must be divisible by examples per step"
+log0(
+    f"Examples per step is device_batch_size * ddp_world_size: {examples_per_step}",
+    component="Config",
+)
+assert args.target_examples_per_step % examples_per_step == 0, (
+    "Target examples per step must be divisible by examples per step"
+)
 grad_accum_steps = args.target_examples_per_step // examples_per_step
 log0(f"=> Setting grad accum steps: {grad_accum_steps}", component="Config")
 
@@ -152,12 +248,17 @@ rank_seed = args.seed + ddp_rank
 
 args.lean_project = resolve_lean_project(args.lean_project)
 lean_version = read_lean_version(args.lean_project)
-log0(f"Lean version: {lean_version} (from {args.lean_project}/lean-toolchain)", component="Config")
+log0(
+    f"Lean version: {lean_version} (from {args.lean_project}/lean-toolchain)",
+    component="Config",
+)
 
 replay_buffer = ReplayBuffer(window_size=args.replay_buffer_window_size, seed=rank_seed)
 if args.load_buffer:
     replay_buffer.load_from(args.load_buffer)
-theorems_sampler = TheoremsSampler(seed=rank_seed, datasets=args.datasets, lean_version=lean_version)
+theorems_sampler = TheoremsSampler(
+    seed=rank_seed, datasets=args.datasets, lean_version=lean_version
+)
 
 # Set up distributed inference (starts servers on worker ranks, builds balancer on master)
 balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
@@ -171,7 +272,10 @@ if balancer:
         prover.num_actors * args.num_sampled_tactics / ddp_world_size
     )
     tactic_model.max_gen_samples = max_gen_samples
-    log0(f"Batch max gen samples: {max_gen_samples} ({prover.num_actors} actors * {args.num_sampled_tactics} samples / {ddp_world_size} ranks)", component="Config")
+    log0(
+        f"Batch max gen samples: {max_gen_samples} ({prover.num_actors} actors * {args.num_sampled_tactics} samples / {ddp_world_size} ranks)",
+        component="Config",
+    )
 else:
     prover = None
 
@@ -190,7 +294,9 @@ if ddp:
 # for the generated tactic.
 max_prompt_tokens = args.batch_max_prompt_tokens
 if max_prompt_tokens is None:
-    max_prompt_tokens = compute_max_batch_prompt_tokens(model.config, args.num_sampled_tactics, device)
+    max_prompt_tokens = compute_max_batch_prompt_tokens(
+        model.config, args.num_sampled_tactics, device
+    )
     free_driver, _ = torch.cuda.mem_get_info(device)
     source = f"auto from {free_driver / 1024**3:.1f} GiB free, {torch.cuda.memory_allocated(device) / 1024**3:.1f} GiB allocated"
 else:
@@ -200,7 +306,10 @@ tactic_model.max_batch_prompt_tokens = max_prompt_tokens
 if ddp:
     all_max_prompt_tokens = [None] * ddp_world_size
     dist.all_gather_object(all_max_prompt_tokens, max_prompt_tokens)
-    log0(f"Batch max prompt tokens per rank ({source}): {all_max_prompt_tokens}", component="Config")
+    log0(
+        f"Batch max prompt tokens per rank ({source}): {all_max_prompt_tokens}",
+        component="Config",
+    )
 else:
     log0(f"Batch max prompt tokens: {max_prompt_tokens} ({source})", component="Config")
 
@@ -215,21 +324,27 @@ rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
 # their timelines. Every rank runs a Flask inference server at
 # inference_server_port + rank (see setup_distributed_inference).
 if master_process:
-    rl_monitor.set_llm_endpoints([
-        f"127.0.0.1:{args.inference_server_port + r}"
-        for r in range(ddp_world_size)
-    ])
+    rl_monitor.set_llm_endpoints(
+        [f"127.0.0.1:{args.inference_server_port + r}" for r in range(ddp_world_size)]
+    )
 
 # Augmentations
-shuffle_goals_and_hypotheses = leantree.augmentations.ShuffleGoalsAndHypotheses(seed=args.seed)
+shuffle_goals_and_hypotheses = leantree.augmentations.ShuffleGoalsAndHypotheses(
+    seed=args.seed
+)
 random_rename = leantree.augmentations.RandomRename(seed=args.seed)
 
-mathlib_train = list(leantree_transitions(
-    split="train",
-    augmentations=[shuffle_goals_and_hypotheses, random_rename] if args.augment_data else None,
-))
+mathlib_train = list(
+    leantree_transitions(
+        split="train",
+        augmentations=[shuffle_goals_and_hypotheses, random_rename]
+        if args.augment_data
+        else None,
+    )
+)
 random.Random(rank_seed).shuffle(mathlib_train)
 mathlib_val = list(leantree_transitions(split="valid"))
+
 
 def augment(state_str, tactic_str):
     try:
@@ -246,7 +361,9 @@ def augment(state_str, tactic_str):
 
     return state_str, tactic_str
 
+
 # We train on the collected transitions, with some portion of LeanTree Mathlib transitions mixed in.
+
 
 def train_generator():
     rng = random.Random(rank_seed)
@@ -298,6 +415,7 @@ step = 0
 minif2f_results = None
 proofnet_results = None
 
+
 def cleanup():
     """Cleanup function to ensure resources are released on shutdown."""
     log0("Shutting down...", component="Main")
@@ -308,6 +426,7 @@ def cleanup():
     if prover is not None:
         prover.close()
     log0("Shutdown complete", component="Main")
+
 
 atexit.register(cleanup)
 
@@ -323,13 +442,31 @@ while True:
 
         # Policy evaluation (all ranks, uses DDP collectives internally)
         eval_steps = 200
-        build_val_loader = lambda: sft_data_generator(mathlib_val, batch_size=args.device_batch_size)
-        tactic_results = eval_tactic_accuracy(model, inner_tactic_model.tokenizer, build_val_loader(), eval_steps=eval_steps)
-        critic_results = eval_critic_errors(model, inner_tactic_model.tokenizer, build_val_loader(), eval_steps=eval_steps)
+        build_val_loader = lambda: sft_data_generator(
+            mathlib_val, batch_size=args.device_batch_size
+        )
+        tactic_results = eval_tactic_accuracy(
+            model,
+            inner_tactic_model.tokenizer,
+            build_val_loader(),
+            eval_steps=eval_steps,
+        )
+        critic_results = eval_critic_errors(
+            model,
+            inner_tactic_model.tokenizer,
+            build_val_loader(),
+            eval_steps=eval_steps,
+        )
 
         if master_process:
-            log(f"Step {step:05d} | Tactic full acc: {tactic_results['full_acc']:.4%} | Tactic first acc: {tactic_results['first_token_acc']:.4%} | Critic argmax MSE: {critic_results['argmax_mse']:.4f} | Critic soft MSE: {critic_results['soft_mse']:.4f}", component="Eval")
-            log(f"  Entropy - Tactic first: {tactic_results['first_token_entropy']:.4f} | Tactic all: {tactic_results['all_tokens_entropy']:.4f} | Critic: {critic_results['entropy']:.4f}", component="Eval")
+            log(
+                f"Step {step:05d} | Tactic full acc: {tactic_results['full_acc']:.4%} | Tactic first acc: {tactic_results['first_token_acc']:.4%} | Critic argmax MSE: {critic_results['argmax_mse']:.4f} | Critic soft MSE: {critic_results['soft_mse']:.4f}",
+                component="Eval",
+            )
+            log(
+                f"  Entropy - Tactic first: {tactic_results['first_token_entropy']:.4f} | Tactic all: {tactic_results['all_tokens_entropy']:.4f} | Critic: {critic_results['entropy']:.4f}",
+                component="Eval",
+            )
 
         # Prover evaluation (rank 0 only).
         # Worker ranks poll via active_barrier so their inference servers stay responsive.
@@ -337,24 +474,50 @@ while True:
             minif2f_theorems = minif2f.list_theorems(split="valid")
             proofnet_theorems = proofnet.list_theorems(split="valid")
 
-            log(f"Evaluating on {len(minif2f_theorems)} theorems from MiniF2F", component="Eval")
-            minif2f_results = prover.evaluate(minif2f_theorems, dataset_name="MiniF2F",
-                                              num_simulations=args.num_simulations_eval,
-                                              tactic_sink=eval_experience.record_tactic)
-            log(f"Evaluating on {len(proofnet_theorems)} theorems from ProofNet", component="Eval")
-            proofnet_results = prover.evaluate(proofnet_theorems, dataset_name="ProofNet",
-                                               num_simulations=args.num_simulations_eval,
-                                               tactic_sink=eval_experience.record_tactic)
+            log(
+                f"Evaluating on {len(minif2f_theorems)} theorems from MiniF2F",
+                component="Eval",
+            )
+            minif2f_results = prover.evaluate(
+                minif2f_theorems,
+                dataset_name="MiniF2F",
+                num_simulations=args.num_simulations_eval,
+                tactic_sink=eval_experience.record_tactic,
+            )
+            log(
+                f"Evaluating on {len(proofnet_theorems)} theorems from ProofNet",
+                component="Eval",
+            )
+            proofnet_results = prover.evaluate(
+                proofnet_theorems,
+                dataset_name="ProofNet",
+                num_simulations=args.num_simulations_eval,
+                tactic_sink=eval_experience.record_tactic,
+            )
 
-            rl_monitor.record_eval(step, "MiniF2F", minif2f_results['success_rate'],
-                                   minif2f_results['solved'], minif2f_results['total'], minif2f_results['errors'])
-            rl_monitor.record_eval(step, "ProofNet", proofnet_results['success_rate'],
-                                   proofnet_results['solved'], proofnet_results['total'],
-                                   proofnet_results['errors'])
+            rl_monitor.record_eval(
+                step,
+                "MiniF2F",
+                minif2f_results["success_rate"],
+                minif2f_results["solved"],
+                minif2f_results["total"],
+                minif2f_results["errors"],
+            )
+            rl_monitor.record_eval(
+                step,
+                "ProofNet",
+                proofnet_results["success_rate"],
+                proofnet_results["solved"],
+                proofnet_results["total"],
+                proofnet_results["errors"],
+            )
 
             minif2f_status = f"minif2f: {minif2f_results['success_rate']:.4%} ({minif2f_results['solved']}/{minif2f_results['total']}, errors={minif2f_results['errors']})"
             proofnet_status = f"proofnet: {proofnet_results['success_rate']:.4%} ({proofnet_results['solved']}/{proofnet_results['total']}, errors={proofnet_results['errors']})"
-            log(f"Step {step:05d} | {minif2f_status} | {proofnet_status}", component="Eval")
+            log(
+                f"Step {step:05d} | {minif2f_status} | {proofnet_status}",
+                component="Eval",
+            )
 
             wandb_data = {
                 "step": step,
@@ -365,44 +528,48 @@ while True:
                 "val_critic_argmax_mse": critic_results["argmax_mse"],
                 "val_critic_soft_mse": critic_results["soft_mse"],
                 "val_critic_entropy": critic_results["entropy"],
-                "minif2f_val": minif2f_results['success_rate'],
-                "proofnet_val": proofnet_results['success_rate'],
+                "minif2f_val": minif2f_results["success_rate"],
+                "proofnet_val": proofnet_results["success_rate"],
             }
-            if minif2f_results['errors'] > 0:
-                wandb_data["minif2f_errors"] = minif2f_results['errors']
-            if proofnet_results['errors'] > 0:
-                wandb_data["proofnet_errors"] = proofnet_results['errors']
+            if minif2f_results["errors"] > 0:
+                wandb_data["minif2f_errors"] = minif2f_results["errors"]
+            if proofnet_results["errors"] > 0:
+                wandb_data["proofnet_errors"] = proofnet_results["errors"]
             run_log.log(wandb_data)
 
             save_eval_results_to_run_dir(output_dir, step, "minif2f", minif2f_results)
             save_eval_results_to_run_dir(output_dir, step, "proofnet", proofnet_results)
 
-            save_eval_summary_to_run_dir(output_dir, step, {
-                "step": step,
-                "minif2f": {
-                    "success_rate": minif2f_results["success_rate"],
-                    "solved": minif2f_results["solved"],
-                    "total": minif2f_results["total"],
-                    "errors": minif2f_results["errors"],
+            save_eval_summary_to_run_dir(
+                output_dir,
+                step,
+                {
+                    "step": step,
+                    "minif2f": {
+                        "success_rate": minif2f_results["success_rate"],
+                        "solved": minif2f_results["solved"],
+                        "total": minif2f_results["total"],
+                        "errors": minif2f_results["errors"],
+                    },
+                    "proofnet": {
+                        "success_rate": proofnet_results["success_rate"],
+                        "solved": proofnet_results["solved"],
+                        "total": proofnet_results["total"],
+                        "errors": proofnet_results["errors"],
+                    },
+                    "tactic": {
+                        "full_acc": tactic_results["full_acc"],
+                        "first_token_acc": tactic_results["first_token_acc"],
+                        "first_token_entropy": tactic_results["first_token_entropy"],
+                        "all_tokens_entropy": tactic_results["all_tokens_entropy"],
+                    },
+                    "critic": {
+                        "argmax_mse": critic_results["argmax_mse"],
+                        "soft_mse": critic_results["soft_mse"],
+                        "entropy": critic_results["entropy"],
+                    },
                 },
-                "proofnet": {
-                    "success_rate": proofnet_results["success_rate"],
-                    "solved": proofnet_results["solved"],
-                    "total": proofnet_results["total"],
-                    "errors": proofnet_results["errors"],
-                },
-                "tactic": {
-                    "full_acc": tactic_results["full_acc"],
-                    "first_token_acc": tactic_results["first_token_acc"],
-                    "first_token_entropy": tactic_results["first_token_entropy"],
-                    "all_tokens_entropy": tactic_results["all_tokens_entropy"],
-                },
-                "critic": {
-                    "argmax_mse": critic_results["argmax_mse"],
-                    "soft_mse": critic_results["soft_mse"],
-                    "entropy": critic_results["entropy"],
-                },
-            })
+            )
 
         # Prover eval can take many minutes; no timeout (use SIGUSR1 to debug).
         active_barrier(f"prover_eval_{step}", timeout=None)
@@ -425,9 +592,13 @@ while True:
         rl_monitor.set_step(step)
 
         if master_process:
-            prover.collect(theorems_sampler, args.collect_transitions, experience,
-                           num_simulations=args.num_simulations_collect,
-                           tactic_sink=experience.record_tactic)
+            prover.collect(
+                theorems_sampler,
+                args.collect_transitions,
+                experience,
+                num_simulations=args.num_simulations_collect,
+                tactic_sink=experience.record_tactic,
+            )
 
         model.train()
         timer.end("collect")
@@ -441,7 +612,9 @@ while True:
         active_barrier(f"collect_{step}", timeout=None)
 
         # Rank 0 contributes its experience's transitions; workers pass [].
-        replay_buffer.extend_and_sync(experience.transitions() if master_process else [])
+        replay_buffer.extend_and_sync(
+            experience.transitions() if master_process else []
+        )
 
         if master_process:
             rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
@@ -454,9 +627,9 @@ while True:
             "model_config": asdict(model.config),
         }
         if minif2f_results:
-            checkpoint_meta["minif2f_val"] = minif2f_results['success_rate']
+            checkpoint_meta["minif2f_val"] = minif2f_results["success_rate"]
         if proofnet_results:
-            checkpoint_meta["proofnet_val"] = proofnet_results['success_rate']
+            checkpoint_meta["proofnet_val"] = proofnet_results["success_rate"]
         save_checkpoint(
             model_dir,
             step,
@@ -489,16 +662,22 @@ while True:
         num_tokens = torch.tensor(0, device=device)
         for micro_step in range(grad_accum_steps):
             train_inputs, train_targets, batch_sources = next(train_loader)
-            per_token_loss = model(train_inputs, train_targets, loss_reduction='none')  # (B*T,)
+            per_token_loss = model(
+                train_inputs, train_targets, loss_reduction="none"
+            )  # (B*T,)
             per_token_loss = per_token_loss.view(train_inputs.shape)  # (B, T)
 
             if master_process and experience is not None:
-                experience.record_train_samples(train_inputs, train_targets, per_token_loss, batch_sources)
+                experience.record_train_samples(
+                    train_inputs, train_targets, per_token_loss, batch_sources
+                )
 
             is_value_sample = (train_inputs == value_delim_tok).any(dim=1)  # (B,)
-            sample_weights = torch.where(is_value_sample, args.value_weight, 1.0)  # (B,)
+            sample_weights = torch.where(
+                is_value_sample, args.value_weight, 1.0
+            )  # (B,)
 
-            token_mask = (train_targets >= 0)  # (B, T)
+            token_mask = train_targets >= 0  # (B, T)
             weighted_token_loss = per_token_loss * sample_weights.unsqueeze(1)  # (B, T)
 
             loss = (weighted_token_loss * token_mask).sum() / token_mask.sum()
@@ -536,15 +715,20 @@ while True:
     mean_loss = total_loss / args.num_updates_per_step
     rl_monitor.update_training(step, mean_loss, total_tokens)
     if master_process:
-        log(f"Step {step:05d} | Training loss: {mean_loss:.6f} | num_tokens: {total_tokens:,} | replay_buffer_size: {len(replay_buffer.buffer)}", component="Train")
-    run_log.log({
-        "step": step,
-        "train_loss": mean_loss,
-        "num_tokens": total_tokens,
-        "replay_buffer_size": len(replay_buffer.buffer),
-        **{f"time/{k}": v for k, v in timer.get_times().items()},
-        **rl_monitor.lean_server_metrics(),
-    })
+        log(
+            f"Step {step:05d} | Training loss: {mean_loss:.6f} | num_tokens: {total_tokens:,} | replay_buffer_size: {len(replay_buffer.buffer)}",
+            component="Train",
+        )
+    run_log.log(
+        {
+            "step": step,
+            "train_loss": mean_loss,
+            "num_tokens": total_tokens,
+            "replay_buffer_size": len(replay_buffer.buffer),
+            **{f"time/{k}": v for k, v in timer.get_times().items()},
+            **rl_monitor.lean_server_metrics(),
+        }
+    )
 
     if master_process and experience is not None:
         experience.save(collection_dir(output_dir, step))

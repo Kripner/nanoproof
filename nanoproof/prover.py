@@ -15,6 +15,9 @@ import time
 import traceback
 from dataclasses import dataclass
 from typing import Callable, Literal, Optional
+import json as json_mod
+from urllib.request import urlopen
+
 import torch
 from leantree.repl_adapter.server import LeanClient
 from leantree.repl_adapter.interaction import LeanProcessException
@@ -35,13 +38,17 @@ from nanoproof.experience_collection import (
     compute_value_target,
     prune_redundant_nodes,
 )
-from nanoproof.search import Game, MCTSAbortedError, Node, SearchConfig, run_mcts, verify_node
+from nanoproof.search import (
+    Game,
+    MCTSAbortedError,
+    Node,
+    SearchConfig,
+    run_mcts,
+    verify_node,
+)
 from nanoproof.inference import InferenceBalancer
 
 logger = logging.getLogger(__name__)
-
-import json as json_mod
-from urllib.request import urlopen
 
 
 def _flush_timeline(
@@ -86,20 +93,21 @@ def _outcome_kind(*, game, error, interrupted) -> str | None:
 # Prover
 # -----------------------------------------------------------------------------
 
-class Prover:
-    """Proves a single theorem using MCTS. Stateless and thread-safe.
 
-    Multiple actor threads can call :meth:`prove` concurrently; the method
-    has no side-effects beyond the provided ``expansion_callback``.
-    """
+class Prover:
+    """Runs proof search on a single theorem. Stateless and thread-safe."""
 
     def __init__(self, config: SearchConfig, tactic_model: InferenceBalancer):
         self.config = config
         self.tactic_model = tactic_model
 
     @staticmethod
-    def _get_process_interruptible(client: LeanClient, abort_check: Callable[[], bool] | None,
-                                   poll_interval: float = 10.0, max_wait: float = 300.0) -> tuple:
+    def _get_process_interruptible(
+        client: LeanClient,
+        abort_check: Callable[[], bool] | None,
+        poll_interval: float = 10.0,
+        max_wait: float = 300.0,
+    ) -> tuple:
         """Get a Lean process, polling abort_check between short blocking calls.
 
         Uses short server-side timeouts so that abort_check is tested every
@@ -120,10 +128,15 @@ class Prover:
             if process is not None:
                 return process, "ok"
 
-    def prove(self, client: LeanClient, theorem: BenchTheorem, expansion_callback: Callable[[], None] | None = None,
-              abort_check: Callable[[], bool] | None = None,
-              timeline: TimelineRecorder | None = None,
-              tactic_sink: Callable[[str, str, str], None] | None = None) -> Game | None:
+    def prove(
+        self,
+        client: LeanClient,
+        theorem: BenchTheorem,
+        expansion_callback: Callable[[], None] | None = None,
+        abort_check: Callable[[], bool] | None = None,
+        timeline: TimelineRecorder | None = None,
+        tactic_sink: Callable[[str, str, str], None] | None = None,
+    ) -> Game | None:
         """Run a single MCTS proof game.
 
         Returns a :class:`Game` with results, or ``None`` if Lean setup fails.
@@ -135,15 +148,25 @@ class Prover:
             # release event so mid-proof actors drop their Lean leases);
             # only surface true pool-saturation timeouts.
             if reason == "timeout":
-                log(f"FAILED: Could not get Lean process for theorem (300s pool timeout)", component="Prover")
+                log(
+                    f"FAILED: Could not get Lean process for theorem (300s pool timeout)",
+                    component="Prover",
+                )
             return None
 
         with process as env:
             example = theorem_to_example(theorem.source)
             init_branch = env.proof_from_sorry(example)
             if not init_branch.is_success():
-                err = init_branch.error if hasattr(init_branch, 'error') else 'unknown error'
-                log(f"FAILED: Could not initialize proof - {err}\nLean code:\n{example}", component="Prover")
+                err = (
+                    init_branch.error
+                    if hasattr(init_branch, "error")
+                    else "unknown error"
+                )
+                log(
+                    f"FAILED: Could not initialize proof - {err}\nLean code:\n{example}",
+                    component="Prover",
+                )
                 return None
             init_branch = init_branch.value
 
@@ -158,7 +181,9 @@ class Prover:
             )
 
             run_mcts(
-                self.config, game, self.tactic_model,
+                self.config,
+                game,
+                self.tactic_model,
                 expansion_callback=expansion_callback,
                 abort_check=abort_check,
                 timeline=timeline,
@@ -167,7 +192,10 @@ class Prover:
             if game.root.is_solved:
                 verify_err = verify_node(game.root, timeout=self.config.verify_timeout)
                 if verify_err:
-                    log(f"FAILED: Verification failed after {game.num_iterations} iterations: '{verify_err}'\nTheorem: '{theorem.source}'\nProof tree:\n{game.root.pp_tree()}", component="Prover")
+                    log(
+                        f"FAILED: Verification failed after {game.num_iterations} iterations: '{verify_err}'\nTheorem: '{theorem.source}'\nProof tree:\n{game.root.pp_tree()}",
+                        component="Prover",
+                    )
                     game.root.is_solved = False
                     return game
                 game.unsimplified_root = game.root.clone()
@@ -176,7 +204,10 @@ class Prover:
 
                 verify_err = verify_node(game.root, timeout=self.config.verify_timeout)
                 if verify_err:
-                    log(f"FAILED: Post-prune verification failed after {game.num_iterations} iterations: '{verify_err}'\nTheorem: '{theorem.source}'\nProof tree:\n{game.root.pp_tree()}", component="Prover")
+                    log(
+                        f"FAILED: Post-prune verification failed after {game.num_iterations} iterations: '{verify_err}'\nTheorem: '{theorem.source}'\nProof tree:\n{game.root.pp_tree()}",
+                        component="Prover",
+                    )
                     game.root.is_solved = False
                     return game
 
@@ -184,7 +215,10 @@ class Prover:
                 tactics = linearize_proof(game.root)
                 proof_source = construct_proof_source(theorem.source, tactics)
                 if not env.is_valid_source(proof_source):
-                    log(f"FAILED: Linearized proof verification failed after {game.num_iterations} iterations:\n\"\"\"\n{proof_source}\n\"\"\"\n... proof tree:\n{game.root.pp_tree()}\n", component="Prover")
+                    log(
+                        f'FAILED: Linearized proof verification failed after {game.num_iterations} iterations:\n"""\n{proof_source}\n"""\n... proof tree:\n{game.root.pp_tree()}\n',
+                        component="Prover",
+                    )
                     game.root.is_solved = False
 
             return game
@@ -193,6 +227,7 @@ class Prover:
 # -----------------------------------------------------------------------------
 # ProverWorker
 # -----------------------------------------------------------------------------
+
 
 @dataclass
 class _Job:
@@ -204,6 +239,7 @@ class _Job:
     keeps reporting back to that job, never to whatever job is current
     now.
     """
+
     get_theorem: Callable[[], Optional[tuple[str, BenchTheorem]]]
     on_result: Callable[[str, BenchTheorem, Optional[Game], Optional[str]], None]
     done_check: Callable[[], bool]
@@ -260,7 +296,9 @@ class ProverWorker:
         self._release_event = threading.Event()
         self._shutdown_event = threading.Event()
         self._actors_mid_proof = 0
-        self._thread_states: dict[int, str] = {i: "idle" for i in range(self.num_actors)}
+        self._thread_states: dict[int, str] = {
+            i: "idle" for i in range(self.num_actors)
+        }
 
         self._threads: list[threading.Thread] = []
         for actor_id in range(self.num_actors):
@@ -287,8 +325,13 @@ class ProverWorker:
             except Exception as e:
                 raise ConnectionError(f"Could not reach Lean server {addr}: {e}") from e
             if max_procs == 0:
-                raise ConnectionError(f"Lean server {addr} reports 0 available processes")
-            log(f"Lean server {host}:{port}: {max_procs} processes", component="LeanPool")
+                raise ConnectionError(
+                    f"Lean server {addr} reports 0 available processes"
+                )
+            log(
+                f"Lean server {host}:{port}: {max_procs} processes",
+                component="LeanPool",
+            )
             servers.extend([(host, port)] * max_procs)
         return servers
 
@@ -304,7 +347,10 @@ class ProverWorker:
             t.join(timeout=max(0.0, deadline - time.time()))
         alive = sum(1 for t in self._threads if t.is_alive())
         if alive:
-            log(f"WARNING: {alive}/{len(self._threads)} actor threads still alive after close", component="Prover")
+            log(
+                f"WARNING: {alive}/{len(self._threads)} actor threads still alive after close",
+                component="Prover",
+            )
             faulthandler.dump_traceback()
 
     @torch.no_grad()
@@ -320,8 +366,10 @@ class ProverWorker:
         number of transitions is reached. Parks with *pause* on exit."""
         monitor = get_monitor()
 
-        log(f"Starting collection with {self.num_actors} actors, target={target_transitions} transitions",
-            component="Collection")
+        log(
+            f"Starting collection with {self.num_actors} actors, target={target_transitions} transitions",
+            component="Collection",
+        )
 
         theorem_counter = [0]
 
@@ -338,7 +386,9 @@ class ProverWorker:
             transitions_before = experience.num_transitions()
             experience.record_proof(theorem, game)
             if monitor is not None:
-                monitor.add_collected_samples(experience.num_transitions() - transitions_before)
+                monitor.add_collected_samples(
+                    experience.num_transitions() - transitions_before
+                )
 
         def done_check():
             return experience.num_transitions() >= target_transitions
@@ -351,8 +401,10 @@ class ProverWorker:
                     monitor.update_local_actor(i, state=state)
             loop_count[0] += 1
             if loop_count[0] % 50 == 0:
-                log(f"Progress: {experience.num_transitions()}/{target_transitions} transitions",
-                    component="Collection")
+                log(
+                    f"Progress: {experience.num_transitions()}/{target_transitions} transitions",
+                    component="Collection",
+                )
 
         job = _Job(
             get_theorem=get_theorem,
@@ -360,7 +412,9 @@ class ProverWorker:
             done_check=done_check,
             poll_callback=poll_callback,
             record_timeline=True,
-            prover=Prover(SearchConfig(num_simulations=num_simulations), self.tactic_model),
+            prover=Prover(
+                SearchConfig(num_simulations=num_simulations), self.tactic_model
+            ),
             tactic_sink=tactic_sink,
         )
         self._run_job(job, park="pause")
@@ -373,10 +427,15 @@ class ProverWorker:
         return total
 
     @torch.no_grad()
-    def evaluate(self, theorems: list[BenchTheorem], dataset_name: str, num_simulations: int,
-                 progress_callback: Callable[[int, int, int, int], None] | None = None,
-                 verify_timeout: int = 5000,
-                 tactic_sink: Callable[[str, str, str], None] | None = None) -> dict:
+    def evaluate(
+        self,
+        theorems: list[BenchTheorem],
+        dataset_name: str,
+        num_simulations: int,
+        progress_callback: Callable[[int, int, int, int], None] | None = None,
+        verify_timeout: int = 5000,
+        tactic_sink: Callable[[str, str, str], None] | None = None,
+    ) -> dict:
         """Evaluate theorems using MCTS. Returns metrics dict. Parks with
         *release* on exit so eval state does not leak into the next job
         and Lean leases are returned.
@@ -426,23 +485,27 @@ class ProverWorker:
                 linearized = construct_proof_source(theorem.source, tactics)
 
             with results_lock:
-                results.append({
-                    "theorem": theorem.source,
-                    "name": theorem.name,
-                    "is_solved": is_solved,
-                    "error": error,
-                    "proof_tree": proof_tree,
-                    "unsimplified_proof_tree": unsimplified_proof_tree,
-                    "linearized_proof": linearized,
-                    "num_iterations": num_iterations,
-                })
+                results.append(
+                    {
+                        "theorem": theorem.source,
+                        "name": theorem.name,
+                        "is_solved": is_solved,
+                        "error": error,
+                        "proof_tree": proof_tree,
+                        "unsimplified_proof_tree": unsimplified_proof_tree,
+                        "linearized_proof": linearized,
+                        "num_iterations": num_iterations,
+                    }
+                )
 
                 n = len(results)
                 solved = sum(1 for r in results if r["is_solved"])
                 errors = sum(1 for r in results if r["error"])
 
                 if monitor:
-                    monitor.update_eval_progress(current=n, solved=solved, errors=errors)
+                    monitor.update_eval_progress(
+                        current=n, solved=solved, errors=errors
+                    )
 
                 if progress_callback:
                     with index_lock:
@@ -459,7 +522,12 @@ class ProverWorker:
             done_check=done_check,
             poll_callback=None,
             record_timeline=True,
-            prover=Prover(SearchConfig(num_simulations=num_simulations, verify_timeout=verify_timeout), self.tactic_model),
+            prover=Prover(
+                SearchConfig(
+                    num_simulations=num_simulations, verify_timeout=verify_timeout
+                ),
+                self.tactic_model,
+            ),
             tactic_sink=tactic_sink,
         )
         self._run_job(job, park="release")
@@ -516,8 +584,10 @@ class ProverWorker:
             if mid == 0:
                 break
             if time.time() > deadline:
-                log(f"WARNING: release timed out with {mid} actors still mid-proof",
-                    component="Prover")
+                log(
+                    f"WARNING: release timed out with {mid} actors still mid-proof",
+                    component="Prover",
+                )
                 break
             time.sleep(0.05)
         with self._lock:
@@ -572,27 +642,42 @@ class ProverWorker:
                 for attempt in range(max_retries):
                     try:
                         game = job.prover.prove(
-                            client, theorem,
+                            client,
+                            theorem,
                             abort_check=self._release_event.is_set,
                             timeline=timeline,
                             tactic_sink=job.tactic_sink,
                         )
                         consecutive_errors = 0
                         break
-                    except (ConnectionError, LeanProcessException, RemoteException, TimeoutError) as e:
+                    except (
+                        ConnectionError,
+                        LeanProcessException,
+                        RemoteException,
+                        TimeoutError,
+                    ) as e:
                         if attempt < max_retries - 1:
                             self._set_thread_state(actor_id, "retry")
-                            short_err = str(e).split('\n', 1)[0]
-                            log(f"[Actor {actor_id}] Connection error (attempt {attempt + 1}/{max_retries}): '{short_err}', reconnecting...",
-                                component="Prover")
+                            short_err = str(e).split("\n", 1)[0]
+                            log(
+                                f"[Actor {actor_id}] Connection error (attempt {attempt + 1}/{max_retries}): '{short_err}', reconnecting...",
+                                component="Prover",
+                            )
                             time.sleep(1.0 * (attempt + 1))
                         else:
                             error = str(e)
                             consecutive_errors += 1
-                            log(f"[Actor {actor_id}] Error (lean={lean_address}:{lean_port}): {e}", component="Prover")
-                            log_actionable_error("Prover", str(e),
-                                                 actor=actor_id, lean=f"{lean_address}:{lean_port}",
-                                                 retries_exhausted=True)
+                            log(
+                                f"[Actor {actor_id}] Error (lean={lean_address}:{lean_port}): {e}",
+                                component="Prover",
+                            )
+                            log_actionable_error(
+                                "Prover",
+                                str(e),
+                                actor=actor_id,
+                                lean=f"{lean_address}:{lean_port}",
+                                retries_exhausted=True,
+                            )
                     except MCTSAbortedError:
                         skip_report = True
                         interrupted = True
@@ -600,9 +685,16 @@ class ProverWorker:
                     except Exception as e:
                         error = str(e)
                         consecutive_errors += 1
-                        log(f"[Actor {actor_id}] Error (lean={lean_address}:{lean_port}): {e}", component="Prover")
-                        log_actionable_error("Prover", str(e),
-                                             actor=actor_id, lean=f"{lean_address}:{lean_port}")
+                        log(
+                            f"[Actor {actor_id}] Error (lean={lean_address}:{lean_port}): {e}",
+                            component="Prover",
+                        )
+                        log_actionable_error(
+                            "Prover",
+                            str(e),
+                            actor=actor_id,
+                            lean=f"{lean_address}:{lean_port}",
+                        )
                         traceback.print_exc()
                         break
 
@@ -617,9 +709,13 @@ class ProverWorker:
                 # this on_result call has finished.
                 if not skip_report:
                     is_solved = bool(game and game.root and game.root.is_solved)
-                    logger.debug(f"Actor {actor_id}: {theorem_id} {'solved' if is_solved else 'unsolved'} in {game.num_iterations if game else 0} iters")
+                    logger.debug(
+                        f"Actor {actor_id}: {theorem_id} {'solved' if is_solved else 'unsolved'} in {game.num_iterations if game else 0} iters"
+                    )
                     if is_solved:
-                        logger.debug(f"Actor {actor_id}: proof tree for {theorem_id}:\n{game.root.pp_tree()}")
+                        logger.debug(
+                            f"Actor {actor_id}: proof tree for {theorem_id}:\n{game.root.pp_tree()}"
+                        )
                     if error is not None:
                         self._set_thread_state(actor_id, "error")
                     job.on_result(theorem_id, theorem, game, error)
@@ -632,12 +728,15 @@ class ProverWorker:
             # the outcome marker classifies what the "productive only"
             # toggle hides.
             if timeline is not None:
-                _flush_timeline(actor_id, timeline, game=game, error=error,
-                                interrupted=interrupted)
+                _flush_timeline(
+                    actor_id, timeline, game=game, error=error, interrupted=interrupted
+                )
 
             if consecutive_errors >= max_consecutive_errors:
-                log(f"[Actor {actor_id}] {consecutive_errors} consecutive errors; backing off 60s",
-                    component="Prover")
+                log(
+                    f"[Actor {actor_id}] {consecutive_errors} consecutive errors; backing off 60s",
+                    component="Prover",
+                )
                 time.sleep(60.0)
                 consecutive_errors = 0
 

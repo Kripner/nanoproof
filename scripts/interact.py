@@ -1,6 +1,11 @@
 import torch
 
-from nanoproof.common import compute_init, compute_cleanup, print0, autodetect_device_type
+from nanoproof.common import (
+    compute_init,
+    compute_cleanup,
+    print0,
+    autodetect_device_type,
+)
 from nanoproof.checkpoints import load_model
 from nanoproof.engine import Engine
 from nanoproof.inference import TacticModel
@@ -12,7 +17,7 @@ predict_value = None
 model_path = "sft/FIXME/model_005000.pt"  # path to model_NNNNNN.pt (relative to models/ or absolute)
 
 if MODE == "raw_engine":
-    device_type = "" # cuda|cpu|mps (empty => autodetect)
+    device_type = ""  # cuda|cpu|mps (empty => autodetect)
 
     device_type = autodetect_device_type() if device_type == "" else device_type
     device = torch.device(device_type)
@@ -23,19 +28,31 @@ if MODE == "raw_engine":
     value_bins = tokenizer.get_value_bins()
 
     def generate_(inp_) -> list[str]:
-        tokens = tokenizer(inp_.strip() + "\n<|tactic|>", prepend=tokenizer.get_bos_token_id())
-        sample_toks, _ = engine.generate_batch(tokens, num_samples=6, min_tokens=1, max_tokens=64)
+        tokens = tokenizer(
+            inp_.strip() + "\n<|tactic|>", prepend=tokenizer.get_bos_token_id()
+        )
+        sample_toks, _ = engine.generate_batch(
+            tokens, num_samples=6, min_tokens=1, max_tokens=64
+        )
         return [tokenizer.decode(sample_toks[i]) for i in range(6)]
 
     def predict_value_(inp_) -> float:
-        tokens = tokenizer(inp_.strip() + "\n<|value|>", prepend=tokenizer.get_bos_token_id())
-        _, _, value_logits = engine.generate_batch(tokens, num_samples=1, min_tokens=1, max_tokens=1, return_logits=True)
+        tokens = tokenizer(
+            inp_.strip() + "\n<|value|>", prepend=tokenizer.get_bos_token_id()
+        )
+        _, _, value_logits = engine.generate_batch(
+            tokens, num_samples=1, min_tokens=1, max_tokens=1, return_logits=True
+        )
         value_logits = value_logits[0][-1]
-        value_logits = torch.gather(value_logits, 0, torch.tensor(value_token_ids, device=device))
+        value_logits = torch.gather(
+            value_logits, 0, torch.tensor(value_token_ids, device=device)
+        )
         value_probs = torch.softmax(value_logits, dim=-1)
         for i, prob in enumerate(value_probs):
             print(f"BIN {value_bins[i]}: {prob.item()}")
-        value_probs = value_probs * torch.tensor(value_bins, device=device, dtype=value_probs.dtype)
+        value_probs = value_probs * torch.tensor(
+            value_bins, device=device, dtype=value_probs.dtype
+        )
         value_probs = value_probs.sum()
         return value_probs.item()
 
@@ -73,6 +90,7 @@ elif MODE == "tactic_model":
 else:
     raise ValueError(f"Invalid mode: {MODE}")
 
+
 def get_input() -> str:
     lines = []
     print("Type in a tactic state, followed by an empty line:")
@@ -81,6 +99,7 @@ def get_input() -> str:
         lines.append(line.rstrip())
         line = input()
     return "\n".join(lines)
+
 
 inp = get_input()
 while inp.strip() not in ["q", "quit", "exit"]:

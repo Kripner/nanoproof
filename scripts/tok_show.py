@@ -80,7 +80,7 @@ for text in [("news", news_text), ("lean", lean_search_text)]:
     encoded = tokenizer.encode(text)
     tokens = [tokenizer.id_to_token(id) for id in encoded]
     print(f"{name}:")
-    print(' '.join(tokens))
+    print(" ".join(tokens))
     print()
 
 
@@ -88,7 +88,9 @@ print("Gathering character frequencies from leangithubraw train...")
 char_counts = {}
 # iter_texts_batched yields lists of strings (texts)
 # We'll iterate through both train and val splits to be thorough
-for batch_texts in iter_texts_batched(split="train", url_whitelist=["https://github.com/leanprover-community/mathlib4"]):
+for batch_texts in iter_texts_batched(
+    split="train", url_whitelist=["https://github.com/leanprover-community/mathlib4"]
+):
     for text in batch_texts:
         for char in text:
             char_counts[char] = char_counts.get(char, 0) + 1
@@ -102,15 +104,17 @@ chars_without_token = []
 for char in tqdm(frequent_chars):
     # Encode the single character
     ids = tokenizer.encode(char)
-    
-    # If it takes more than 1 token to represent the character, 
+
+    # If it takes more than 1 token to represent the character,
     # it doesn't have a single dedicated token.
     if len(ids) != 1:
         chars_without_token.append(char)
         continue
-    assert tokenizer.decode(ids) == char, f"decode({ids}) = \"{tokenizer.decode(ids)}\" != \"{char}\" (U+{ord(char):04X})"
+    assert tokenizer.decode(ids) == char, (
+        f'decode({ids}) = "{tokenizer.decode(ids)}" != "{char}" (U+{ord(char):04X})'
+    )
 
 chars_without_token.sort()
 print(f"\nFound {len(chars_without_token)} characters without a dedicated token:")
 
-print("[" + ", ".join(f"\"{c}\"" for c in chars_without_token) + "]")
+print("[" + ", ".join(f'"{c}"' for c in chars_without_token) + "]")

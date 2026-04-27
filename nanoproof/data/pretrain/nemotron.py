@@ -32,21 +32,28 @@ BASE_URL = "https://huggingface.co/datasets/nvidia/Nemotron-CC-Math-v1/resolve/m
 base_dir = get_base_dir()
 DATA_DIR = os.path.join(base_dir, "data", "nemotron")
 
-MAX_SHARD = 45 # the last datashard is part_000045.parquet
-index_to_filename = lambda index: f"4plus/part_{index:06d}.parquet" # format of the filenames
+MAX_SHARD = 45  # the last datashard is part_000045.parquet
+index_to_filename = lambda index: (
+    f"4plus/part_{index:06d}.parquet"
+)  # format of the filenames
 
 # -----------------------------------------------------------------------------
 # These functions are useful utilities to other modules, can/should be imported
 
+
 def list_parquet_files(data_dir=None):
-    """ Looks into a data dir and returns full paths to all parquet files. """
+    """Looks into a data dir and returns full paths to all parquet files."""
     data_dir = DATA_DIR if data_dir is None else data_dir
-    parquet_files = sorted([
-        f for f in os.listdir(os.path.join(data_dir, "4plus"))
-        if f.endswith('.parquet') and not f.endswith('.tmp')
-    ])
+    parquet_files = sorted(
+        [
+            f
+            for f in os.listdir(os.path.join(data_dir, "4plus"))
+            if f.endswith(".parquet") and not f.endswith(".tmp")
+        ]
+    )
     parquet_paths = [os.path.join(data_dir, "4plus", f) for f in parquet_files]
     return parquet_paths
+
 
 def parquets_iter_batched(split, start=0, step=1):
     """
@@ -62,16 +69,17 @@ def parquets_iter_batched(split, start=0, step=1):
         row_group_indices = list(range(start, pf.num_row_groups, step))
         for rg_idx in row_group_indices:
             rg = pf.read_row_group(rg_idx)
-            texts = rg.column('text').to_pylist()
+            texts = rg.column("text").to_pylist()
             yield texts
+
 
 def _rechunk_into(src_path, dest_path):
     """Load ``src_path``, drop all columns except ``text``, write to ``dest_path``
     with 1024-row groups. ``src_path`` and ``dest_path`` must differ.
     """
     table = pq.read_table(src_path)
-    if 'text' in table.column_names:
-        table = table.select(['text'])
+    if "text" in table.column_names:
+        table = table.select(["text"])
     else:
         print(f"Warning: 'text' column not found in {src_path}")
     pq.write_table(table, dest_path, row_group_size=1024)
@@ -91,8 +99,9 @@ def _rechunk_parquet(filepath):
             except:
                 pass
 
+
 def _download_single_file(index):
-    """ Downloads a single file index, with some backoff """
+    """Downloads a single file index, with some backoff"""
 
     # Construct the local filepath for this file and skip if it already exists
     filename = index_to_filename(index)
@@ -123,10 +132,19 @@ def _download_single_file(index):
             response = requests.get(url, stream=True, timeout=30, headers=headers)
             response.raise_for_status()
             Path(raw_path).parent.mkdir(parents=True, exist_ok=True)
-            total_size = int(response.headers.get('content-length', 0))
-            with open(raw_path, 'wb') as f:
-                with tqdm(total=total_size, unit='B', unit_scale=True, unit_divisor=1024, desc=os.path.basename(filename), leave=False) as pbar:
-                    for chunk in response.iter_content(chunk_size=1024 * 1024):  # 1MB chunks
+            total_size = int(response.headers.get("content-length", 0))
+            with open(raw_path, "wb") as f:
+                with tqdm(
+                    total=total_size,
+                    unit="B",
+                    unit_scale=True,
+                    unit_divisor=1024,
+                    desc=os.path.basename(filename),
+                    leave=False,
+                ) as pbar:
+                    for chunk in response.iter_content(
+                        chunk_size=1024 * 1024
+                    ):  # 1MB chunks
                         if chunk:
                             f.write(chunk)
                             pbar.update(len(chunk))
@@ -148,7 +166,7 @@ def _download_single_file(index):
                         pass
             # Try a few times with exponential backoff: 2^attempt seconds
             if attempt < max_attempts:
-                wait_time = 2 ** attempt
+                wait_time = 2**attempt
                 print(f"Waiting {wait_time} seconds before retry...")
                 time.sleep(wait_time)
             else:
@@ -169,25 +187,44 @@ def download_dataset(num_files: int = -1, num_workers: int = 4) -> None:
     print(f"Target directory: {DATA_DIR}")
     print()
     with Pool(processes=num_workers) as pool:
-        results = list(tqdm(
-            pool.imap(_download_single_file, ids_to_download),
-            total=len(ids_to_download),
-            desc="Downloading shards"
-        ))
+        results = list(
+            tqdm(
+                pool.imap(_download_single_file, ids_to_download),
+                total=len(ids_to_download),
+                desc="Downloading shards",
+            )
+        )
 
     successful = sum(1 for success in results if success)
     print(f"Done! Downloaded: {successful}/{len(ids_to_download)} shards to {DATA_DIR}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Manage Nemotron-CC-Math-v1 dataset", allow_abbrev=False)
+    parser = argparse.ArgumentParser(
+        description="Manage Nemotron-CC-Math-v1 dataset", allow_abbrev=False
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     parser_download = subparsers.add_parser("download", help="Download dataset shards")
-    parser_download.add_argument("-n", "--num-files", type=int, default=-1, help="Number of shards to download (default: -1), -1 = disable")
-    parser_download.add_argument("-w", "--num-workers", type=int, default=4, help="Number of parallel download workers (default: 4)")
+    parser_download.add_argument(
+        "-n",
+        "--num-files",
+        type=int,
+        default=-1,
+        help="Number of shards to download (default: -1), -1 = disable",
+    )
+    parser_download.add_argument(
+        "-w",
+        "--num-workers",
+        type=int,
+        default=4,
+        help="Number of parallel download workers (default: 4)",
+    )
 
-    parser_process = subparsers.add_parser("process", help="Process all downloaded parquet files (re-chunk to 1024 group size)")
+    parser_process = subparsers.add_parser(
+        "process",
+        help="Process all downloaded parquet files (re-chunk to 1024 group size)",
+    )
 
     args = parser.parse_args()
 

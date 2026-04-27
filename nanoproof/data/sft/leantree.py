@@ -18,14 +18,18 @@ from nanoproof.tokenizer import get_tokenizer
 base_dir = get_base_dir()
 DATA_DIR = os.path.join(base_dir, "data", "leantree")
 
-HF_URL = "https://huggingface.co/datasets/ufal/leantree/resolve/main/leantree_mathlib.jsonl"
+HF_URL = (
+    "https://huggingface.co/datasets/ufal/leantree/resolve/main/leantree_mathlib.jsonl"
+)
 
 
 def leantree_transitions(split, eval_fraction=0.1, augmentations=None):
     assert split in ("train", "valid"), f"Invalid split: {split!r}"
     mathlib_file = os.path.join(DATA_DIR, "leantree_mathlib.jsonl")
     if not Path(mathlib_file).exists():
-        raise Exception("leantree not downloaded, please run this script with `download` argument")
+        raise Exception(
+            "leantree not downloaded, please run this script with `download` argument"
+        )
     with open(mathlib_file, "r") as f:
         lines = f.readlines()
     eval_size = int(len(lines) * eval_fraction)
@@ -57,6 +61,7 @@ def download_dataset():
     """Download the leantree dataset from HuggingFace."""
     jsonl_path = os.path.join(DATA_DIR, "leantree_mathlib.jsonl")
     download_file(HF_URL, jsonl_path, desc="leantree_mathlib.jsonl")
+
 
 def __print_stats():
     tokenizer = get_tokenizer()
@@ -91,7 +96,9 @@ def __print_stats():
             print(f"  p95: {np.percentile(lens[prop], 95):.2f}")
             print(f"  p99: {np.percentile(lens[prop], 99):.2f}")
             at_most_max = np.sum(np.array(lens[prop]) <= max_len)
-            print(f"  <= {max_len}: {at_most_max / len(lens[prop]):%} ({at_most_max}/{len(lens[prop])})")
+            print(
+                f"  <= {max_len}: {at_most_max / len(lens[prop]):%} ({at_most_max}/{len(lens[prop])})"
+            )
         print(f"depths:")
         print(f"  min: {np.min(depths)}")
         print(f"  max: {np.max(depths)}")
@@ -107,14 +114,21 @@ def __print_stats():
         fig = tpl.figure()
         min_depth = int(np.min(depths))
         max_depth = int(np.max(depths))
-        bin_edges = np.arange(min_depth, max_depth + 2)  # +2 to include max_depth in a bin
+        bin_edges = np.arange(
+            min_depth, max_depth + 2
+        )  # +2 to include max_depth in a bin
         counts, bin_edges = np.histogram(depths, bins=bin_edges)
-        fig.hist(counts, bin_edges=bin_edges, force_ascii=False, orientation="horizontal")
+        fig.hist(
+            counts, bin_edges=bin_edges, force_ascii=False, orientation="horizontal"
+        )
         fig.show()
         print()
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Download LeanTree dataset from HuggingFace.", allow_abbrev=False)
+    parser = argparse.ArgumentParser(
+        description="Download LeanTree dataset from HuggingFace.", allow_abbrev=False
+    )
     subparsers = parser.add_subparsers(dest="action")
 
     download_parser = subparsers.add_parser("download")
@@ -139,6 +153,7 @@ def main():
         _print_stats()
     else:
         raise f"Unknown action {args.action}"
+
 
 if __name__ == "__main__":
     main()

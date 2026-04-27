@@ -28,7 +28,13 @@ import goodseed
 # The dtype used for compute (matmuls, activations). Master weights stay fp32 for optimizer precision.
 # Linear layers cast their weights to this dtype in forward, replacing torch.amp.autocast.
 # Override with NANOPROOF_DTYPE env var: "bfloat16", "float16", "float32"
-_DTYPE_MAP = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
+_DTYPE_MAP = {
+    "bfloat16": torch.bfloat16,
+    "float16": torch.float16,
+    "float32": torch.float32,
+}
+
+
 def _detect_compute_dtype():
     env = os.environ.get("NANOPROOF_DTYPE")
     if env is not None:
@@ -38,11 +44,19 @@ def _detect_compute_dtype():
         # Older GPUs like V100 (SM 70) and T4 (SM 75) only have fp16 tensor cores
         capability = torch.cuda.get_device_capability()
         if capability >= (8, 0):
-            return torch.bfloat16, f"auto-detected: CUDA SM {capability[0]}{capability[1]} (bf16 supported)"
+            return (
+                torch.bfloat16,
+                f"auto-detected: CUDA SM {capability[0]}{capability[1]} (bf16 supported)",
+            )
         # fp16 training requires GradScaler (not yet implemented), so fall back to fp32.
         # Users can still force fp16 via NANOPROOF_DTYPE=float16 if they know what they're doing.
-        return torch.float32, f"auto-detected: CUDA SM {capability[0]}{capability[1]} (pre-Ampere, bf16 not supported, using fp32)"
+        return (
+            torch.float32,
+            f"auto-detected: CUDA SM {capability[0]}{capability[1]} (pre-Ampere, bf16 not supported, using fp32)",
+        )
     return torch.float32, "auto-detected: no CUDA (CPU/MPS)"
+
+
 COMPUTE_DTYPE, COMPUTE_DTYPE_REASON = _detect_compute_dtype()
 
 # -----------------------------------------------------------------------------
@@ -52,15 +66,19 @@ COMPUTE_DTYPE, COMPUTE_DTYPE_REASON = _detect_compute_dtype()
 # (state_max_len + tactic_max_len define the natural max sequence length used
 # by training and the dataloader's hard cutoff).
 
+
 @dataclass(frozen=True)
 class GlobalConfig:
-    state_max_len: int = 640      # max state length (tokens) accepted by the dataloader
-    tactic_max_len: int = 128     # max tactic length (tokens)
-    num_value_bins: int = 64      # value head bin count; must match tokenizer special tokens
+    state_max_len: int = 640  # max state length (tokens) accepted by the dataloader
+    tactic_max_len: int = 128  # max tactic length (tokens)
+    num_value_bins: int = (
+        64  # value head bin count; must match tokenizer special tokens
+    )
 
     @property
     def max_seq_len(self) -> int:
         return self.state_max_len + self.tactic_max_len  # 768
+
 
 GLOBAL_CONFIG = GlobalConfig()
 
@@ -81,45 +99,62 @@ def get_lr_multiplier(progress: float, args) -> float:
 
 class ColoredFormatter(logging.Formatter):
     """Custom formatter that adds colors to log messages."""
+
     # ANSI color codes
     COLORS = {
-        'DEBUG': '\033[36m',    # Cyan
-        'INFO': '\033[32m',     # Green
-        'WARNING': '\033[33m',  # Yellow
-        'ERROR': '\033[31m',    # Red
-        'CRITICAL': '\033[35m', # Magenta
+        "DEBUG": "\033[36m",  # Cyan
+        "INFO": "\033[32m",  # Green
+        "WARNING": "\033[33m",  # Yellow
+        "ERROR": "\033[31m",  # Red
+        "CRITICAL": "\033[35m",  # Magenta
     }
-    RESET = '\033[0m'
-    BOLD = '\033[1m'
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+
     def format(self, record):
         # Add color to the level name
         levelname = record.levelname
         if levelname in self.COLORS:
-            record.levelname = f"{self.COLORS[levelname]}{self.BOLD}{levelname}{self.RESET}"
+            record.levelname = (
+                f"{self.COLORS[levelname]}{self.BOLD}{levelname}{self.RESET}"
+            )
         # Format the message
         message = super().format(record)
         # Add color to specific parts of the message
-        if levelname == 'INFO':
+        if levelname == "INFO":
             # Highlight numbers and percentages
-            message = re.sub(r'(\d+\.?\d*\s*(?:GB|MB|%|docs))', rf'{self.BOLD}\1{self.RESET}', message)
-            message = re.sub(r'(Shard \d+)', rf'{self.COLORS["INFO"]}{self.BOLD}\1{self.RESET}', message)
+            message = re.sub(
+                r"(\d+\.?\d*\s*(?:GB|MB|%|docs))",
+                rf"{self.BOLD}\1{self.RESET}",
+                message,
+            )
+            message = re.sub(
+                r"(Shard \d+)",
+                rf"{self.COLORS['INFO']}{self.BOLD}\1{self.RESET}",
+                message,
+            )
         return message
+
 
 def setup_default_logging():
     handler = logging.StreamHandler()
-    handler.setFormatter(ColoredFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-    logging.basicConfig(
-        level=logging.INFO,
-        handlers=[handler]
+    handler.setFormatter(
+        ColoredFormatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     )
+    logging.basicConfig(level=logging.INFO, handlers=[handler])
+
 
 setup_default_logging()
 logger = logging.getLogger(__name__)
 
+
 def get_base_dir():
-    base = os.environ.get("NANOPROOF_HOME") or os.path.join(os.path.expanduser("~"), ".nanoproof")
+    base = os.environ.get("NANOPROOF_HOME") or os.path.join(
+        os.path.expanduser("~"), ".nanoproof"
+    )
     os.makedirs(base, exist_ok=True)
     return base
+
 
 def create_run_dirs(stage: str, run: str, args_dict: dict | None = None):
     """Create log and model directories for a training run.
@@ -186,10 +221,10 @@ def download_file_with_lock(url, filename, postprocess_fn=None):
         # Download the content as bytes
         print(f"Downloading {url}...")
         with urllib.request.urlopen(url) as response:
-            content = response.read() # bytes
+            content = response.read()  # bytes
 
         # Write to local file
-        with open(file_path, 'wb') as f:
+        with open(file_path, "wb") as f:
             f.write(content)
         print(f"Downloaded to {file_path}")
 
@@ -199,10 +234,12 @@ def download_file_with_lock(url, filename, postprocess_fn=None):
 
     return file_path
 
-def print0(s="",**kwargs):
-    ddp_rank = int(os.environ.get('RANK', 0))
+
+def print0(s="", **kwargs):
+    ddp_rank = int(os.environ.get("RANK", 0))
     if ddp_rank == 0:
         print(s, **kwargs)
+
 
 def print_banner():
     # Cool DOS Rebel font ASCII banner made with https://manytools.org/hacker-tools/ascii-banner/
@@ -221,34 +258,44 @@ def print_banner():
     """
     print0(banner)
 
+
 def is_ddp_requested() -> bool:
     """True if launched by torchrun (env present), even before init."""
     return all(k in os.environ for k in ("RANK", "LOCAL_RANK", "WORLD_SIZE"))
+
 
 def is_ddp_initialized() -> bool:
     """True if torch.distributed is available and the process group is initialized."""
     return dist.is_available() and dist.is_initialized()
 
+
 # Legacy alias
 is_ddp = is_ddp_requested
 
+
 def get_dist_info():
     if is_ddp_requested():
-        assert all(var in os.environ for var in ['RANK', 'LOCAL_RANK', 'WORLD_SIZE'])
-        ddp_rank = int(os.environ['RANK'])
-        ddp_local_rank = int(os.environ['LOCAL_RANK'])
-        ddp_world_size = int(os.environ['WORLD_SIZE'])
+        assert all(var in os.environ for var in ["RANK", "LOCAL_RANK", "WORLD_SIZE"])
+        ddp_rank = int(os.environ["RANK"])
+        ddp_local_rank = int(os.environ["LOCAL_RANK"])
+        ddp_world_size = int(os.environ["WORLD_SIZE"])
         return True, ddp_rank, ddp_local_rank, ddp_world_size
     else:
         return False, 0, 0, 1
 
+
 def broadcast_value(value, src=0):
     """Broadcast a single scalar value from src rank to all other ranks."""
-    assert isinstance(value, (int, float, str, bool)) or value is None, f"Expected scalar value, got {type(value)}"
+    assert isinstance(value, (int, float, str, bool)) or value is None, (
+        f"Expected scalar value, got {type(value)}"
+    )
     buf = [value]
     dist.broadcast_object_list(buf, src=src)
-    assert buf[0] is not None, "Broadcast received None - src rank likely didn't set the value"
+    assert buf[0] is not None, (
+        "Broadcast received None - src rank likely didn't set the value"
+    )
     return buf[0]
+
 
 def autodetect_device_type():
     # prefer to use CUDA if available, otherwise use MPS, otherwise fallback on CPU
@@ -261,14 +308,19 @@ def autodetect_device_type():
     print0(f"Autodetected device type: {device_type}")
     return device_type
 
-def compute_init(device_type="cuda"): # cuda|cpu|mps
+
+def compute_init(device_type="cuda"):  # cuda|cpu|mps
     """Basic initialization that we keep doing over and over, so make common."""
 
     assert device_type in ["cuda", "mps", "cpu"], "Invalid device type atm"
     if device_type == "cuda":
-        assert torch.cuda.is_available(), "Your PyTorch installation is not configured for CUDA but device_type is 'cuda'"
+        assert torch.cuda.is_available(), (
+            "Your PyTorch installation is not configured for CUDA but device_type is 'cuda'"
+        )
     if device_type == "mps":
-        assert torch.backends.mps.is_available(), "Your PyTorch installation is not configured for MPS but device_type is 'mps'"
+        assert torch.backends.mps.is_available(), (
+            "Your PyTorch installation is not configured for MPS but device_type is 'mps'"
+        )
 
     # Reproducibility
     # Note that we set the global seeds here, but most of the code uses explicit rng objects.
@@ -281,7 +333,9 @@ def compute_init(device_type="cuda"): # cuda|cpu|mps
 
     # Precision
     if device_type == "cuda":
-        torch.set_float32_matmul_precision("high") # uses tf32 instead of fp32 for matmuls
+        torch.set_float32_matmul_precision(
+            "high"
+        )  # uses tf32 instead of fp32 for matmuls
 
     # Distributed setup: Distributed Data Parallel (DDP), optional, and requires CUDA
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
@@ -291,12 +345,13 @@ def compute_init(device_type="cuda"): # cuda|cpu|mps
         dist.init_process_group(backend="nccl", device_id=device)
         dist.barrier()
     else:
-        device = torch.device(device_type) # mps|cpu
+        device = torch.device(device_type)  # mps|cpu
 
     if ddp_rank == 0:
         logger.info(f"Distributed world size: {ddp_world_size}")
 
     return ddp, ddp_rank, ddp_local_rank, ddp_world_size, device
+
 
 def compute_cleanup():
     """Companion function to compute_init, to clean things up before script exit"""
@@ -325,11 +380,15 @@ def enable_memory_profiling(output_dir: str) -> None:
     global _memory_profile_path
     os.makedirs(output_dir, exist_ok=True)
     _, rank, _, _ = get_dist_info()
-    _memory_profile_path = os.path.join(output_dir, f"memory_snapshot_rank{rank}.pickle")
+    _memory_profile_path = os.path.join(
+        output_dir, f"memory_snapshot_rank{rank}.pickle"
+    )
     # max_entries=100k is plenty (a full run typically generates 10-30k allocations).
     # stacks="python" captures Python frames; "all" adds C++ but slows things down.
     torch.cuda.memory._record_memory_history(max_entries=100_000, stacks="python")
-    logger.info(f"Memory profiling enabled; snapshot will be written to {_memory_profile_path} on first OOM")
+    logger.info(
+        f"Memory profiling enabled; snapshot will be written to {_memory_profile_path} on first OOM"
+    )
 
 
 def maybe_dump_memory_snapshot(context: str) -> None:
@@ -398,7 +457,8 @@ def get_peak_flops(device_name: str) -> float:
 
     # Unknown GPU - return inf so MFU shows as 0% rather than a wrong guess
     logger.warning(f"Peak flops undefined for: {device_name}, MFU will show as 0%")
-    return float('inf')
+    return float("inf")
+
 
 class MetricsLogger:
     """Logs metrics to wandb, goodseed, or both."""
@@ -416,7 +476,9 @@ class MetricsLogger:
             self._wandb_run = wandb.init(**kwargs)
 
         if "goodseed" in loggers:
-            self._goodseed_run = goodseed.Run(project="nanoproof", name=name, tags=["nanoproof"])
+            self._goodseed_run = goodseed.Run(
+                project="nanoproof", name=name, tags=["nanoproof"]
+            )
             self._goodseed_run.log_configs(config)
 
     def log(self, metrics, **kwargs):
@@ -430,7 +492,11 @@ class MetricsLogger:
         if self._goodseed_run is not None:
             step = metrics.get("step")
             # Filter to numeric/string scalars (excludes wandb-specific objects like confusion matrices)
-            safe = {k: v for k, v in metrics.items() if isinstance(v, (int, float, bool, str))}
+            safe = {
+                k: v
+                for k, v in metrics.items()
+                if isinstance(v, (int, float, bool, str))
+            }
             if safe:
                 try:
                     self._goodseed_run.log_metrics(safe, step=step)
@@ -446,24 +512,38 @@ class MetricsLogger:
 
 def add_logging_args(parser):
     """Add --run and --loggers arguments to an argparse parser."""
-    parser.add_argument("--run", type=str, default="dummy",
-                        help="Run name ('dummy' disables logging)")
-    parser.add_argument("--loggers", nargs="*", default=["wandb"],
-                        choices=["wandb", "goodseed"],
-                        help="Logging backends to use (default: wandb goodseed)")
+    parser.add_argument(
+        "--run", type=str, default="dummy", help="Run name ('dummy' disables logging)"
+    )
+    parser.add_argument(
+        "--loggers",
+        nargs="*",
+        default=["wandb"],
+        choices=["wandb", "goodseed"],
+        help="Logging backends to use (default: wandb goodseed)",
+    )
 
 
-def create_metrics_logger(project, args, master_process, config, log_dir=None, save_code=False):
+def create_metrics_logger(
+    project, args, master_process, config, log_dir=None, save_code=False
+):
     """Create a MetricsLogger. Returns no-op logger if run=='dummy' or not master."""
     if args.run == "dummy" or not master_process:
         return MetricsLogger(loggers=[], project=project, name=args.run, config=config)
     return MetricsLogger(
-        loggers=args.loggers, project=project, name=args.run,
-        config=config, log_dir=log_dir, save_code=save_code,
+        loggers=args.loggers,
+        project=project,
+        name=args.run,
+        config=config,
+        log_dir=log_dir,
+        save_code=save_code,
     )
 
-def format_distribution(bins: list[float], hist_height: int = 10, bin_labels: list[str] = None) -> str:
-    bar_char = '❚'  # Heavy vertical bar character.
+
+def format_distribution(
+    bins: list[float], hist_height: int = 10, bin_labels: list[str] = None
+) -> str:
+    bar_char = "❚"  # Heavy vertical bar character.
 
     num_bins = len(bins)
     max_bin = max(bins)
@@ -504,6 +584,7 @@ def format_distribution(bins: list[float], hist_height: int = 10, bin_labels: li
     result += label_str + "\n"
     return result
 
+
 def deep_shape(obj, seen=None, level=0, pretty=False):
     if seen is None:
         seen = set()
@@ -513,18 +594,41 @@ def deep_shape(obj, seen=None, level=0, pretty=False):
 
     def join_parts(parts):
         if pretty:
-            return "\n" + "  " * level + (",\n" + "  " * level).join(parts) + "\n" + "  " * (level - 1)
+            return (
+                "\n"
+                + "  " * level
+                + (",\n" + "  " * level).join(parts)
+                + "\n"
+                + "  " * (level - 1)
+            )
         return ", ".join(parts)
 
     if isinstance(obj, tuple):
-        return "(" + join_parts([deep_shape(o, seen, level + 1, pretty) for o in obj]) + ")"
+        return (
+            "("
+            + join_parts([deep_shape(o, seen, level + 1, pretty) for o in obj])
+            + ")"
+        )
     if isinstance(obj, list):
         if all(isinstance(o, (int, float, str, bool, type(None))) for o in obj):
             type_counts = Counter(type(o).__name__ for o in obj)
             return f"[{', '.join(f'{k}-{v}' for k, v in type_counts.items())}]"
-        return "[" + join_parts([deep_shape(o, seen, level + 1, pretty) for o in obj]) + "]"
+        return (
+            "["
+            + join_parts([deep_shape(o, seen, level + 1, pretty) for o in obj])
+            + "]"
+        )
     if isinstance(obj, dict):
-        return "{" + join_parts([str(k) + ": " + deep_shape(v, seen, level + 1, pretty) for k, v in obj.items()]) + "}"
+        return (
+            "{"
+            + join_parts(
+                [
+                    str(k) + ": " + deep_shape(v, seen, level + 1, pretty)
+                    for k, v in obj.items()
+                ]
+            )
+            + "}"
+        )
     if isinstance(obj, np.ndarray):
         return "np-" + str(obj.shape)
     if isinstance(obj, torch.Tensor):
@@ -539,13 +643,15 @@ def flush():
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
 
+
 def strict_zip(a: list, b: list):
     if len(a) != len(b):
         raise Exception(f"List sizes differ ({len(a)} != {len(b)}).")
     return zip(a, b)
 
 
-SomeValue = TypeVar('SomeValue')
+SomeValue = TypeVar("SomeValue")
+
 
 class ValueOrError(Generic[SomeValue]):
     def __init__(self, value: SomeValue | None, error: str | None):
@@ -575,14 +681,16 @@ class ValueOrError(Generic[SomeValue]):
         return self._error
 
 
-TypeNode = TypeVar('TypeNode')
+TypeNode = TypeVar("TypeNode")
+
+
 def pretty_print_tree(
-        root: TypeNode,
-        get_children: Callable[[TypeNode], list[TypeNode]],
-        node_to_str: Callable[[TypeNode], str],
-        edge_to_str: Callable[[TypeNode], str | None] | None = None,
-        max_label_len=55,
-        max_edge_label_len=None,
+    root: TypeNode,
+    get_children: Callable[[TypeNode], list[TypeNode]],
+    node_to_str: Callable[[TypeNode], str],
+    edge_to_str: Callable[[TypeNode], str | None] | None = None,
+    max_label_len=55,
+    max_edge_label_len=None,
 ) -> str:
     def trimmed_edge_to_str(e: TypeNode) -> str | None:
         if edge_to_str is None:
@@ -594,10 +702,11 @@ def pretty_print_tree(
             return s
         if len(s) > max_edge_label_len:
             dots = "..."
-            return s[:max_edge_label_len - len(dots)] + dots
+            return s[: max_edge_label_len - len(dots)] + dots
         return s
 
     from PrettyPrint import PrettyPrintTree
+
     pt = PrettyPrintTree(
         get_children=get_children,
         get_val=node_to_str,
@@ -607,6 +716,7 @@ def pretty_print_tree(
         trim=max_label_len,
     )
     return pt(root)
+
 
 class SimpleTimer:
     def __init__(self):
@@ -641,39 +751,52 @@ class SimpleTimer:
             new_timer = SimpleTimer()
             new_timer.times = self.times.copy()
             return new_timer
-            
+
         print0("Gathering timer data from all ranks...")
         world_size = dist.get_world_size()
         local_times = self.times
         all_times_list = [None for _ in range(world_size)]
         dist.all_gather_object(all_times_list, local_times)
-        
+
         aggregated_times = {}
         for rank_times in all_times_list:
-            if rank_times is None: continue
+            if rank_times is None:
+                continue
             for k, v in rank_times.items():
                 aggregated_times[k] = aggregated_times.get(k, 0.0) + v
-        
+
         new_timer = SimpleTimer()
         new_timer.times = aggregated_times
         return new_timer
 
+
 class DummyTimer(SimpleTimer):
-    def start(self, section: str): pass
-    def end(self, section: str): pass
-    def get_times(self) -> dict[str, float]: return {}
-    def log_times(self): pass
-    def gather(self) -> Self: return DummyTimer()
+    def start(self, section: str):
+        pass
+
+    def end(self, section: str):
+        pass
+
+    def get_times(self) -> dict[str, float]:
+        return {}
+
+    def log_times(self):
+        pass
+
+    def gather(self) -> Self:
+        return DummyTimer()
 
 
 # ---------------------------------------------------------------------------
 # Timeline instrumentation
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class TimelineEvent:
     """A single timed event in a prover's timeline."""
-    type: str     # "llm" or "lean"
+
+    type: str  # "llm" or "lean"
     start: float  # absolute time.time()
     end: float
 
@@ -699,7 +822,9 @@ class TimelineRecorder:
         self.events.append(TimelineEvent(event_type, start, end))
 
 
-def active_barrier(key: str, timeout: float | None = 300.0, poll_interval: float = 0.5) -> None:
+def active_barrier(
+    key: str, timeout: float | None = 300.0, poll_interval: float = 0.5
+) -> None:
     """Rank-symmetric barrier over the distributed store.
 
     Does not use NCCL, so it never triggers the NCCL watchdog and leaves the
@@ -736,9 +861,10 @@ class Player(enum.Enum):
     OR = 1
     AND = 2
 
+
 def linearize_proof(node: "Node") -> list[str]:
     """Linearize a solved proof tree into a sequence of tactics using DFS.
-    
+
     Traverses the AND/OR tree and collects all tactics from the solved path.
     Returns a list of tactic strings in order of application.
     """
@@ -751,7 +877,9 @@ def linearize_proof(node: "Node") -> list[str]:
         if n.to_play == Player.OR:
             if n.is_terminal:
                 return
-            assert len(n.state) == 1, f"linearize_proof: Expected 1 branch at OR node, got {len(n.state)}"
+            assert len(n.state) == 1, (
+                f"linearize_proof: Expected 1 branch at OR node, got {len(n.state)}"
+            )
             assert n.children, f"linearize_proof: No children at OR node"
             solved_actions = [a for a in n.children if n.children[a].is_solved]
             assert solved_actions, f"linearize_proof: No solved actions at OR node"
@@ -765,7 +893,7 @@ def linearize_proof(node: "Node") -> list[str]:
                 dfs(child)
         else:
             raise ValueError(f"Unknown to_play: {n.to_play}")
-    
+
     dfs(node)
     return tactics
 
@@ -774,7 +902,7 @@ def format_linearized_proof(tactics: list[str]) -> str:
     """Format a linearized proof as a list of tactics, one per line."""
     if not tactics:
         return "(no tactics)"
-    
+
     lines = []
     for tactic in tactics:
         lines.append(f"{tactic}")
@@ -793,9 +921,14 @@ def _ensure_block_arrow(tactic: str) -> str:
     if stripped.endswith("=>") or ":=" in stripped:
         return tactic
     # Tactic-block openers that need => appended.
-    if stripped.startswith("case ") or stripped == "next" or stripped.startswith("next "):
+    if (
+        stripped.startswith("case ")
+        or stripped == "next"
+        or stripped.startswith("next ")
+    ):
         return stripped + " =>"
     return tactic
+
 
 def construct_proof_source(theorem: str, tactics: list[str]) -> str:
     """Construct the full Lean source by replacing 'sorry' in the theorem with the proof tactics.
@@ -808,19 +941,24 @@ def construct_proof_source(theorem: str, tactics: list[str]) -> str:
         The complete Lean source with the proof filled in
     """
     assert len(tactics) > 0, f"construct_proof_source: No tactics provided"
-    assert theorem.strip().endswith("sorry"), f"construct_proof_source: Theorem should end with 'sorry': {theorem}"
+    assert theorem.strip().endswith("sorry"), (
+        f"construct_proof_source: Theorem should end with 'sorry': {theorem}"
+    )
 
     # Remove "sorry" from the end
-    theorem_body = theorem.rstrip()[:-len("sorry")].rstrip()
+    theorem_body = theorem.rstrip()[: -len("sorry")].rstrip()
 
     # Multi-line proof with indentation
-    proof_lines = "\n".join(f"  {_ensure_block_arrow(tactic.strip())}" for tactic in tactics)
+    proof_lines = "\n".join(
+        f"  {_ensure_block_arrow(tactic.strip())}" for tactic in tactics
+    )
     return theorem_body + "\n" + proof_lines
 
 
 _THEOREM_NAME_RE = re.compile(
-    r'(^|\n)(\s*(?:noncomputable\s+|private\s+|protected\s+)*)(?:theorem|def|lemma)\s+\S+',
+    r"(^|\n)(\s*(?:noncomputable\s+|private\s+|protected\s+)*)(?:theorem|def|lemma)\s+\S+",
 )
+
 
 def theorem_to_example(source: str) -> str:
     """Convert a Lean theorem/def/lemma statement to an example statement.
@@ -849,4 +987,4 @@ def theorem_to_example(source: str) -> str:
     # We want to replace "theorem <name>" part with "example", keeping
     # the leading newline + whitespace (groups 1 and 2).
     replacement = m.group(1) + m.group(2) + "example"
-    return source[:m.start()] + replacement + source[m.end():]
+    return source[: m.start()] + replacement + source[m.end() :]

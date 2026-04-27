@@ -29,8 +29,12 @@ def _document_batches(split, resume_state_dict, tokenizer_batch_size):
     parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
 
     resume_pq_idx = resume_state_dict["pq_idx"] if resume_state_dict is not None else 0
-    resume_rg_idx = resume_state_dict["rg_idx"] if resume_state_dict is not None else None
-    resume_epoch = resume_state_dict.get("epoch", 1) if resume_state_dict is not None else 1
+    resume_rg_idx = (
+        resume_state_dict["rg_idx"] if resume_state_dict is not None else None
+    )
+    resume_epoch = (
+        resume_state_dict.get("epoch", 1) if resume_state_dict is not None else 1
+    )
     first_pass = True
     pq_idx = resume_pq_idx
     epoch = resume_epoch
@@ -52,9 +56,9 @@ def _document_batches(split, resume_state_dict, tokenizer_batch_size):
                 rg_idx = ddp_rank
             while rg_idx < pf.num_row_groups:
                 rg = pf.read_row_group(rg_idx)
-                batch = rg.column('text').to_pylist()
+                batch = rg.column("text").to_pylist()
                 for i in range(0, len(batch), tokenizer_batch_size):
-                    yield batch[i:i+tokenizer_batch_size], (pq_idx, rg_idx, epoch)
+                    yield batch[i : i + tokenizer_batch_size], (pq_idx, rg_idx, epoch)
                 rg_idx += ddp_world_size
             pq_idx += 1
         first_pass = False
@@ -62,9 +66,13 @@ def _document_batches(split, resume_state_dict, tokenizer_batch_size):
 
 
 def nemotron_batches_with_state(
-    B, T, split,
-    tokenizer_threads=4, tokenizer_batch_size=128,
-    device="cuda", resume_state_dict=None,
+    B,
+    T,
+    split,
+    tokenizer_threads=4,
+    tokenizer_batch_size=128,
+    device="cuda",
+    resume_state_dict=None,
     buffer_size=1000,
 ):
     """BOS-aligned best-fit-cropping pretraining dataloader.
@@ -98,10 +106,10 @@ def nemotron_batches_with_state(
     row_buffer = torch.empty((B, row_capacity), dtype=torch.long)
     cpu_buffer = torch.empty(2 * B * T, dtype=torch.long, pin_memory=use_cuda)
     gpu_buffer = torch.empty(2 * B * T, dtype=torch.long, device=device)
-    cpu_inputs = cpu_buffer[:B * T].view(B, T)
-    cpu_targets = cpu_buffer[B * T:].view(B, T)
-    inputs = gpu_buffer[:B * T].view(B, T)
-    targets = gpu_buffer[B * T:].view(B, T)
+    cpu_inputs = cpu_buffer[: B * T].view(B, T)
+    cpu_targets = cpu_buffer[B * T :].view(B, T)
+    inputs = gpu_buffer[: B * T].view(B, T)
+    targets = gpu_buffer[B * T :].view(B, T)
 
     while True:
         for row_idx in range(B):
@@ -124,13 +132,19 @@ def nemotron_batches_with_state(
                 if best_idx >= 0:
                     doc = doc_buffer.pop(best_idx)
                     doc_len = len(doc)
-                    row_buffer[row_idx, pos:pos + doc_len] = torch.tensor(doc, dtype=torch.long)
+                    row_buffer[row_idx, pos : pos + doc_len] = torch.tensor(
+                        doc, dtype=torch.long
+                    )
                     pos += doc_len
                 else:
                     # No doc fits - crop shortest to fill remaining
-                    shortest_idx = min(range(len(doc_buffer)), key=lambda i: len(doc_buffer[i]))
+                    shortest_idx = min(
+                        range(len(doc_buffer)), key=lambda i: len(doc_buffer[i])
+                    )
                     doc = doc_buffer.pop(shortest_idx)
-                    row_buffer[row_idx, pos:pos + remaining] = torch.tensor(doc[:remaining], dtype=torch.long)
+                    row_buffer[row_idx, pos : pos + remaining] = torch.tensor(
+                        doc[:remaining], dtype=torch.long
+                    )
                     pos += remaining
 
         # Copy to pinned CPU buffer, then single HtoD transfer
@@ -151,7 +165,9 @@ def nemotron_batches(*args, **kwargs):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Inspect the Nemotron BOS-bestfit dataloader", allow_abbrev=False)
+    parser = argparse.ArgumentParser(
+        description="Inspect the Nemotron BOS-bestfit dataloader", allow_abbrev=False
+    )
     parser.add_argument("--split", choices=["train", "valid"], default="train")
     parser.add_argument("-B", type=int, default=128, help="batch size")
     parser.add_argument("-T", type=int, default=1024, help="sequence length")
@@ -159,9 +175,14 @@ if __name__ == "__main__":
     parser.add_argument("--max-batches", type=int, default=10)
     args = parser.parse_args()
 
-    dataloader = nemotron_batches_with_state(args.B, args.T, args.split, device=args.device)
+    dataloader = nemotron_batches_with_state(
+        args.B, args.T, args.split, device=args.device
+    )
     for i, (inputs, targets, state_dict) in enumerate(dataloader):
         if i >= args.max_batches:
             break
-        print(f"Batch {i}: inputs={tuple(inputs.shape)} targets={tuple(targets.shape)} state={state_dict}", flush=True)
+        print(
+            f"Batch {i}: inputs={tuple(inputs.shape)} targets={tuple(targets.shape)} state={state_dict}",
+            flush=True,
+        )
     print("Done.")

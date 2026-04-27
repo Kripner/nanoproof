@@ -48,7 +48,9 @@ def inspect_parquet(path: str) -> None:
     text_idx = schema.get_field_index("text")
     text_field = schema.field(text_idx)
 
-    if not (pa.types.is_string(text_field.type) or pa.types.is_large_string(text_field.type)):
+    if not (
+        pa.types.is_string(text_field.type) or pa.types.is_large_string(text_field.type)
+    ):
         print(
             f"Warning: 'text' column is type {text_field.type}, not string; "
             "attempting to cast when reading."
@@ -86,7 +88,7 @@ def main():
     if len(sys.argv) != 2:
         print("Usage: python inspect_parquet.py <parquet_file>", file=sys.stderr)
         sys.exit(1)
-    
+
     dest = sys.argv[1]
 
     if not os.path.exists(dest):

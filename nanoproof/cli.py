@@ -75,7 +75,7 @@ def _add_to_log_buffer(component: str, entry: dict):
 def set_ddp_info(is_master: bool, rank: int = 0):
     """
     Set DDP info for logging.
-    
+
     Args:
         is_master: Whether this process is the master (rank 0)
         rank: The DDP rank of this process
@@ -112,14 +112,16 @@ def configure_logging(output_dir: str | None):
             logging_dir = os.path.join(output_dir, "logging")
             os.makedirs(logging_dir, exist_ok=True)
             _log_file = open(os.path.join(logging_dir, f"rank{_ddp_rank}.log"), "a")
-            _errors_file = open(os.path.join(logging_dir, f"rank{_ddp_rank}_errors.jsonl"), "a")
+            _errors_file = open(
+                os.path.join(logging_dir, f"rank{_ddp_rank}_errors.jsonl"), "a"
+            )
 
 
 def log(msg: str, component: str | None = None, actor_id: int | None = None):
     """
     Thread-safe logging with optional component/actor prefix.
     Writes to log file, console, and in-memory buffer for web streaming.
-    
+
     Args:
         msg: The message to log
         component: Component name (e.g., "TacticModel", "Collection")
@@ -136,18 +138,18 @@ def log(msg: str, component: str | None = None, actor_id: int | None = None):
         log_component = "main"
 
     timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-    
+
     with _log_lock:
         line = f"[{timestamp}] {prefix} {msg}" if prefix else f"[{timestamp}] {msg}"
-        
+
         # Write to file if configured
         if _log_file is not None:
             _log_file.write(line + "\n")
             _log_file.flush()
-        
+
         # Always print to console
         print(line, flush=True)
-        
+
         # Add to in-memory buffer for web streaming
         entry = {
             "timestamp": timestamp,
@@ -161,7 +163,7 @@ def log(msg: str, component: str | None = None, actor_id: int | None = None):
 def log0(msg: str, component: str | None = None, actor_id: int | None = None):
     """
     Log only if this is the master process (rank 0).
-    
+
     Use this for informational messages that should only appear once in DDP.
     For errors or per-rank diagnostics, use regular log().
     """
@@ -169,7 +171,12 @@ def log0(msg: str, component: str | None = None, actor_id: int | None = None):
         log(msg, component=component, actor_id=actor_id)
 
 
-def log_error(msg: str, exception: Exception | None = None, component: str | None = None, actor_id: int | None = None):
+def log_error(
+    msg: str,
+    exception: Exception | None = None,
+    component: str | None = None,
+    actor_id: int | None = None,
+):
     """Log an error with optional exception details."""
     if exception is not None:
         error_detail = f"{type(exception).__name__}: {exception}"
@@ -225,9 +232,11 @@ def log_actionable_error(component: str, error: str, **extra):
 # Data structures for state
 # -----------------------------------------------------------------------------
 
+
 @dataclass
 class LocalActorStatus:
     """Status of a local actor thread."""
+
     id: int
     state: Literal["idle", "running", "error"] = "idle"
     games_played: int = 0
@@ -239,6 +248,7 @@ class LocalActorStatus:
 @dataclass
 class GPUStatus:
     """Status of a GPU."""
+
     id: int
     name: str = "Unknown"
     utilization: float = 0.0  # 0-100
@@ -251,6 +261,7 @@ class GPUStatus:
 @dataclass
 class LeanServerStatus:
     """Status of the Lean server."""
+
     address: str = ""
     port: int = 0
     connected: bool = False
@@ -289,6 +300,7 @@ class LeanServerStatus:
 @dataclass
 class CollectionStats:
     """Statistics for the current collection phase."""
+
     num_actors: int = 0
     samples_collected: int = 0
     target_samples: int = 0
@@ -332,7 +344,7 @@ class CollectionStats:
     @property
     def elapsed(self) -> float:
         return time.time() - self.start_time if self.start_time > 0 else 0.0
-    
+
     def to_dict(self) -> dict:
         wait_min, wait_max, wait_med = self.get_wait_time_stats()
         return {
@@ -353,6 +365,7 @@ class CollectionStats:
 @dataclass
 class EvalResult:
     """Result from an evaluation run."""
+
     step: int
     dataset: str
     success_rate: float
@@ -365,6 +378,7 @@ class EvalResult:
 @dataclass
 class EvalProgress:
     """Progress of the current evaluation."""
+
     dataset: str = ""
     current: int = 0
     total: int = 0
@@ -380,13 +394,16 @@ class EvalProgress:
             "solved": self.solved,
             "errors": self.errors,
             "active": self.active,
-            "progress_percent": (self.current / self.total * 100) if self.total > 0 else 0,
+            "progress_percent": (self.current / self.total * 100)
+            if self.total > 0
+            else 0,
         }
 
 
 @dataclass
 class TrainingStats:
     """Statistics for the current training step."""
+
     step: int = 0
     loss: float = 0.0
     num_tokens: int = 0
@@ -407,8 +424,9 @@ Phase = Literal["idle", "collecting", "evaluating", "training"]
 _PHASE_DEDUP_WINDOW = 10.0
 
 
-def _clip_against(start: float, end: float,
-                  intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+def _clip_against(
+    start: float, end: float, intervals: list[tuple[float, float]]
+) -> list[tuple[float, float]]:
     """Clip ``(start, end)`` against a sorted list of non-overlapping
     ``(s, e)`` intervals. Returns the sub-ranges that survive, each
     strictly positive-length. Used to split an actor's ``llm`` event
@@ -533,7 +551,7 @@ def _list_phase_steps(output_dir: str | None, prefix: str) -> list[int]:
         if not name.startswith(prefix):
             continue
         try:
-            steps.append(int(name[len(prefix):]))
+            steps.append(int(name[len(prefix) :]))
         except ValueError:
             continue
     steps.sort()
@@ -633,21 +651,25 @@ def _serve_collected_summary(path: str | None) -> Response:
             simp_depth, simp_size = _tree_depth_and_size(obj.get("simplified_tree"))
             num_trans = len(obj.get("transitions", []))
             for_totals_transitions += num_trans
-            proofs.append({
-                "name": obj.get("name"),
-                "theorem": obj.get("theorem"),
-                "num_iterations": obj.get("num_iterations", 0),
-                "num_transitions": num_trans,
-                "full_tree_depth": full_depth,
-                "full_tree_size": full_size,
-                "simplified_tree_depth": simp_depth,
-                "simplified_tree_size": simp_size,
-            })
-    return jsonify({
-        "proofs": proofs,
-        "total": len(proofs),
-        "total_transitions": for_totals_transitions,
-    })
+            proofs.append(
+                {
+                    "name": obj.get("name"),
+                    "theorem": obj.get("theorem"),
+                    "num_iterations": obj.get("num_iterations", 0),
+                    "num_transitions": num_trans,
+                    "full_tree_depth": full_depth,
+                    "full_tree_size": full_size,
+                    "simplified_tree_depth": simp_depth,
+                    "simplified_tree_size": simp_size,
+                }
+            )
+    return jsonify(
+        {
+            "proofs": proofs,
+            "total": len(proofs),
+            "total_transitions": for_totals_transitions,
+        }
+    )
 
 
 def _serve_collected_entry(path: str | None, index: int) -> Response:
@@ -692,12 +714,14 @@ def _serve_collected_transitions(path: str | None, args) -> Response:
             proof_name = obj.get("name")
             for t in obj.get("transitions", []):
                 if offset <= total and (limit == 0 or len(items) < limit):
-                    items.append({
-                        "proof": proof_name,
-                        "state": t[0],
-                        "tactic": t[1],
-                        "value": t[2],
-                    })
+                    items.append(
+                        {
+                            "proof": proof_name,
+                            "state": t[0],
+                            "tactic": t[1],
+                            "value": t[2],
+                        }
+                    )
                 total += 1
     return jsonify({"transitions": items, "total": total})
 
@@ -706,10 +730,11 @@ def _serve_collected_transitions(path: str | None, args) -> Response:
 # Web Monitor
 # -----------------------------------------------------------------------------
 
+
 class WebMonitor:
     """
     Web-based monitor for the RL training loop.
-    
+
     Runs a Flask server in a background thread that serves:
     - A React web app for visualization
     - API endpoints for state polling and log streaming
@@ -731,7 +756,7 @@ class WebMonitor:
 
         # Collection stats
         self.collection = CollectionStats(num_actors=num_actors)
-        
+
         # Training start time (for calculating overall expansions/sec)
         self.training_start_time: float = time.time()
 
@@ -752,23 +777,25 @@ class WebMonitor:
 
         # Lean server status (single server for local mode)
         self.lean_server: LeanServerStatus = LeanServerStatus()
-        
+
         # Multiple lean servers (for distributed mode monitoring)
         self.lean_servers: list[LeanServerStatus] = []
 
         # Timeline instrumentation
         self.actor_timelines: dict[int, deque] = {}  # actor_id -> deque of event dicts
-        self.actor_outcomes: dict[int, deque] = {}   # actor_id -> deque of outcome dicts
+        self.actor_outcomes: dict[int, deque] = {}  # actor_id -> deque of outcome dicts
         self.phase_events: list[dict] = []  # global phase start/end markers
 
         # LLM profiler instrumentation (per GPU rank). Populated by a
         # background thread that polls each rank's Flask inference server's
         # /llm_timeline endpoint.
-        self.llm_endpoints: dict[int, str] = {}           # rank -> "host:port"
-        self.llm_events: dict[int, deque] = {}            # rank -> deque of {start,end,seq}
-        self.llm_samples: dict[int, deque] = {}           # rank -> deque of {t,n,seq}
-        self.llm_remote_cursor: dict[int, float] = {}     # rank -> last seq seen from that server
-        self._llm_out_seq = 0                             # outgoing monotonic seq for delta polls
+        self.llm_endpoints: dict[int, str] = {}  # rank -> "host:port"
+        self.llm_events: dict[int, deque] = {}  # rank -> deque of {start,end,seq}
+        self.llm_samples: dict[int, deque] = {}  # rank -> deque of {t,n,seq}
+        self.llm_remote_cursor: dict[
+            int, float
+        ] = {}  # rank -> last seq seen from that server
+        self._llm_out_seq = 0  # outgoing monotonic seq for delta polls
         self._llm_poll_thread: threading.Thread | None = None
         self._llm_poll_interval = 2.0
         # inference_timeline.jsonl: persistent log mirroring llm_events /
@@ -808,24 +835,25 @@ class WebMonitor:
     def _start_server(self):
         """Start the Flask server in a background thread."""
         self._app = self._create_app()
-        
+
         def run_server():
-            log_handler = logging.getLogger('werkzeug')
+            log_handler = logging.getLogger("werkzeug")
             log_handler.setLevel(logging.ERROR)
             self._app.run(host="0.0.0.0", port=self.port, threaded=True)
-        
+
         self._server_thread = threading.Thread(target=run_server, daemon=True)
         self._server_thread.start()
-        
+
         url = f"http://localhost:{self.port}"
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"  Web Monitor: {url}")
-        print(f"{'='*60}\n")
+        print(f"{'=' * 60}\n")
 
     def _start_gpu_monitor(self):
         """Start a background thread to monitor GPU status."""
         try:
             import torch
+
             if not torch.cuda.is_available():
                 return
         except ImportError:
@@ -834,51 +862,58 @@ class WebMonitor:
         def monitor_gpus():
             # Map PyTorch indices to physical GPU IDs
             # If CUDA_VISIBLE_DEVICES is set, parse it to get physical IDs
-            cuda_visible = os.environ.get('CUDA_VISIBLE_DEVICES', '')
+            cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
             if cuda_visible:
-                physical_ids = [int(x.strip()) for x in cuda_visible.split(',') if x.strip()]
+                physical_ids = [
+                    int(x.strip()) for x in cuda_visible.split(",") if x.strip()
+                ]
             else:
                 physical_ids = list(range(torch.cuda.device_count()))
-            
+
             while not self._stop_monitors.wait(timeout=2.0):
                 try:
                     # Query all GPUs at once for efficiency and reliability
                     result = subprocess.run(
-                        ['nvidia-smi', '--query-gpu=index,utilization.gpu,memory.used,memory.total', 
-                         '--format=csv,noheader,nounits'],
-                        capture_output=True, text=True, timeout=5.0
+                        [
+                            "nvidia-smi",
+                            "--query-gpu=index,utilization.gpu,memory.used,memory.total",
+                            "--format=csv,noheader,nounits",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=5.0,
                     )
                     if result.returncode != 0:
                         continue  # Keep previous values on failure
-                    
+
                     all_gpu_stats = {}
-                    for line in result.stdout.strip().split('\n'):
-                        parts = [p.strip() for p in line.split(',')]
+                    for line in result.stdout.strip().split("\n"):
+                        parts = [p.strip() for p in line.split(",")]
                         if len(parts) >= 4:
                             gpu_idx = int(parts[0])
                             all_gpu_stats[gpu_idx] = {
-                                'utilization': float(parts[1]),
-                                'memory_used': int(parts[2]),
-                                'memory_total': int(parts[3]),
+                                "utilization": float(parts[1]),
+                                "memory_used": int(parts[2]),
+                                "memory_total": int(parts[3]),
                             }
-                    
+
                     for i in range(torch.cuda.device_count()):
                         props = torch.cuda.get_device_properties(i)
                         physical_id = physical_ids[i] if i < len(physical_ids) else i
-                        
+
                         if physical_id in all_gpu_stats:
                             stats = all_gpu_stats[physical_id]
                             self.update_gpu(
                                 gpu_id=i,
                                 name=props.name,
-                                utilization=stats['utilization'],
-                                memory_used=stats['memory_used'],
-                                memory_total=stats['memory_total'],
+                                utilization=stats["utilization"],
+                                memory_used=stats["memory_used"],
+                                memory_total=stats["memory_total"],
                             )
                         # If physical_id not found, keep previous values
                 except Exception:
                     pass  # Keep previous values on error
-        
+
         self._gpu_monitor_thread = threading.Thread(target=monitor_gpus, daemon=True)
         self._gpu_monitor_thread.start()
 
@@ -887,7 +922,7 @@ class WebMonitor:
         with self._lock:
             self.lean_server.address = address
             self.lean_server.port = port
-        
+
         # Start the Lean server monitor if not already running
         if self._lean_monitor_thread is None and self.enabled:
             self._start_lean_monitor()
@@ -895,7 +930,7 @@ class WebMonitor:
     def set_lean_servers(self, server_urls: list[str]):
         """
         Configure multiple Lean servers for monitoring (distributed mode).
-        
+
         Args:
             server_urls: List of server URLs in format "host:port"
         """
@@ -911,36 +946,39 @@ class WebMonitor:
                 else:
                     host = url
                     port_int = 8000
-                
+
                 server = LeanServerStatus(address=host, port=port_int)
                 self.lean_servers.append(server)
-        
+
         # Start the multi-server monitor if not already running
         if self._lean_servers_monitor_thread is None and self.enabled:
             self._start_lean_servers_monitor()
 
     def _start_lean_servers_monitor(self):
         """Start a background thread to monitor multiple Lean servers."""
+
         def monitor_lean_servers():
             while not self._stop_monitors.wait(timeout=3.0):
                 with self._lock:
                     servers = self.lean_servers[:]
-                
+
                 for server in servers:
                     if not server.address or not server.port:
                         continue
-                    
+
                     try:
                         url = f"http://{server.address}:{server.port}/status"
                         req = urllib.request.Request(url, method="GET")
                         req.add_header("Accept", "application/json")
-                        
+
                         with urllib.request.urlopen(req, timeout=5.0) as response:
                             data = json.loads(response.read().decode())
-                        
+
                         with self._lock:
                             server.connected = True
-                            server.available_processes = data.get("available_processes", 0)
+                            server.available_processes = data.get(
+                                "available_processes", 0
+                            )
                             server.used_processes = data.get("used_processes", 0)
                             server.max_processes = data.get("max_processes", 0)
                             server.cpu_percent = data.get("cpu_percent_per_core", [])
@@ -953,8 +991,12 @@ class WebMonitor:
                             rss_bytes = data.get("leanserver_rss_bytes") or 0
                             server.leanserver_rss_gb = rss_bytes / (1024**3)
                             server.total_branches = data.get("total_branches", 0)
-                            server.starting_processes = data.get("starting_processes", 0)
-                            server.inactive_processes = data.get("inactive_processes", 0)
+                            server.starting_processes = data.get(
+                                "starting_processes", 0
+                            )
+                            server.inactive_processes = data.get(
+                                "inactive_processes", 0
+                            )
                             server.last_update = time.time()
                             server.error = ""
                     except Exception as e:
@@ -966,7 +1008,9 @@ class WebMonitor:
                             server.ram_percent = None
                             server.used_processes = None
 
-        self._lean_servers_monitor_thread = threading.Thread(target=monitor_lean_servers, daemon=True)
+        self._lean_servers_monitor_thread = threading.Thread(
+            target=monitor_lean_servers, daemon=True
+        )
         self._lean_servers_monitor_thread.start()
 
     def set_llm_endpoints(self, endpoints: list[str]):
@@ -988,6 +1032,7 @@ class WebMonitor:
 
     def _start_llm_poll(self):
         """Start a background thread that polls every rank's /llm_timeline."""
+
         def poll():
             while not self._stop_monitors.wait(timeout=self._llm_poll_interval):
                 with self._lock:
@@ -1009,30 +1054,48 @@ class WebMonitor:
                         for ev in data.get("events", []):
                             self._llm_out_seq += 1
                             trigger = ev.get("trigger", "unknown")
-                            buf_events.append({
-                                "start": ev["start"],
-                                "end": ev["end"],
-                                "seq": self._llm_out_seq,
-                                "trigger": trigger,
-                            })
-                            if f is not None:
-                                f.write(json.dumps({
-                                    "type": "event", "rank": rank,
-                                    "start": ev["start"], "end": ev["end"],
+                            buf_events.append(
+                                {
+                                    "start": ev["start"],
+                                    "end": ev["end"],
+                                    "seq": self._llm_out_seq,
                                     "trigger": trigger,
-                                }) + "\n")
+                                }
+                            )
+                            if f is not None:
+                                f.write(
+                                    json.dumps(
+                                        {
+                                            "type": "event",
+                                            "rank": rank,
+                                            "start": ev["start"],
+                                            "end": ev["end"],
+                                            "trigger": trigger,
+                                        }
+                                    )
+                                    + "\n"
+                                )
                         for s in data.get("samples", []):
                             self._llm_out_seq += 1
-                            buf_samples.append({
-                                "t": s["t"],
-                                "n": s["n"],
-                                "seq": self._llm_out_seq,
-                            })
+                            buf_samples.append(
+                                {
+                                    "t": s["t"],
+                                    "n": s["n"],
+                                    "seq": self._llm_out_seq,
+                                }
+                            )
                             if f is not None:
-                                f.write(json.dumps({
-                                    "type": "sample", "rank": rank,
-                                    "t": s["t"], "n": s["n"],
-                                }) + "\n")
+                                f.write(
+                                    json.dumps(
+                                        {
+                                            "type": "sample",
+                                            "rank": rank,
+                                            "t": s["t"],
+                                            "n": s["n"],
+                                        }
+                                    )
+                                    + "\n"
+                                )
                         if f is not None:
                             f.flush()
                         cursor = data.get("cursor")
@@ -1044,42 +1107,55 @@ class WebMonitor:
 
     def _start_lean_monitor(self):
         """Start a background thread to monitor Lean server status."""
+
         def monitor_lean():
             while not self._stop_monitors.wait(timeout=3.0):
                 with self._lock:
                     address = self.lean_server.address
                     port = self.lean_server.port
-                
+
                 if not address or not port:
                     continue
-                
+
                 try:
                     url = f"http://{address}:{port}/status"
                     req = urllib.request.Request(url, method="GET")
                     req.add_header("Accept", "application/json")
-                    
+
                     with urllib.request.urlopen(req, timeout=5.0) as response:
                         data = json.loads(response.read().decode())
-                    
+
                     with self._lock:
                         self.lean_server.connected = True
-                        self.lean_server.available_processes = data.get("available_processes", 0)
+                        self.lean_server.available_processes = data.get(
+                            "available_processes", 0
+                        )
                         self.lean_server.used_processes = data.get("used_processes", 0)
                         self.lean_server.max_processes = data.get("max_processes", 0)
-                        self.lean_server.cpu_percent = data.get("cpu_percent_per_core", [])
+                        self.lean_server.cpu_percent = data.get(
+                            "cpu_percent_per_core", []
+                        )
                         ram = data.get("ram", {})
                         self.lean_server.ram_percent = ram.get("percent", 0.0)
-                        self.lean_server.ram_used_gb = ram.get("used_bytes", 0) / (1024**3)
-                        self.lean_server.ram_total_gb = ram.get("total_bytes", 0) / (1024**3)
-                        self.lean_server.starting_processes = data.get("starting_processes", 0)
-                        self.lean_server.inactive_processes = data.get("inactive_processes", 0)
+                        self.lean_server.ram_used_gb = ram.get("used_bytes", 0) / (
+                            1024**3
+                        )
+                        self.lean_server.ram_total_gb = ram.get("total_bytes", 0) / (
+                            1024**3
+                        )
+                        self.lean_server.starting_processes = data.get(
+                            "starting_processes", 0
+                        )
+                        self.lean_server.inactive_processes = data.get(
+                            "inactive_processes", 0
+                        )
                         self.lean_server.last_update = time.time()
                         self.lean_server.error = ""
                 except Exception as e:
                     with self._lock:
                         self.lean_server.connected = False
                         self.lean_server.error = str(e)
-        
+
         self._lean_monitor_thread = threading.Thread(target=monitor_lean, daemon=True)
         self._lean_monitor_thread.start()
 
@@ -1089,7 +1165,7 @@ class WebMonitor:
         web_dist = os.path.join(os.path.dirname(__file__), "web", "dist")
         if not os.path.exists(web_dist):
             web_dist = None
-        
+
         app = Flask(__name__, static_folder=web_dist, static_url_path="")
 
         @app.route("/")
@@ -1119,6 +1195,7 @@ class WebMonitor:
         @app.route("/api/logs/<component>/stream")
         def stream_logs(component: str):
             """SSE stream for logs."""
+
             def generate():
                 buffer = _get_log_buffer(component)
                 last_len = 0
@@ -1131,7 +1208,7 @@ class WebMonitor:
                             for entry in new_logs:
                                 yield f"data: {json.dumps(entry)}\n\n"
                     time.sleep(0.5)
-            
+
             return Response(generate(), mimetype="text/event-stream")
 
         @app.route("/api/collections")
@@ -1144,19 +1221,23 @@ class WebMonitor:
             for s in steps:
                 path = self._phase_file(f"collection_{s:05d}", "collected.jsonl")
                 stats = _collection_stats(path)
-                entries.append({
-                    "step": s,
-                    "num_proofs": stats["num_proofs"],
-                    "num_transitions": stats["num_transitions"],
-                })
+                entries.append(
+                    {
+                        "step": s,
+                        "num_proofs": stats["num_proofs"],
+                        "num_transitions": stats["num_transitions"],
+                    }
+                )
                 total_proofs += stats["num_proofs"]
                 total_transitions += stats["num_transitions"]
-            return jsonify({
-                "steps": [e["step"] for e in entries],
-                "entries": entries,
-                "total_proofs": total_proofs,
-                "total_transitions": total_transitions,
-            })
+            return jsonify(
+                {
+                    "steps": [e["step"] for e in entries],
+                    "entries": entries,
+                    "total_proofs": total_proofs,
+                    "total_transitions": total_transitions,
+                }
+            )
 
         @app.route("/api/evals")
         def list_evals():
@@ -1218,7 +1299,9 @@ class WebMonitor:
         @app.route("/api/evals/<int:step>/generated_tactics")
         def get_eval_tactics(step: int):
             return _serve_jsonl_slice(
-                self._phase_file(os.path.join("evals", f"{step:05d}"), "generated_tactics.jsonl"),
+                self._phase_file(
+                    os.path.join("evals", f"{step:05d}"), "generated_tactics.jsonl"
+                ),
                 request.args,
                 "tactics",
             )
@@ -1249,7 +1332,9 @@ class WebMonitor:
                 }
                 phases_src = list(self.phase_events)
                 mode = self.mode
-            payload = _compact_instrumentation(actors_src, phases_src, outcomes_src, mode, since)
+            payload = _compact_instrumentation(
+                actors_src, phases_src, outcomes_src, mode, since
+            )
             return _gzip_json(payload)
 
         @app.route("/api/llm_instrumentation")
@@ -1365,9 +1450,11 @@ class WebMonitor:
                             t = entry.get("type")
                             if t == "event":
                                 rank_events.setdefault(rank, []).extend(
-                                    [entry["start"], entry["end"]])
+                                    [entry["start"], entry["end"]]
+                                )
                                 rank_triggers.setdefault(rank, []).append(
-                                    entry.get("trigger", "unknown"))
+                                    entry.get("trigger", "unknown")
+                                )
                             elif t == "sample":
                                 rank_sample_t.setdefault(rank, []).append(entry["t"])
                                 rank_sample_n.setdefault(rank, []).append(entry["n"])
@@ -1379,11 +1466,13 @@ class WebMonitor:
                                     continue
                                 entry = json.loads(line)
                                 if entry.get("type") == "phase":
-                                    phases.append({
-                                        "name": entry["name"],
-                                        "action": entry["action"],
-                                        "time": entry["time"],
-                                    })
+                                    phases.append(
+                                        {
+                                            "name": entry["name"],
+                                            "action": entry["action"],
+                                            "time": entry["time"],
+                                        }
+                                    )
                 except Exception as e:
                     return jsonify({"error": str(e)}), 500
 
@@ -1399,7 +1488,9 @@ class WebMonitor:
                         last_by_key[key] = pt
                         continue
                     last_by_key[key] = pt
-                    out_phases.append({"name": ph["name"], "action": ph["action"], "t": pt})
+                    out_phases.append(
+                        {"name": ph["name"], "action": ph["action"], "t": pt}
+                    )
 
                 rank_ids = sorted(set(rank_events.keys()) | set(rank_sample_t.keys()))
                 out_ranks: dict[str, dict] = {}
@@ -1465,20 +1556,26 @@ class WebMonitor:
                                 phases.append(entry)
                             elif t == "actor":
                                 aid = str(entry["actor"])
-                                actors.setdefault(aid, []).append({
-                                    "type": entry["event"],
-                                    "start": entry["start"],
-                                    "end": entry["end"],
-                                })
+                                actors.setdefault(aid, []).append(
+                                    {
+                                        "type": entry["event"],
+                                        "start": entry["start"],
+                                        "end": entry["end"],
+                                    }
+                                )
                             elif t == "outcome":
                                 aid = str(entry["actor"])
-                                outcomes.setdefault(aid, []).append({
-                                    "t": entry["t"],
-                                    "kind": entry["kind"],
-                                })
+                                outcomes.setdefault(aid, []).append(
+                                    {
+                                        "t": entry["t"],
+                                        "kind": entry["kind"],
+                                    }
+                                )
                 except Exception as e:
                     return jsonify({"error": str(e)}), 500
-                payload = _compact_instrumentation(actors, phases, outcomes, self.mode, float("-inf"))
+                payload = _compact_instrumentation(
+                    actors, phases, outcomes, self.mode, float("-inf")
+                )
                 cached_body = gzip.compress(
                     json.dumps(payload, separators=(",", ":")).encode("utf-8"),
                     compresslevel=6,
@@ -1667,7 +1764,9 @@ class WebMonitor:
                         "state": a.state,
                         "games_played": a.games_played,
                         "games_solved": a.games_solved,
-                        "current_theorem": a.current_theorem[:60] if a.current_theorem else "",
+                        "current_theorem": a.current_theorem[:60]
+                        if a.current_theorem
+                        else "",
                     }
                     for actor_id, a in self.local_actors.items()
                 },
@@ -1754,7 +1853,9 @@ class WebMonitor:
             self._timeline_file = open(timeline_path, "a")
             if self._inference_timeline_file is not None:
                 self._inference_timeline_file.close()
-            inference_timeline_path = os.path.join(output_dir, "inference_timeline.jsonl")
+            inference_timeline_path = os.path.join(
+                output_dir, "inference_timeline.jsonl"
+            )
             self._inference_timeline_file = open(inference_timeline_path, "a")
 
     def start_collection(self, target_samples: int, num_actors: int):
@@ -1784,7 +1885,9 @@ class WebMonitor:
     def record_batch_wait(self, wait_time: float):
         self.collection.record_wait_time(wait_time)
 
-    def update_collection_stats(self, proofs_attempted: int = 0, proofs_successful: int = 0, expansions: int = 0):
+    def update_collection_stats(
+        self, proofs_attempted: int = 0, proofs_successful: int = 0, expansions: int = 0
+    ):
         """Update collection stats from distributed mode metrics."""
         with self._lock:
             self.collection.proofs_attempted = proofs_attempted
@@ -1792,7 +1895,9 @@ class WebMonitor:
             if expansions > 0:
                 self.collection.expansions = expansions
 
-    def update_training(self, step: int, loss: float, num_tokens: int = 0, lr: float = 0.0):
+    def update_training(
+        self, step: int, loss: float, num_tokens: int = 0, lr: float = 0.0
+    ):
         with self._lock:
             self.phase = "training"
             self.training.step = step
@@ -1800,16 +1905,26 @@ class WebMonitor:
             self.training.num_tokens = num_tokens
             self.training.learning_rate = lr
 
-    def record_eval(self, step: int, dataset: str, success_rate: float, solved: int, total: int, errors: int):
+    def record_eval(
+        self,
+        step: int,
+        dataset: str,
+        success_rate: float,
+        solved: int,
+        total: int,
+        errors: int,
+    ):
         with self._lock:
-            self.eval_history.append(EvalResult(
-                step=step,
-                dataset=dataset,
-                success_rate=success_rate,
-                solved=solved,
-                total=total,
-                errors=errors,
-            ))
+            self.eval_history.append(
+                EvalResult(
+                    step=step,
+                    dataset=dataset,
+                    success_rate=success_rate,
+                    solved=solved,
+                    total=total,
+                    errors=errors,
+                )
+            )
             # Clear eval progress when recording final result
             self.eval_progress = EvalProgress()
 
@@ -1836,14 +1951,19 @@ class WebMonitor:
 
     # --- Local actor updates ---
 
-    def update_local_actor(self, actor_id: int, state: str = "running", 
-                           games_played: int | None = None, games_solved: int | None = None,
-                           current_theorem: str = ""):
+    def update_local_actor(
+        self,
+        actor_id: int,
+        state: str = "running",
+        games_played: int | None = None,
+        games_solved: int | None = None,
+        current_theorem: str = "",
+    ):
         """Update status of a local actor."""
         with self._lock:
             if actor_id not in self.local_actors:
                 self.local_actors[actor_id] = LocalActorStatus(id=actor_id)
-            
+
             actor = self.local_actors[actor_id]
             actor.state = state
             if games_played is not None:
@@ -1905,20 +2025,39 @@ class WebMonitor:
         """
         with self._lock:
             if actor_id not in self.actor_timelines:
-                self.actor_timelines[actor_id] = deque(maxlen=self._max_timeline_events_per_actor)
+                self.actor_timelines[actor_id] = deque(
+                    maxlen=self._max_timeline_events_per_actor
+                )
             buf = self.actor_timelines[actor_id]
             train_intervals = self._train_intervals_locked()
             for ev in events:
-                subranges = (_clip_against(ev.start, ev.end, train_intervals)
-                             if ev.type == "llm" else [(ev.start, ev.end)])
+                subranges = (
+                    _clip_against(ev.start, ev.end, train_intervals)
+                    if ev.type == "llm"
+                    else [(ev.start, ev.end)]
+                )
                 for start, end in subranges:
                     self._instr_seq += 1
-                    d = {"type": ev.type, "start": start, "end": end, "seq": self._instr_seq}
+                    d = {
+                        "type": ev.type,
+                        "start": start,
+                        "end": end,
+                        "seq": self._instr_seq,
+                    }
                     buf.append(d)
                     if self._timeline_file is not None:
                         self._timeline_file.write(
-                            json.dumps({"type": "actor", "actor": actor_id, "event": d["type"],
-                                        "start": d["start"], "end": d["end"]}) + "\n")
+                            json.dumps(
+                                {
+                                    "type": "actor",
+                                    "actor": actor_id,
+                                    "event": d["type"],
+                                    "start": d["start"],
+                                    "end": d["end"],
+                                }
+                            )
+                            + "\n"
+                        )
             if self._timeline_file is not None:
                 self._timeline_file.flush()
 
@@ -1951,14 +2090,24 @@ class WebMonitor:
         """
         with self._lock:
             if actor_id not in self.actor_outcomes:
-                self.actor_outcomes[actor_id] = deque(maxlen=self._max_timeline_events_per_actor)
+                self.actor_outcomes[actor_id] = deque(
+                    maxlen=self._max_timeline_events_per_actor
+                )
             self._instr_seq += 1
             entry = {"t": time.time(), "kind": kind, "seq": self._instr_seq}
             self.actor_outcomes[actor_id].append(entry)
             if self._timeline_file is not None:
-                self._timeline_file.write(json.dumps({
-                    "type": "outcome", "actor": actor_id, "kind": kind, "t": entry["t"],
-                }) + "\n")
+                self._timeline_file.write(
+                    json.dumps(
+                        {
+                            "type": "outcome",
+                            "actor": actor_id,
+                            "kind": kind,
+                            "t": entry["t"],
+                        }
+                    )
+                    + "\n"
+                )
                 self._timeline_file.flush()
 
     def record_phase_event(self, name: str, action: str):
@@ -1973,21 +2122,38 @@ class WebMonitor:
             return
         with self._lock:
             self._instr_seq += 1
-            entry = {"type": "phase", "name": name, "action": action,
-                     "time": time.time(), "seq": self._instr_seq}
+            entry = {
+                "type": "phase",
+                "name": name,
+                "action": action,
+                "time": time.time(),
+                "seq": self._instr_seq,
+            }
             self.phase_events.append(entry)
             if self._timeline_file is not None:
                 # seq is in-memory only; the on-disk log is indexed by
                 # (time, action) which is sufficient for post-hoc replay.
-                file_entry = {"type": "phase", "name": name, "action": action, "time": entry["time"]}
+                file_entry = {
+                    "type": "phase",
+                    "name": name,
+                    "action": action,
+                    "time": entry["time"],
+                }
                 self._timeline_file.write(json.dumps(file_entry) + "\n")
                 self._timeline_file.flush()
 
     # --- GPU updates ---
 
-    def update_gpu(self, gpu_id: int, name: str = "", utilization: float = 0.0,
-                   memory_used: int = 0, memory_total: int = 0,
-                   inference_queue_size: int = 0, avg_wait_time_ms: float = 0.0):
+    def update_gpu(
+        self,
+        gpu_id: int,
+        name: str = "",
+        utilization: float = 0.0,
+        memory_used: int = 0,
+        memory_total: int = 0,
+        inference_queue_size: int = 0,
+        avg_wait_time_ms: float = 0.0,
+    ):
         """Update GPU status."""
         with self._lock:
             # Find or create GPU entry
@@ -1996,11 +2162,11 @@ class WebMonitor:
                 if g.id == gpu_id:
                     gpu = g
                     break
-            
+
             if gpu is None:
                 gpu = GPUStatus(id=gpu_id)
                 self.gpus.append(gpu)
-            
+
             gpu.name = name or gpu.name
             gpu.utilization = utilization
             gpu.memory_used = memory_used
@@ -2027,7 +2193,9 @@ def set_monitor(monitor: WebMonitor):
     _monitor = monitor
 
 
-def create_monitor(num_actors: int = 0, enabled: bool = True, port: int = 5050) -> WebMonitor:
+def create_monitor(
+    num_actors: int = 0, enabled: bool = True, port: int = 5050
+) -> WebMonitor:
     """Create and set a new global monitor."""
     monitor = WebMonitor(num_actors=num_actors, enabled=enabled, port=port)
     set_monitor(monitor)
@@ -2059,8 +2227,14 @@ def run_standalone(run_dir: str, port: int = 5050):
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Launch nanoproof web monitor on a run directory", allow_abbrev=False)
+
+    parser = argparse.ArgumentParser(
+        description="Launch nanoproof web monitor on a run directory",
+        allow_abbrev=False,
+    )
     parser.add_argument("run_dir", help="Path to the RL run output directory")
-    parser.add_argument("--port", type=int, default=5050, help="Port for the web server (default: 5050)")
+    parser.add_argument(
+        "--port", type=int, default=5050, help="Port for the web server (default: 5050)"
+    )
     args = parser.parse_args()
     run_standalone(args.run_dir, args.port)

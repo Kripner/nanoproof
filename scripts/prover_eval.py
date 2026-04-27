@@ -30,12 +30,24 @@ from nanoproof.checkpoints import (
     parse_checkpoint_path,
     save_eval_results,
 )
-from nanoproof.common import active_barrier, autodetect_device_type, broadcast_value, compute_cleanup, compute_init, enable_memory_profiling, print0
+from nanoproof.common import (
+    active_barrier,
+    autodetect_device_type,
+    broadcast_value,
+    compute_cleanup,
+    compute_init,
+    enable_memory_profiling,
+    print0,
+)
 from nanoproof.data.bench import minif2f, proofnet
 from nanoproof.data.bench.common import BenchTheorem
 from nanoproof.data.check_init import read_lean_version, resolve_lean_project
 from nanoproof.data.rl import leanworkbook
-from nanoproof.inference import BlockingTacticModel, TacticModel, compute_max_batch_prompt_tokens
+from nanoproof.inference import (
+    BlockingTacticModel,
+    TacticModel,
+    compute_max_batch_prompt_tokens,
+)
 from nanoproof.prover import ProverWorker
 from nanoproof.inference import setup_distributed_inference
 
@@ -49,15 +61,21 @@ def print_results(results, name, num_simulations):
     print0(f"Solved: {results['solved']}/{results['total']}")
     print0(f"Errors: {results['errors']}/{results['total']}")
 
-    detailed = results.get('detailed_results', [])
+    detailed = results.get("detailed_results", [])
     if detailed:
         total = len(detailed)
-        thresholds = [t for t in [8, 16, 32, 64, 128, 256, 512, 1024, 2048] if t <= num_simulations]
+        thresholds = [
+            t
+            for t in [8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+            if t <= num_simulations
+        ]
         rates = []
         for t in thresholds:
             solved_at_t = sum(
-                1 for item in detailed
-                if item.get('proof_tree') is not None and item.get('num_iterations', 0) <= t
+                1
+                for item in detailed
+                if item.get("proof_tree") is not None
+                and item.get("num_iterations", 0) <= t
             )
             rate = solved_at_t / total if total > 0 else 0.0
             rates.append(f"{t:>3}: {rate:.2%}")
@@ -68,32 +86,70 @@ def print_results(results, name, num_simulations):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate a prover model on theorem proving benchmarks", allow_abbrev=False)
+    parser = argparse.ArgumentParser(
+        description="Evaluate a prover model on theorem proving benchmarks",
+        allow_abbrev=False,
+    )
 
     parser.add_argument("--model-path", type=str, required=True)
-    parser.add_argument("--lean-project", type=str, default=None,
-                        help="Path to the Lean project directory (contains lean-toolchain). The Lean version is read from this file and used to select per-dataset whitelists. Falls back to $LEAN_PROJECT_PATH if unset.")
-    parser.add_argument("--lean-servers", type=str, nargs="+", required=True,
-                        help="Lean server addresses (e.g., 10.10.25.33:8000 10.10.25.34); port defaults to 8000")
-    parser.add_argument("--datasets", type=str, default="minif2f",
-                        help="comma-separated datasets (minif2f, leanworkbook, proofnet)")
+    parser.add_argument(
+        "--lean-project",
+        type=str,
+        default=None,
+        help="Path to the Lean project directory (contains lean-toolchain). The Lean version is read from this file and used to select per-dataset whitelists. Falls back to $LEAN_PROJECT_PATH if unset.",
+    )
+    parser.add_argument(
+        "--lean-servers",
+        type=str,
+        nargs="+",
+        required=True,
+        help="Lean server addresses (e.g., 10.10.25.33:8000 10.10.25.34); port defaults to 8000",
+    )
+    parser.add_argument(
+        "--datasets",
+        type=str,
+        default="minif2f",
+        help="comma-separated datasets (minif2f, leanworkbook, proofnet)",
+    )
     parser.add_argument("--split", type=str, default="valid", choices=["valid", "test"])
     parser.add_argument("--max-theorems", type=int, default=None)
     parser.add_argument("--num-simulations", type=int, default=512)
     parser.add_argument("--num-sampled-tactics", type=int, default=6)
     parser.add_argument("--batch-time-limit", type=float, default=0.5)
-    parser.add_argument("--batch-max-gen-samples", type=int, default=None,
-                        help="max generation samples per batch (default: num_actors * num_sampled_tactics)")
-    parser.add_argument("--batch-max-prompt-tokens", type=int, default=None,
-                        help="max estimated prompt tokens per batch (default: auto from VRAM)")
-    parser.add_argument("--memory-profile", type=str, default=None,
-                        help="if set, record CUDA memory history and dump snapshot to this dir on first OOM")
+    parser.add_argument(
+        "--batch-max-gen-samples",
+        type=int,
+        default=None,
+        help="max generation samples per batch (default: num_actors * num_sampled_tactics)",
+    )
+    parser.add_argument(
+        "--batch-max-prompt-tokens",
+        type=int,
+        default=None,
+        help="max estimated prompt tokens per batch (default: auto from VRAM)",
+    )
+    parser.add_argument(
+        "--memory-profile",
+        type=str,
+        default=None,
+        help="if set, record CUDA memory history and dump snapshot to this dir on first OOM",
+    )
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--force", action="store_true", help="overwrite existing results")
-    parser.add_argument("--continue", dest="continue_eval", action="store_true",
-                        help="retry only theorems that failed with errors")
+    parser.add_argument(
+        "--force", action="store_true", help="overwrite existing results"
+    )
+    parser.add_argument(
+        "--continue",
+        dest="continue_eval",
+        action="store_true",
+        help="retry only theorems that failed with errors",
+    )
     parser.add_argument("--inference-server-port", type=int, default=5000)
-    parser.add_argument("--verbose", action="store_true", help="enable debug logging for inference and proving")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="enable debug logging for inference and proving",
+    )
     args = parser.parse_args()
 
     if args.verbose:
@@ -119,7 +175,9 @@ def main():
     master_process = ddp_rank == 0
 
     # Check for existing results early (before loading model)
-    checkpoint_info = CheckpointInfo(*parse_checkpoint_path(args.model_path), seed=args.seed)
+    checkpoint_info = CheckpointInfo(
+        *parse_checkpoint_path(args.model_path), seed=args.seed
+    )
 
     should_exit = False
     continue_data = {}
@@ -150,7 +208,9 @@ def main():
                     ]
                     continue_data[dataset_name] = (successful, error_theorems)
                     if error_theorems:
-                        print0(f"Found {len(errors)} error entries to retry in {dataset_name}")
+                        print0(
+                            f"Found {len(errors)} error entries to retry in {dataset_name}"
+                        )
         elif existing_results and not args.force:
             print0("Evaluation results already exist:")
             for _, path in existing_results:
@@ -172,10 +232,18 @@ def main():
         enable_memory_profiling(args.memory_profile)
 
     # Load model + set up inference
-    print0(f"Loading checkpoint: {checkpoint_info.checkpoint_dir}, step={checkpoint_info.step}")
-    inner_tactic_model = TacticModel.create(num_samples=args.num_sampled_tactics, model_path=args.model_path)
+    print0(
+        f"Loading checkpoint: {checkpoint_info.checkpoint_dir}, step={checkpoint_info.step}"
+    )
+    inner_tactic_model = TacticModel.create(
+        num_samples=args.num_sampled_tactics, model_path=args.model_path
+    )
     # Defer max_gen_samples default until we know num_actors
-    tactic_model = BlockingTacticModel(inner_model=inner_tactic_model, timeout_seconds=args.batch_time_limit, max_gen_samples=None)
+    tactic_model = BlockingTacticModel(
+        inner_model=inner_tactic_model,
+        timeout_seconds=args.batch_time_limit,
+        max_gen_samples=None,
+    )
 
     balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
     if balancer:
@@ -186,15 +254,21 @@ def main():
             prover.num_actors * args.num_sampled_tactics / ddp_world_size
         )
         tactic_model.max_gen_samples = max_gen_samples
-        print0(f"Batch max gen samples: {max_gen_samples} ({prover.num_actors} actors * {args.num_sampled_tactics} samples / {ddp_world_size} ranks)")
+        print0(
+            f"Batch max gen samples: {max_gen_samples} ({prover.num_actors} actors * {args.num_sampled_tactics} samples / {ddp_world_size} ranks)"
+        )
     else:
         prover = None
 
     # Prompt token limit for inference batches (prevents OOM on long prompts)
     max_prompt_tokens = args.batch_max_prompt_tokens
     if max_prompt_tokens is None:
-        max_prompt_tokens = compute_max_batch_prompt_tokens(inner_tactic_model.network.config, args.num_sampled_tactics, device)
-        print0(f"Batch max prompt tokens: {max_prompt_tokens} (auto from {torch.cuda.get_device_properties(device).total_memory / 1024**3:.1f} GiB VRAM, {torch.cuda.memory_allocated(device) / 1024**3:.1f} GiB used)")
+        max_prompt_tokens = compute_max_batch_prompt_tokens(
+            inner_tactic_model.network.config, args.num_sampled_tactics, device
+        )
+        print0(
+            f"Batch max prompt tokens: {max_prompt_tokens} (auto from {torch.cuda.get_device_properties(device).total_memory / 1024**3:.1f} GiB VRAM, {torch.cuda.memory_allocated(device) / 1024**3:.1f} GiB used)"
+        )
     else:
         print0(f"Batch max prompt tokens: {max_prompt_tokens} (manual)")
     tactic_model.max_batch_prompt_tokens = max_prompt_tokens
@@ -202,7 +276,9 @@ def main():
     # Broadcast from master to worker ranks so their Flask servers can batch correctly.
     if ddp:
         tactic_model.max_gen_samples = broadcast_value(tactic_model.max_gen_samples)
-        tactic_model.max_batch_prompt_tokens = broadcast_value(tactic_model.max_batch_prompt_tokens)
+        tactic_model.max_batch_prompt_tokens = broadcast_value(
+            tactic_model.max_batch_prompt_tokens
+        )
 
     active_barrier("inference_ready")
 
@@ -212,6 +288,7 @@ def main():
         tactic_model.shutdown()
         if prover is not None:
             prover.close()
+
     atexit.register(_cleanup)
 
     # Load theorems
@@ -223,16 +300,20 @@ def main():
     else:
         args.lean_project = resolve_lean_project(args.lean_project)
         lean_version = read_lean_version(args.lean_project)
-        print0(f"Lean version: {lean_version} (from {args.lean_project}/lean-toolchain)")
+        print0(
+            f"Lean version: {lean_version} (from {args.lean_project}/lean-toolchain)"
+        )
         if "minif2f" in datasets:
             dataset_theorems["minif2f"] = minif2f.list_theorems(split=args.split)
         if "leanworkbook" in datasets:
-            dataset_theorems["leanworkbook"] = leanworkbook.list_theorems(split="valid", lean_version=lean_version)
+            dataset_theorems["leanworkbook"] = leanworkbook.list_theorems(
+                split="valid", lean_version=lean_version
+            )
         if "proofnet" in datasets:
             dataset_theorems["proofnet"] = proofnet.list_theorems(split=args.split)
         if args.max_theorems:
             for name in dataset_theorems:
-                dataset_theorems[name] = dataset_theorems[name][:args.max_theorems]
+                dataset_theorems[name] = dataset_theorems[name][: args.max_theorems]
 
     print0(f"Evaluating with {args.num_simulations} MCTS simulations")
 
@@ -259,14 +340,21 @@ def main():
                     if snap != printed:
                         printed[:] = snap
                         s, f, ok, err = snap
-                        print0(f"  started={s}/{total}  finished={f}/{total}  solved={ok}  errors={err}")
+                        print0(
+                            f"  started={s}/{total}  finished={f}/{total}  solved={ok}  errors={err}"
+                        )
 
             printer = threading.Thread(target=printer_loop, daemon=True)
             printer.start()
 
             dataset_start = time.monotonic()
-            results = prover.evaluate(theorems, dataset_name=dataset_name, num_simulations=args.num_simulations,
-                                      progress_callback=progress_callback, verify_timeout=30000)
+            results = prover.evaluate(
+                theorems,
+                dataset_name=dataset_name,
+                num_simulations=args.num_simulations,
+                progress_callback=progress_callback,
+                verify_timeout=30000,
+            )
             dataset_elapsed = time.monotonic() - dataset_start
             done.set()
             printer.join()
@@ -274,8 +362,17 @@ def main():
             print_results(results, dataset_name, args.num_simulations)
             print0(f"Time for {dataset_name}: {dataset_elapsed:.1f}s")
 
-            prepend = continue_data.get(dataset_name, (None, None))[0] if args.continue_eval else None
-            save_eval_results(checkpoint_info, dataset_name + split_suffix, results, prepend_entries=prepend)
+            prepend = (
+                continue_data.get(dataset_name, (None, None))[0]
+                if args.continue_eval
+                else None
+            )
+            save_eval_results(
+                checkpoint_info,
+                dataset_name + split_suffix,
+                results,
+                prepend_entries=prepend,
+            )
 
         total_elapsed = time.monotonic() - eval_start
         print0(f"\nTotal evaluation time: {total_elapsed:.1f}s")

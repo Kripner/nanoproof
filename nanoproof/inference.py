@@ -37,8 +37,6 @@ from nanoproof.tokenizer import HuggingFaceTokenizer
 from nanoproof.model import Transformer
 
 
-
-
 class BusyError(Exception):
     """Raised by BlockingTacticModel when a batch is in progress or the model is paused.
 
@@ -66,6 +64,7 @@ class TacticModel:
     The main API is `sample_tactic` which returns both tactics AND value for a state,
     since these are always needed together during MCTS.
     """
+
     network: Transformer
     tokenizer: HuggingFaceTokenizer
     engine: Engine
@@ -78,8 +77,9 @@ class TacticModel:
 
     def sample_tactic(self, state: State) -> ValueOrError[TacticAndValue]:
         """Sample tactics and predict value for a state. Returns (tactics, value)."""
-        assert len(state) == 1, \
+        assert len(state) == 1, (
             f"expected single branch in state when generating tactic, got {len(state)} - choose one goal first"
+        )
         return self.sample_tactic_from_str(str(state[0].state).strip())
 
     def sample_tactic_from_str(self, state_str: str) -> ValueOrError[TacticAndValue]:
@@ -109,7 +109,9 @@ class TacticModel:
             return [bos], True
         return tokens, False
 
-    def sample_tactic_from_str_batch(self, state_strs: list[str]) -> list[ValueOrError[TacticAndValue]]:
+    def sample_tactic_from_str_batch(
+        self, state_strs: list[str]
+    ) -> list[ValueOrError[TacticAndValue]]:
         """
         Batched tactic generation and value prediction from state strings.
 
@@ -128,9 +130,15 @@ class TacticModel:
                 too_long_indices.add(idx)
 
         # Generate tactics
-        seed = torch.randint(torch.iinfo(torch.int32).max, (1,), device=device, generator=self.rng).item()
+        seed = torch.randint(
+            torch.iinfo(torch.int32).max, (1,), device=device, generator=self.rng
+        ).item()
         sample_toks_batch, masks_batch = self.engine.generate_batch(
-            tactic_prompts, num_samples=self.num_samples, min_tokens=1, max_tokens=64, seed=seed
+            tactic_prompts,
+            num_samples=self.num_samples,
+            min_tokens=1,
+            max_tokens=64,
+            seed=seed,
         )
 
         # Decode tactics
@@ -142,10 +150,12 @@ class TacticModel:
             tactics = []
             for sample_idx in range(self.num_samples):
                 tactic_toks = [
-                    token for token, mask in zip(
+                    token
+                    for token, mask in zip(
                         sample_toks_batch[prompt_idx][sample_idx],
-                        masks_batch[prompt_idx][sample_idx]
-                    ) if mask == 1
+                        masks_batch[prompt_idx][sample_idx],
+                    )
+                    if mask == 1
                 ]
                 tactic = self.tokenizer.decode(tactic_toks)
                 if "sorry" in tactic or "admit" in tactic:
@@ -168,9 +178,13 @@ class TacticModel:
         value_prompts = []
         for idx, state_str in enumerate(state_strs):
             if idx in too_long_indices:
-                value_prompts.append([self.tokenizer.get_bos_token_id(), value_delim_tok])
+                value_prompts.append(
+                    [self.tokenizer.get_bos_token_id(), value_delim_tok]
+                )
             else:
-                tokens = self.tokenizer(state_str + "\n<|value|>", prepend=self.tokenizer.get_bos_token_id())
+                tokens = self.tokenizer(
+                    state_str + "\n<|value|>", prepend=self.tokenizer.get_bos_token_id()
+                )
                 value_prompts.append(tokens)
 
         # Predict values
@@ -179,12 +193,16 @@ class TacticModel:
         )
 
         # Get logits at the generated position
-        value_logits = torch.stack([value_logits[i][0][-1] for i in range(len(value_prompts))])  # (B, V)
+        value_logits = torch.stack(
+            [value_logits[i][0][-1] for i in range(len(value_prompts))]
+        )  # (B, V)
 
         # Extract bin logits and compute soft predictions
         bin_logits = value_logits[:, bin_token_ids].float()  # (B, 64)
         bin_probs = torch.softmax(bin_logits, dim=-1)  # (B, 64)
-        bin_values = torch.arange(1, GLOBAL_CONFIG.num_value_bins + 1, dtype=bin_probs.dtype, device=device)
+        bin_values = torch.arange(
+            1, GLOBAL_CONFIG.num_value_bins + 1, dtype=bin_probs.dtype, device=device
+        )
         values = (bin_probs * bin_values).sum(dim=-1)  # (B,)
         values_list = values.tolist()
 
@@ -192,9 +210,13 @@ class TacticModel:
         results = []
         for idx in range(len(state_strs)):
             if idx in too_long_indices:
-                results.append(ValueOrError.from_error("State too long for model's rotary cache"))
+                results.append(
+                    ValueOrError.from_error("State too long for model's rotary cache")
+                )
             else:
-                results.append(ValueOrError.from_success((tactics_results[idx], values_list[idx])))
+                results.append(
+                    ValueOrError.from_success((tactics_results[idx], values_list[idx]))
+                )
         return results
 
     def shutdown(self):
@@ -216,7 +238,9 @@ class TacticModel:
         return cls(model, tokenizer, engine, num_samples=num_samples, seed=seed)
 
 
-def compute_max_batch_prompt_tokens(model_config, num_samples: int, device: torch.device) -> int:
+def compute_max_batch_prompt_tokens(
+    model_config, num_samples: int, device: torch.device
+) -> int:
     """Compute max_batch_prompt_tokens from available VRAM.
 
     The main memory consumer during batched inference is the KV cache, allocated as:
@@ -235,7 +259,9 @@ def compute_max_batch_prompt_tokens(model_config, num_samples: int, device: torc
     free_driver, _ = torch.cuda.mem_get_info(device)
     # free_driver excludes PyTorch's caching-allocator reserved-but-unused
     # blocks, which are available for new allocations.  Add them back.
-    reserved_unused = torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
+    reserved_unused = torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(
+        device
+    )
     # Use 65% of remaining VRAM for the KV cache.  The remaining 35% covers
     # per-prompt prefill KV caches, forward-pass activations, allocator
     # fragmentation, and NCCL communication buffers that may appear after
@@ -243,7 +269,9 @@ def compute_max_batch_prompt_tokens(model_config, num_samples: int, device: torc
     available = (free_driver + reserved_unused) * 0.65
     dtype_bytes = 2  # bf16/fp16
     head_dim = model_config.n_embd // model_config.n_head
-    kv_bytes_per_token = 2 * model_config.n_layer * model_config.n_kv_head * head_dim * dtype_bytes
+    kv_bytes_per_token = (
+        2 * model_config.n_layer * model_config.n_kv_head * head_dim * dtype_bytes
+    )
     max_tokens = int(available / (num_samples * kv_bytes_per_token))
     return max(1, max_tokens)
 
@@ -259,7 +287,13 @@ class BlockingTacticModel:
     Each request generates both tactics and value prediction together.
     """
 
-    def __init__(self, inner_model: TacticModel, timeout_seconds: float, max_gen_samples: int | None, max_batch_prompt_tokens: int | None = None):
+    def __init__(
+        self,
+        inner_model: TacticModel,
+        timeout_seconds: float,
+        max_gen_samples: int | None,
+        max_batch_prompt_tokens: int | None = None,
+    ):
         self.inner_model = inner_model
         self.timeout_seconds = timeout_seconds
         self.max_gen_samples = max_gen_samples
@@ -288,7 +322,9 @@ class BlockingTacticModel:
         self._llm_samples: deque[dict] = deque(maxlen=100000)
         self._llm_seq = 0
         self._llm_stop = threading.Event()
-        self._llm_sampler_thread = threading.Thread(target=self._llm_sampler_loop, daemon=True)
+        self._llm_sampler_thread = threading.Thread(
+            target=self._llm_sampler_loop, daemon=True
+        )
         self._llm_sampler_thread.start()
 
     @property
@@ -382,7 +418,9 @@ class BlockingTacticModel:
         results = self.sample_tactic_from_str_batch([state_str])
         return results[0]
 
-    def sample_tactic_from_str_batch(self, state_strs: list[str]) -> list[ValueOrError[TacticAndValue]]:
+    def sample_tactic_from_str_batch(
+        self, state_strs: list[str]
+    ) -> list[ValueOrError[TacticAndValue]]:
         """
         Thread-safe batch tactic+value generation. All states are queued together
         and will be processed in the same or consecutive GPU batches.
@@ -416,7 +454,10 @@ class BlockingTacticModel:
                 raise BusyError()
 
             # Create events and slots for all states
-            entries = [(s, tc, threading.Event(), []) for s, tc in zip(state_strs, token_counts)]
+            entries = [
+                (s, tc, threading.Event(), [])
+                for s, tc in zip(state_strs, token_counts)
+            ]
 
             # Add all to pending queue
             if self._first_request_time is None and entries:
@@ -432,7 +473,10 @@ class BlockingTacticModel:
         for _, _, event, _ in entries:
             self._wait_for_result(event)
 
-        return [slot[0] if slot else ValueOrError.from_error("No result") for _, _, _, slot in entries]
+        return [
+            slot[0] if slot else ValueOrError.from_error("No result")
+            for _, _, _, slot in entries
+        ]
 
     def _wait_for_result(self, event: threading.Event):
         """Wait for a result, triggering batch processing if needed.
@@ -463,11 +507,13 @@ class BlockingTacticModel:
         while not self._llm_stop.wait(timeout=0.2):
             with self._lock:
                 self._llm_seq += 1
-                self._llm_samples.append({
-                    "t": time.time(),
-                    "n": len(self._pending),
-                    "seq": self._llm_seq,
-                })
+                self._llm_samples.append(
+                    {
+                        "t": time.time(),
+                        "n": len(self._pending),
+                        "seq": self._llm_seq,
+                    }
+                )
 
     def get_llm_timeline(self, since: float = float("-inf")) -> dict:
         """Return inference intervals + queue-depth samples with seq > since.
@@ -482,11 +528,13 @@ class BlockingTacticModel:
             for ev in self._llm_events:
                 if ev["seq"] <= since:
                     continue
-                events.append({
-                    "start": ev["start"],
-                    "end": ev["end"],
-                    "trigger": ev.get("trigger", "unknown"),
-                })
+                events.append(
+                    {
+                        "start": ev["start"],
+                        "end": ev["end"],
+                        "trigger": ev.get("trigger", "unknown"),
+                    }
+                )
                 if ev["seq"] > max_cursor:
                     max_cursor = ev["seq"]
             for s in self._llm_samples:
@@ -519,7 +567,7 @@ class BlockingTacticModel:
             max_items = self.max_gen_samples // self.inner_model.num_samples
         else:
             max_items = len(self._pending)
-        batch = self._pending[:max(1, max_items)]
+        batch = self._pending[: max(1, max_items)]
         samples_cap_cut_info: str | None = None
         if len(batch) < pending_len_at_start:
             samples_cap_cut_info = f"samples_cap ({pending_len_at_start} -> {len(batch)} items, limit {self.max_gen_samples} samples)"
@@ -543,7 +591,7 @@ class BlockingTacticModel:
                 token_cut_info = f"tokens ({len(batch)} -> {cut} items, limit {self.max_batch_prompt_tokens} tokens)"
             batch = batch[:cut]
 
-        remaining = self._pending[len(batch):]
+        remaining = self._pending[len(batch) :]
 
         self._pending = remaining
         self._first_request_time = time.time() if remaining else None
@@ -583,8 +631,13 @@ class BlockingTacticModel:
 
         except Exception as e:
             log(f"Batch #{batch_num}: FAILED - {e}", component="BlockingTacticModel")
-            log_actionable_error("BlockingTacticModel", str(e),
-                                batch=batch_num, states=len(batch), max_tokens=max_tc)
+            log_actionable_error(
+                "BlockingTacticModel",
+                str(e),
+                batch=batch_num,
+                states=len(batch),
+                max_tokens=max_tc,
+            )
             # Note: OOM snapshots are dumped deeper in Engine.generate so the
             # snapshot captures the state *before* the finally-block cleanup.
             for _, _, event, slot in batch:
@@ -594,18 +647,21 @@ class BlockingTacticModel:
             self._lock.acquire()
             self._batch_in_progress = False
             self._llm_seq += 1
-            self._llm_events.append({
-                "start": inference_start_time,
-                "end": time.time(),
-                "seq": self._llm_seq,
-                "trigger": trigger_category,
-            })
+            self._llm_events.append(
+                {
+                    "start": inference_start_time,
+                    "end": time.time(),
+                    "seq": self._llm_seq,
+                    "trigger": trigger_category,
+                }
+            )
             self._batch_ready.notify_all()
 
 
 # -----------------------------------------------------------------------------
 # Remote Tactic Model (for multi-GPU inference via localhost HTTP)
 # -----------------------------------------------------------------------------
+
 
 class RemoteTacticModel:
     """
@@ -616,7 +672,9 @@ class RemoteTacticModel:
     talks to it over localhost HTTP.
     """
 
-    def __init__(self, server_address: str, timeout: float = 1800.0, max_pool_size: int = 512):
+    def __init__(
+        self, server_address: str, timeout: float = 1800.0, max_pool_size: int = 512
+    ):
         # Timeout is deliberately large: during training, BlockingTacticModel
         # on each rank is paused and holds pending sample_tactic requests
         # without responding. The HTTP connection must outlast the whole
@@ -631,8 +689,8 @@ class RemoteTacticModel:
             pool_maxsize=max_pool_size,
             max_retries=0,  # We handle retries ourselves
         )
-        self._session.mount('http://', adapter)
-        self._session.mount('https://', adapter)
+        self._session.mount("http://", adapter)
+        self._session.mount("https://", adapter)
         self._consecutive_failures = 0
         self._max_failures = 10
         self._last_error_log_time = 0
@@ -641,8 +699,7 @@ class RemoteTacticModel:
 
     def sample_tactic(self, state) -> ValueOrError[TacticAndValue]:
         """Sample tactics and predict value for a single state."""
-        assert len(state) == 1, \
-            f"expected single branch in state, got {len(state)}"
+        assert len(state) == 1, f"expected single branch in state, got {len(state)}"
         state_str = str(state[0].state).strip()
         return self.sample_tactic_from_str(state_str)
 
@@ -651,7 +708,9 @@ class RemoteTacticModel:
         results = self.sample_tactic_from_str_batch([state_str])
         return results[0]
 
-    def sample_tactic_from_str_batch(self, state_strs: list[str]) -> list[ValueOrError[TacticAndValue]]:
+    def sample_tactic_from_str_batch(
+        self, state_strs: list[str]
+    ) -> list[ValueOrError[TacticAndValue]]:
         """Sample tactics and predict values for multiple state strings.
 
         503 busy responses are surfaced as an error on every returned slot
@@ -663,7 +722,9 @@ class RemoteTacticModel:
             return [ValueOrError.from_error("Busy") for _ in state_strs]
         return result
 
-    def try_sample_tactic_from_str_batch(self, state_strs: list[str]) -> list[ValueOrError[TacticAndValue]] | None:
+    def try_sample_tactic_from_str_batch(
+        self, state_strs: list[str]
+    ) -> list[ValueOrError[TacticAndValue]] | None:
         """Same as ``sample_tactic_from_str_batch`` but returns ``None`` on a
         503 busy response. Used by ``InferenceBalancer`` to advance its
         pointer to the next backend without treating busy as an error.
@@ -675,7 +736,7 @@ class RemoteTacticModel:
             response = self._session.post(
                 f"http://{self.server_address}/generate",
                 json={"states": state_strs},
-                timeout=self.timeout
+                timeout=self.timeout,
             )
             if response.status_code == 503:
                 # Server is running a batch or paused. Not a failure - the
@@ -700,10 +761,14 @@ class RemoteTacticModel:
                     results.append(ValueOrError.from_success((tactics, value)))
             return results
         except http_requests.exceptions.Timeout:
-            self._record_failure(f"Timeout calling inference server at {self.server_address} (timeout={self.timeout})")
+            self._record_failure(
+                f"Timeout calling inference server at {self.server_address} (timeout={self.timeout})"
+            )
             return [ValueOrError.from_error("Timeout") for _ in state_strs]
         except http_requests.exceptions.RequestException as e:
-            self._record_failure(f"Error calling inference server at {self.server_address}: {e}")
+            self._record_failure(
+                f"Error calling inference server at {self.server_address}: {e}"
+            )
             return [ValueOrError.from_error(str(e)) for _ in state_strs]
 
     def _record_failure(self, message: str):
@@ -714,7 +779,9 @@ class RemoteTacticModel:
 
             now = time.time()
             if now - self._last_error_log_time >= self._error_log_interval:
-                print(f"[RemoteTacticModel] {message} (failures: {failures}/{self._max_failures})")
+                print(
+                    f"[RemoteTacticModel] {message} (failures: {failures}/{self._max_failures})"
+                )
                 self._last_error_log_time = now
 
             if failures >= self._max_failures:
@@ -738,6 +805,7 @@ class RemoteTacticModel:
 # -----------------------------------------------------------------------------
 # Inference Balancer (load-balances across multiple GPUs)
 # -----------------------------------------------------------------------------
+
 
 class InferenceBalancer:
     """Load-balances inference across multiple GPU backends via HTTP.
@@ -794,14 +862,15 @@ class InferenceBalancer:
                 self._pause_cv.wait()
 
     def sample_tactic(self, state: State) -> ValueOrError[TacticAndValue]:
-        assert len(state) == 1, \
-            f"expected single branch in state, got {len(state)}"
+        assert len(state) == 1, f"expected single branch in state, got {len(state)}"
         return self.sample_tactic_from_str(str(state[0].state).strip())
 
     def sample_tactic_from_str(self, state_str: str) -> ValueOrError[TacticAndValue]:
         return self.sample_tactic_from_str_batch([state_str])[0]
 
-    def sample_tactic_from_str_batch(self, state_strs: list[str]) -> list[ValueOrError[TacticAndValue]]:
+    def sample_tactic_from_str_batch(
+        self, state_strs: list[str]
+    ) -> list[ValueOrError[TacticAndValue]]:
         if not state_strs:
             return []
         n = len(self._backends)
@@ -811,7 +880,9 @@ class InferenceBalancer:
                 start = self._pointer
             for offset in range(n):
                 idx = (start + offset) % n
-                result = self._backends[idx].try_sample_tactic_from_str_batch(state_strs)
+                result = self._backends[idx].try_sample_tactic_from_str_batch(
+                    state_strs
+                )
                 if result is not None:
                     with self._lock:
                         self._pointer = idx
@@ -823,12 +894,13 @@ class InferenceBalancer:
 # Flask Server (one per GPU rank for multi-GPU inference)
 # -----------------------------------------------------------------------------
 
+
 def create_blocking_model_app(model: BlockingTacticModel, server_id: str = ""):
     """Create Flask app for a single BlockingTacticModel (one per GPU rank)."""
     app = Flask(__name__)
 
     # Disable Flask request logging to reduce spam
-    log_flask = logging.getLogger('werkzeug')
+    log_flask = logging.getLogger("werkzeug")
     log_flask.setLevel(logging.ERROR)
 
     @app.route("/health", methods=["GET"])
@@ -851,12 +923,16 @@ def create_blocking_model_app(model: BlockingTacticModel, server_id: str = ""):
             results = model.sample_tactic_from_str_batch(states)
         except BusyError:
             return jsonify({"busy": True}), 503
-        return jsonify({
-            "results": [
-                {"tactics": r.value[0], "value": r.value[1]} if r.is_success() else {"error": r.error}
-                for r in results
-            ]
-        })
+        return jsonify(
+            {
+                "results": [
+                    {"tactics": r.value[0], "value": r.value[1]}
+                    if r.is_success()
+                    else {"error": r.error}
+                    for r in results
+                ]
+            }
+        )
 
     @app.route("/llm_timeline", methods=["GET"])
     def llm_timeline():
@@ -874,7 +950,9 @@ def create_blocking_model_app(model: BlockingTacticModel, server_id: str = ""):
     return app
 
 
-def start_inference_server(model: BlockingTacticModel, port: int, host: str = "0.0.0.0"):
+def start_inference_server(
+    model: BlockingTacticModel, port: int, host: str = "0.0.0.0"
+):
     """
     Start inference server for a BlockingTacticModel in a background thread.
 
@@ -885,7 +963,7 @@ def start_inference_server(model: BlockingTacticModel, port: int, host: str = "0
     app = create_blocking_model_app(model, server_id=server_id)
 
     def run_server():
-        log_flask = logging.getLogger('werkzeug')
+        log_flask = logging.getLogger("werkzeug")
         log_flask.setLevel(logging.ERROR)
         app.run(host=host, port=port, threaded=True)
 
@@ -902,8 +980,10 @@ def start_inference_server(model: BlockingTacticModel, port: int, host: str = "0
         except http_requests.ConnectionError:
             continue
     else:
-        raise RuntimeError(f"Inference server failed to start on port {port}. "
-                           f"Port may be in use - kill the old process or use a different --inference-server-port.")
+        raise RuntimeError(
+            f"Inference server failed to start on port {port}. "
+            f"Port may be in use - kill the old process or use a different --inference-server-port."
+        )
 
     log0(f"Inference server started on port {port}", component="InferenceServer")
     return thread
@@ -912,6 +992,7 @@ def start_inference_server(model: BlockingTacticModel, port: int, host: str = "0
 # -----------------------------------------------------------------------------
 # Distributed inference setup
 # -----------------------------------------------------------------------------
+
 
 def setup_distributed_inference(
     tactic_model: BlockingTacticModel,
@@ -937,8 +1018,7 @@ def setup_distributed_inference(
         return None
 
     all_endpoints = [
-        f"127.0.0.1:{inference_server_port + r}"
-        for r in range(world_size)
+        f"127.0.0.1:{inference_server_port + r}" for r in range(world_size)
     ]
     return InferenceBalancer(all_endpoints)
 
@@ -947,18 +1027,29 @@ def setup_distributed_inference(
 # Interactive testing (python -m nanoproof.inference)
 # -----------------------------------------------------------------------------
 
+
 def _main():
     """
     Interactive tactic model: loads a model and lets you type tactic states
     to see generated tactics and value predictions.
     """
-    parser = argparse.ArgumentParser(description="Interactive tactic model", allow_abbrev=False)
-    parser.add_argument("--model-path", required=True, help="path to model_NNNNNN.pt (relative to models/ or absolute)")
-    parser.add_argument("--num-samples", type=int, default=6, help="Tactics to sample per state")
+    parser = argparse.ArgumentParser(
+        description="Interactive tactic model", allow_abbrev=False
+    )
+    parser.add_argument(
+        "--model-path",
+        required=True,
+        help="path to model_NNNNNN.pt (relative to models/ or absolute)",
+    )
+    parser.add_argument(
+        "--num-samples", type=int, default=6, help="Tactics to sample per state"
+    )
     args = parser.parse_args()
 
     print(f"Loading model from {args.model_path}...")
-    tactic_model = TacticModel.create(num_samples=args.num_samples, model_path=args.model_path)
+    tactic_model = TacticModel.create(
+        num_samples=args.num_samples, model_path=args.model_path
+    )
     print(f"Model loaded. Device: {tactic_model.network.get_device()}")
     print()
 
@@ -978,7 +1069,7 @@ def _main():
         if result.is_success():
             tactics, value = result.value
             for i, tactic in enumerate(tactics):
-                print(f"  [{i+1}] {tactic}")
+                print(f"  [{i + 1}] {tactic}")
             print(f"  Value: {value:.2f}")
         else:
             print(f"  Error: {result.error}")

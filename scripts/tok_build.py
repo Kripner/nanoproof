@@ -1,6 +1,7 @@
 """
 Build the nanoproof tokenizer: GPT-2 BPE + extra special tokens for Lean / math.
 """
+
 import os
 
 import torch
@@ -36,7 +37,7 @@ for token_id in range(vocab_size):
         token_bytes.append(0)
     else:
         token_bytes.append(len(token_str.encode("utf-8")))
-token_bytes = torch.tensor(token_bytes, dtype=torch.int32, device='cpu')
+token_bytes = torch.tensor(token_bytes, dtype=torch.int32, device="cpu")
 token_bytes_path = os.path.join(tokenizer_dir, "token_bytes.pt")
 with open(token_bytes_path, "wb") as f:
     torch.save(token_bytes, f)

@@ -16,9 +16,7 @@ from tqdm import tqdm
 # (see data/whitelists/). Each RL dataset's download_dataset() fetches all of
 # these alongside the source data so users don't need to regenerate them.
 WHITELIST_VERSIONS = ("v4.27.0",)
-WHITELIST_BASE_URL = (
-    "https://raw.githubusercontent.com/Kripner/nanoproof/refs/heads/main/data/whitelists"
-)
+WHITELIST_BASE_URL = "https://raw.githubusercontent.com/Kripner/nanoproof/refs/heads/main/data/whitelists"
 
 
 def download_file(url: str, dest_path: str, desc: str | None = None) -> None:
@@ -40,7 +38,13 @@ def download_file(url: str, dest_path: str, desc: str | None = None) -> None:
         response.raise_for_status()
         total_size = int(response.headers.get("content-length", 0))
         with open(temp_path, "wb") as f:
-            with tqdm(total=total_size, unit="B", unit_scale=True, unit_divisor=1024, desc=desc) as pbar:
+            with tqdm(
+                total=total_size,
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                desc=desc,
+            ) as pbar:
                 for chunk in response.iter_content(chunk_size=1024 * 1024):
                     if chunk:
                         f.write(chunk)

@@ -67,6 +67,7 @@ def resolve_lean_project(value: str | None) -> str:
 # Whitelist I/O
 # -----------------------------------------------------------------------------
 
+
 def whitelist_path(dataset_file: str, lean_version: str) -> str:
     return f"{dataset_file}.whitelist.{lean_version}.json"
 
@@ -158,6 +159,7 @@ def filter_by_whitelist(
 # check-init runner
 # -----------------------------------------------------------------------------
 
+
 def _split_addr(lean_server: str) -> tuple[str, int]:
     if ":" in lean_server:
         host, port_str = lean_server.rsplit(":", 1)
@@ -170,7 +172,9 @@ def _query_max_processes(host: str, port: int) -> int:
         status = json.loads(resp.read())
     n = int(status.get("max_processes", 0))
     if n == 0:
-        raise ConnectionError(f"Lean server {host}:{port} reports 0 available processes")
+        raise ConnectionError(
+            f"Lean server {host}:{port} reports 0 available processes"
+        )
     return n
 
 
@@ -184,7 +188,11 @@ def _check_one(client: LeanClient, theorem: BenchTheorem) -> tuple[bool, str | N
             example = theorem_to_example(theorem.source)
             init_branch = env.proof_from_sorry(example)
             if not init_branch.is_success():
-                err = init_branch.error if hasattr(init_branch, "error") else "unknown error"
+                err = (
+                    init_branch.error
+                    if hasattr(init_branch, "error")
+                    else "unknown error"
+                )
                 return False, str(err)
             return True, None
     except Exception as e:
@@ -259,6 +267,7 @@ def run_check_init(
 # Shared CLI entrypoint
 # -----------------------------------------------------------------------------
 
+
 def run_check_init_cli(
     theorems: list[BenchTheorem],
     dataset_file: str,
@@ -291,9 +300,13 @@ def run_check_init_cli(
     if save:
         print(f"Output: {out_path}")
     else:
-        print("Benchmark check-init: not writing a whitelist (benchmarks run every theorem).")
+        print(
+            "Benchmark check-init: not writing a whitelist (benchmarks run every theorem)."
+        )
 
-    results = run_check_init(theorems, lean_server, num_workers=num_workers, verbose=verbose)
+    results = run_check_init(
+        theorems, lean_server, num_workers=num_workers, verbose=verbose
+    )
 
     num_passing = sum(1 for v in results.values() if v)
     num_failing = len(results) - num_passing
@@ -311,14 +324,17 @@ def run_check_init_cli(
         )
         if num_failing > 0:
             bar = "!" * 72
-            print(f"\n{bar}\nWARNING: {num_failing} benchmark theorems failed to initialize "
-                  f"under Lean {lean_version}.\nThese will be counted as unsolved during eval; "
-                  f"fix the sources or the toolchain.\n{bar}\n")
+            print(
+                f"\n{bar}\nWARNING: {num_failing} benchmark theorems failed to initialize "
+                f"under Lean {lean_version}.\nThese will be counted as unsolved during eval; "
+                f"fix the sources or the toolchain.\n{bar}\n"
+            )
 
 
 # -----------------------------------------------------------------------------
 # Shared argparse wiring
 # -----------------------------------------------------------------------------
+
 
 def add_check_init_args(parser, default_jobs: int) -> None:
     """Add the standard ``check-init`` flags to an argparse subparser."""
@@ -342,5 +358,9 @@ def add_check_init_args(parser, default_jobs: int) -> None:
         default=default_jobs,
         help="Number of parallel workers. 1 = serial; 0 = query /status and use max_processes.",
     )
-    parser.add_argument("--limit", type=int, default=None, help="Only check the first N theorems")
-    parser.add_argument("--verbose", action="store_true", help="Log each theorem's result")
+    parser.add_argument(
+        "--limit", type=int, default=None, help="Only check the first N theorems"
+    )
+    parser.add_argument(
+        "--verbose", action="store_true", help="Log each theorem's result"
+    )

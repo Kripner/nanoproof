@@ -27,6 +27,7 @@ FILE_PATH = os.path.join(DATA_DIR, FILENAME)
 
 _SPLITS = ("valid", "test")
 
+
 def download_dataset() -> None:
     """Download proofnet.jsonl from the ProofNet GitHub repo."""
     download_file(SOURCE_URL, FILE_PATH, desc=FILENAME)
@@ -68,20 +69,27 @@ def list_theorems(split: str) -> list[BenchTheorem]:
         elif stmt.endswith(":="):
             source = stmt + " by\n  sorry"
         else:
-            raise ValueError(f"unexpected suffix in formal_statement for {r.get('name')!r}: {stmt!r}")
+            raise ValueError(
+                f"unexpected suffix in formal_statement for {r.get('name')!r}: {stmt!r}"
+            )
         preamble = _strip_imports(r["header"])
         if preamble:
             source = preamble + "\n\n" + source
         theorems.append(BenchTheorem(source=source, name=r.get("name")))
-    assert all(t.source.count("sorry") == 1 for t in theorems), "Found a theorem with no or multiple `sorry`."
+    assert all(t.source.count("sorry") == 1 for t in theorems), (
+        "Found a theorem with no or multiple `sorry`."
+    )
     return theorems
 
 
 # -----------------------------------------------------------------------------
 # CLI: download / show / stats / check-init
 
+
 def _main():
-    parser = argparse.ArgumentParser(description="ProofNet benchmark dataset", allow_abbrev=False)
+    parser = argparse.ArgumentParser(
+        description="ProofNet benchmark dataset", allow_abbrev=False
+    )
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("download", help=f"Download {FILENAME} from GitHub")
     show = sub.add_parser("show", help="Print the first N theorems from a split")
@@ -103,7 +111,7 @@ def _main():
     if args.action == "download":
         download_dataset()
     elif args.action == "show":
-        for thm in list_theorems(args.split)[:args.n]:
+        for thm in list_theorems(args.split)[: args.n]:
             print(f"# {thm.name}")
             print(thm.source)
             print("-" * 80)

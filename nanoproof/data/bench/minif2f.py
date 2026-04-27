@@ -18,7 +18,9 @@ from nanoproof.data.check_init import add_check_init_args, run_check_init_cli
 from nanoproof.data.rl.common import download_file
 
 DATA_DIR = os.path.join(get_base_dir(), "data", "minif2f")
-BASE_URL = "https://raw.githubusercontent.com/google-deepmind/miniF2F/refs/heads/main/MiniF2F/"
+BASE_URL = (
+    "https://raw.githubusercontent.com/google-deepmind/miniF2F/refs/heads/main/MiniF2F/"
+)
 
 # The split name -> source filename mapping. Both files contain ``sorry``-stub
 # theorems, except for two test entries that ship with proofs (patched below).
@@ -33,7 +35,9 @@ def download_dataset() -> None:
 
 
 def _split_file(split: str) -> str:
-    assert split in _SPLIT_FILES, f"Invalid split: {split!r}. Must be one of {sorted(_SPLIT_FILES)}"
+    assert split in _SPLIT_FILES, (
+        f"Invalid split: {split!r}. Must be one of {sorted(_SPLIT_FILES)}"
+    )
     return os.path.join(DATA_DIR, _SPLIT_FILES[split])
 
 
@@ -74,17 +78,24 @@ def list_theorems(split: str) -> list[BenchTheorem]:
         elif in_theorem:
             theorem_lines.append(line)
 
-    assert all(s.count("sorry") == 1 for s in sources), "Found a theorem with no or multiple `sorry`."
+    assert all(s.count("sorry") == 1 for s in sources), (
+        "Found a theorem with no or multiple `sorry`."
+    )
     expected_count = 256 if split == "valid" else 244
-    assert len(sources) == expected_count, f"minif2f: expected {expected_count} theorems, got {len(sources)}"
+    assert len(sources) == expected_count, (
+        f"minif2f: expected {expected_count} theorems, got {len(sources)}"
+    )
     return [BenchTheorem(source=MINIF2F_PREAMBLE + s) for s in sources]
 
 
 # -----------------------------------------------------------------------------
 # CLI: download / show / stats / check-init
 
+
 def _main():
-    parser = argparse.ArgumentParser(description="miniF2F benchmark dataset", allow_abbrev=False)
+    parser = argparse.ArgumentParser(
+        description="miniF2F benchmark dataset", allow_abbrev=False
+    )
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("download", help="Download Valid.lean and Test.lean from GitHub")
     show = sub.add_parser("show", help="Print the first N theorems from a split")
@@ -103,7 +114,7 @@ def _main():
     if args.action == "download":
         download_dataset()
     elif args.action == "show":
-        for thm in list_theorems(args.split)[:args.n]:
+        for thm in list_theorems(args.split)[: args.n]:
             print(thm.source)
             print("-" * 80)
     elif args.action == "stats":

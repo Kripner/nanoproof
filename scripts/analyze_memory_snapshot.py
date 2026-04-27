@@ -66,7 +66,9 @@ def analyze(path):
     total_reserved = sum(seg.get("total_size", 0) for seg in segments)
 
     print(f"Snapshot: {path}")
-    print(f"  Segments (reserved by allocator): {len(segments)}, total {fmt_bytes(total_reserved)}")
+    print(
+        f"  Segments (reserved by allocator): {len(segments)}, total {fmt_bytes(total_reserved)}"
+    )
     print(f"  Live blocks: {len(live_blocks)}, total {fmt_bytes(total_live)}")
     print(f"  Free-in-pool blocks: {len(free_blocks)}, total {fmt_bytes(total_free)}")
     print()
@@ -83,8 +85,12 @@ def analyze(path):
     ranked = sorted(groups.items(), key=lambda kv: -kv[1]["size"])
 
     print("=" * 100)
-    print(f"LIVE ALLOCATIONS grouped by stack trace (top frames), ordered by total bytes")
-    print(f"(Each group = distinct allocation site. Total = what's keeping memory alive right now.)")
+    print(
+        f"LIVE ALLOCATIONS grouped by stack trace (top frames), ordered by total bytes"
+    )
+    print(
+        f"(Each group = distinct allocation site. Total = what's keeping memory alive right now.)"
+    )
     print("=" * 100)
     for i, (key, info) in enumerate(ranked[:25]):
         pct = 100 * info["size"] / total_live if total_live else 0
@@ -92,7 +98,9 @@ def analyze(path):
         sample = ", ".join(fmt_bytes(s) for s in sizes[:5])
         if len(sizes) > 5:
             sample += f", ... ({len(sizes) - 5} more)"
-        print(f"\n#{i+1}  {fmt_bytes(info['size'])} ({pct:.1f}%)  in {info['count']} allocations")
+        print(
+            f"\n#{i + 1}  {fmt_bytes(info['size'])} ({pct:.1f}%)  in {info['count']} allocations"
+        )
         print(f"    sizes: {sample}")
         print(f"    stack:")
         print(key)
@@ -104,7 +112,7 @@ def analyze(path):
     print("=" * 100)
     live_blocks.sort(key=lambda x: -x[0])
     for i, (size, frames) in enumerate(live_blocks[:10]):
-        print(f"\n#{i+1}  {fmt_bytes(size)}")
+        print(f"\n#{i + 1}  {fmt_bytes(size)}")
         print(frames_to_key(frames, depth=8))
 
 

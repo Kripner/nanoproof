@@ -18,9 +18,126 @@ SPECIAL_TOKENS = [
     "<|value|>",
     *[f"<|bin_{i:02d}|>" for i in range(1, GLOBAL_CONFIG.num_value_bins + 1)],
     # these occur at least 1000 times in Mathlib but do not have dedicated tokens in GPT-2
-    "ˢ", "ˣ", "Γ", "Δ", "Λ", "Π", "Σ", "Φ", "Ω", "δ", "ζ", "η", "θ", "φ", "χ", "ψ", "ϕ", "ᵈ", "ᵐ", "ᵒ", "ᵖ", "ᵢ", "ᵣ", "ᵥ", "ᶜ", "ᶠ", "‖", "‹", "›", "⁅", "⁆", "⁰", "⁻", "₀", "₁", "₂", "₃", "₄", "₊", "ₐ", "ₑ", "ₗ", "ₘ", "ₙ", "ₚ", "ₛ", "ₜ", "ℂ", "ℕ", "ℚ", "ℝ", "ℤ", "ℱ", "←", "↔", "↦", "↪", "⇑", "∀", "∂", "∃", "∅", "∈", "∉", "∏", "∑", "∘", "∞", "∣", "∧", "∨", "∩", "∪", "∫", "≃", "≅", "≠", "≡", "≤", "≥", "≪", "≫", "⊆", "⊓", "⊔", "⊕", "⊗", "⊢", "⊤", "⊥", "⋂", "⋃", "⋆", "⋙", "▷", "▸", "◁", "⟦", "⟧", "⟨", "⟩", "⟪", "⟫", "⟶", "⥤", "⦃", "⦄", "⧸", "⨅", "⨆", "𝒜", "𝒰", "𝓘", "𝓝", "𝔖", "𝕜", "𝟙",
+    "ˢ",
+    "ˣ",
+    "Γ",
+    "Δ",
+    "Λ",
+    "Π",
+    "Σ",
+    "Φ",
+    "Ω",
+    "δ",
+    "ζ",
+    "η",
+    "θ",
+    "φ",
+    "χ",
+    "ψ",
+    "ϕ",
+    "ᵈ",
+    "ᵐ",
+    "ᵒ",
+    "ᵖ",
+    "ᵢ",
+    "ᵣ",
+    "ᵥ",
+    "ᶜ",
+    "ᶠ",
+    "‖",
+    "‹",
+    "›",
+    "⁅",
+    "⁆",
+    "⁰",
+    "⁻",
+    "₀",
+    "₁",
+    "₂",
+    "₃",
+    "₄",
+    "₊",
+    "ₐ",
+    "ₑ",
+    "ₗ",
+    "ₘ",
+    "ₙ",
+    "ₚ",
+    "ₛ",
+    "ₜ",
+    "ℂ",
+    "ℕ",
+    "ℚ",
+    "ℝ",
+    "ℤ",
+    "ℱ",
+    "←",
+    "↔",
+    "↦",
+    "↪",
+    "⇑",
+    "∀",
+    "∂",
+    "∃",
+    "∅",
+    "∈",
+    "∉",
+    "∏",
+    "∑",
+    "∘",
+    "∞",
+    "∣",
+    "∧",
+    "∨",
+    "∩",
+    "∪",
+    "∫",
+    "≃",
+    "≅",
+    "≠",
+    "≡",
+    "≤",
+    "≥",
+    "≪",
+    "≫",
+    "⊆",
+    "⊓",
+    "⊔",
+    "⊕",
+    "⊗",
+    "⊢",
+    "⊤",
+    "⊥",
+    "⋂",
+    "⋃",
+    "⋆",
+    "⋙",
+    "▷",
+    "▸",
+    "◁",
+    "⟦",
+    "⟧",
+    "⟨",
+    "⟩",
+    "⟪",
+    "⟫",
+    "⟶",
+    "⥤",
+    "⦃",
+    "⦄",
+    "⧸",
+    "⨅",
+    "⨆",
+    "𝒜",
+    "𝒰",
+    "𝓘",
+    "𝓝",
+    "𝔖",
+    "𝕜",
+    "𝟙",
     # these are left out because they are already in GPT2 tokenizer (although weirdly not reported in tok_show): "¬", "¹"
 ]
+
 
 class HuggingFaceTokenizer:
     """Light wrapper around HuggingFace Tokenizer for some utilities"""
@@ -58,11 +175,15 @@ class HuggingFaceTokenizer:
         assert isinstance(text, str)
         ids = []
         if prepend is not None:
-            prepend_id = prepend if isinstance(prepend, int) else self.encode_special(prepend)
+            prepend_id = (
+                prepend if isinstance(prepend, int) else self.encode_special(prepend)
+            )
             ids.append(prepend_id)
         ids.extend(self.tokenizer.encode(text, add_special_tokens=False).ids)
         if append is not None:
-            append_id = append if isinstance(append, int) else self.encode_special(append)
+            append_id = (
+                append if isinstance(append, int) else self.encode_special(append)
+            )
             ids.append(append_id)
         return ids
 
@@ -100,16 +221,21 @@ class HuggingFaceTokenizer:
         print(f"Saved tokenizer to {tokenizer_path}")
 
     def get_value_token_ids(self) -> list[int]:
-        return [self.encode_special(f"<|bin_{i:02d}|>") for i in range(1, GLOBAL_CONFIG.num_value_bins + 1)]
+        return [
+            self.encode_special(f"<|bin_{i:02d}|>")
+            for i in range(1, GLOBAL_CONFIG.num_value_bins + 1)
+        ]
 
     def get_value_bins(self) -> list[int]:
         return list(range(1, GLOBAL_CONFIG.num_value_bins + 1))
+
 
 def value_to_token_ids(tokenizer, value: int) -> list[int]:
     """Convert a value (1..num_value_bins) to a single bin token ID."""
     assert 1 <= value <= GLOBAL_CONFIG.num_value_bins
     bin_token = f"<|bin_{value:02d}|>"
     return [tokenizer.encode_special(bin_token)]
+
 
 def token_ids_to_value(tokenizer, token_ids: list[int]) -> int | None:
     """Convert a bin token ID back to a value (1..num_value_bins). Returns None if not a valid bin token."""
@@ -122,17 +248,21 @@ def token_ids_to_value(tokenizer, token_ids: list[int]) -> int | None:
             return i
     return None
 
+
 def get_tokenizer():
     # return HuggingFaceTokenizer.from_pretrained("gpt2")
     base_dir = get_base_dir()
     tokenizer_dir = os.path.join(base_dir, "tokenizer")
     return HuggingFaceTokenizer.from_directory(tokenizer_dir)
 
+
 def get_token_bytes(device="cpu"):
     base_dir = get_base_dir()
     tokenizer_dir = os.path.join(base_dir, "tokenizer")
     token_bytes_path = os.path.join(tokenizer_dir, "token_bytes.pt")
-    assert os.path.exists(token_bytes_path), f"Token bytes not found at {token_bytes_path}? It gets written by tok_build.py"
+    assert os.path.exists(token_bytes_path), (
+        f"Token bytes not found at {token_bytes_path}? It gets written by tok_build.py"
+    )
     with open(token_bytes_path, "rb") as f:
         token_bytes = torch.load(f, map_location=device)
     return token_bytes

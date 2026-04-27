@@ -21,7 +21,11 @@ from nanoproof.data.check_init import (
     run_check_init_cli,
     whitelist_path,
 )
-from nanoproof.data.rl.common import download_file, download_whitelists, shuffle_train_valid_split
+from nanoproof.data.rl.common import (
+    download_file,
+    download_whitelists,
+    shuffle_train_valid_split,
+)
 
 DATA_DIR = os.path.join(get_base_dir(), "data", "leanworkbook")
 JSON_PATH = os.path.join(DATA_DIR, "lean_workbook.json")
@@ -68,8 +72,11 @@ def _all_theorems() -> list[BenchTheorem]:
 # -----------------------------------------------------------------------------
 # CLI: download / show / stats / check-init
 
+
 def _main():
-    parser = argparse.ArgumentParser(description="Lean-Workbook dataset", allow_abbrev=False)
+    parser = argparse.ArgumentParser(
+        description="Lean-Workbook dataset", allow_abbrev=False
+    )
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("download", help="Download the source JSON from HuggingFace")
     show = sub.add_parser("show", help="Print the first N theorems from a split")
@@ -86,7 +93,7 @@ def _main():
     if args.action == "download":
         download_dataset()
     elif args.action == "show":
-        for thm in list_theorems(args.split)[:args.n]:
+        for thm in list_theorems(args.split)[: args.n]:
             print(thm.source)
             print("-" * 80)
     elif args.action == "stats":

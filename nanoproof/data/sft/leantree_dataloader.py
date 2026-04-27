@@ -47,18 +47,20 @@ def rl_data_generator(generator, batch_size, device="cuda"):
 
     def collate(batch):
         nrows = len(batch)
-        ncols = max(len(ids) for ids, _ in batch) - 1  # seq of n creates inputs/targets of n-1
+        ncols = (
+            max(len(ids) for ids, _ in batch) - 1
+        )  # seq of n creates inputs/targets of n-1
         inputs = torch.full((nrows, ncols), pad_token_id, dtype=torch.long)
         targets = torch.full((nrows, ncols), -1, dtype=torch.long)  # -1 is ignore index
         for i, (ids, mask) in enumerate(batch):
             n = len(ids)
             ids_tensor = torch.tensor(ids, dtype=torch.long)
-            inputs[i, :n - 1] = ids_tensor[:-1]
+            inputs[i, : n - 1] = ids_tensor[:-1]
             row_targets = ids_tensor[1:]
             # mask[1:] omits the mask for the BOS token, which is never a target atm so it's ok
             mask_tensor = torch.tensor(mask[1:], dtype=torch.long)
             row_targets[mask_tensor == 0] = -1  # mask out targets where mask is 0
-            targets[i, :n - 1] = row_targets
+            targets[i, : n - 1] = row_targets
         return inputs.to(device), targets.to(device)
 
     batch = []
@@ -81,15 +83,19 @@ def rl_data_generator(generator, batch_size, device="cuda"):
             continue
         assert len(state_toks) + 1 + len(value_toks) <= GLOBAL_CONFIG.max_seq_len
 
-        batch.append((
-            state_toks + [tactic_delim_tok] + tactic_toks,
-            [0] * (len(state_toks) + 1) + [1] * len(tactic_toks),
-        ))
+        batch.append(
+            (
+                state_toks + [tactic_delim_tok] + tactic_toks,
+                [0] * (len(state_toks) + 1) + [1] * len(tactic_toks),
+            )
+        )
         batch_sources.append(source)
-        batch.append((
-            state_toks + [value_delim_tok] + value_toks,
-            [0] * (len(state_toks) + 1) + [1] * len(value_toks),
-        ))
+        batch.append(
+            (
+                state_toks + [value_delim_tok] + value_toks,
+                [0] * (len(state_toks) + 1) + [1] * len(value_toks),
+            )
+        )
         batch_sources.append(source)
 
         if len(batch) == batch_size:
@@ -116,9 +122,14 @@ def sft_data_generator(dataset, batch_size, device="cuda"):
                 if i + ddp_world_size >= len(dataset):
                     progress["last_step"] = True
                 yield dataset[i]
-            print(f"Warning: Rank {ddp_rank} will loop again on leantree ({len(dataset)=}).", flush=True)
+            print(
+                f"Warning: Rank {ddp_rank} will loop again on leantree ({len(dataset)=}).",
+                flush=True,
+            )
 
-    for inputs, targets, _sources in rl_data_generator(stream_triples(), batch_size, device):
+    for inputs, targets, _sources in rl_data_generator(
+        stream_triples(), batch_size, device
+    ):
         yield inputs, targets, progress["approx"], progress["last_step"]
 
 
@@ -128,7 +139,9 @@ def sft_data_generator(dataset, batch_size, device="cuda"):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Inspect SFT/RL tokenized batches from leantree", allow_abbrev=False)
+    parser = argparse.ArgumentParser(
+        description="Inspect SFT/RL tokenized batches from leantree", allow_abbrev=False
+    )
     parser.add_argument("--split", choices=["train", "valid"], default="train")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-batches", type=int, default=10)
@@ -138,7 +151,8 @@ if __name__ == "__main__":
     dataset = list(leantree_transitions(split=args.split))
     tokenizer = get_tokenizer()
     for inputs, targets, approx_progress, last_step in islice(
-        sft_data_generator(dataset, batch_size=args.batch_size, device="cpu"), args.num_batches
+        sft_data_generator(dataset, batch_size=args.batch_size, device="cpu"),
+        args.num_batches,
     ):
         for i in range(inputs.size(0)):
             print(f"Input {i}:")

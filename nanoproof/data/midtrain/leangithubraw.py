@@ -37,7 +37,15 @@ BASE_DIR = get_base_dir()
 DATA_DIR = os.path.join(BASE_DIR, "data", "leangithubraw")
 
 _LICENSE_RE = re.compile(r"^(license|licence|copying)([._-].*)?$", re.IGNORECASE)
-_LICENSE_SKIP_DIRS = {".git", ".lake", "node_modules", "build", "_build", "target", "dist"}
+_LICENSE_SKIP_DIRS = {
+    ".git",
+    ".lake",
+    "node_modules",
+    "build",
+    "_build",
+    "target",
+    "dist",
+}
 
 
 def _find_license_files(repo_path, max_depth=3):
@@ -66,7 +74,9 @@ def _find_license_files(repo_path, max_depth=3):
         if rel_depth >= max_depth:
             dirs[:] = []
             continue
-        dirs[:] = [d for d in dirs if d not in _LICENSE_SKIP_DIRS and not d.startswith(".")]
+        dirs[:] = [
+            d for d in dirs if d not in _LICENSE_SKIP_DIRS and not d.startswith(".")
+        ]
         for name in files:
             if _LICENSE_RE.match(name):
                 abs_path = os.path.join(root, name)
@@ -109,17 +119,21 @@ def _build_dataset():
     Builds the dataset by cloning repos listed in leangithub_urls.txt and reading .lean files.
     """
     output_dir = DATA_DIR
-    
+
     os.makedirs(output_dir, exist_ok=True)
-    
+
     if not os.path.exists(URLS_FILE):
         raise FileNotFoundError(f"URLs file not found at {URLS_FILE}")
-        
+
     with open(URLS_FILE, "r") as f:
-        urls = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
-    
+        urls = [
+            line.strip()
+            for line in f
+            if line.strip() and not line.strip().startswith("#")
+        ]
+
     print(f"Found {len(urls)} repositories to process.")
-    
+
     repos_dir = os.path.join(DATA_DIR, "repos")
     licenses_dir = os.path.join(DATA_DIR, "licenses")
     os.makedirs(repos_dir, exist_ok=True)
@@ -134,11 +148,13 @@ def _build_dataset():
 
     pbar = tqdm(urls, desc="Processing repositories")
     for repo_url in pbar:
-        repo_name = repo_url.split('/')[-1].replace('.git', '')
+        repo_name = repo_url.split("/")[-1].replace(".git", "")
         repo_parquet_path = os.path.join(output_dir, f"repo_{repo_name}.parquet")
         repo_license_dir = os.path.join(licenses_dir, repo_name)
         parquet_cached = os.path.exists(repo_parquet_path)
-        license_cached = os.path.isdir(repo_license_dir) and bool(os.listdir(repo_license_dir))
+        license_cached = os.path.isdir(repo_license_dir) and bool(
+            os.listdir(repo_license_dir)
+        )
 
         if parquet_cached and license_cached:
             parquet_files.append(repo_parquet_path)
@@ -165,7 +181,7 @@ def _build_dataset():
             cwd=repo_path,
             capture_output=True,
             text=True,
-            check=True
+            check=True,
         )
         commit_hash = result.stdout.strip()
 
@@ -174,7 +190,7 @@ def _build_dataset():
 
         if not parquet_cached:
             repo_data = []
-            base_url = repo_url[:-4] if repo_url.endswith('.git') else repo_url
+            base_url = repo_url[:-4] if repo_url.endswith(".git") else repo_url
             for root, _, files in os.walk(repo_path):
                 for file in files:
                     if not file.endswith(".lean"):
@@ -186,18 +202,22 @@ def _build_dataset():
                         content_bytes = f.read()
                     text = content_bytes.decode("utf-8")
                     full_url = f"{base_url}/blob/{commit_hash}/{rel_path}"
-                    repo_data.append({
-                        "text": text,
-                        "url": full_url,
-                        "commit": commit_hash,
-                    })
+                    repo_data.append(
+                        {
+                            "text": text,
+                            "url": full_url,
+                            "commit": commit_hash,
+                        }
+                    )
 
                     total_bytes += len(content_bytes)
                     total_chars += len(text)
                     total_files += 1
 
                     mb = total_bytes / (1024 * 1024)
-                    pbar.set_postfix_str(f"{repo_name}, total: {mb:.2f} MB, {total_files} files")
+                    pbar.set_postfix_str(
+                        f"{repo_name}, total: {mb:.2f} MB, {total_files} files"
+                    )
 
             if repo_data:
                 df_repo = pd.DataFrame(repo_data)
@@ -223,7 +243,7 @@ def _build_dataset():
     for pf in tqdm(parquet_files):
         tables.append(pq.read_table(pf))
     combined_table = pa.concat_tables(tables)
-    
+
     # sanity check: count characters
     # total_chars_pre = combined_table.to_pandas()["text"].str.len().sum()
     # print(f"Total characters before shuffle: {total_chars_pre:,}")
@@ -240,6 +260,7 @@ def _build_dataset():
     # 1024 group size for efficient loading during training
     pq.write_table(combined_table, combined_output_file, row_group_size=1024)
     print(f"Dataset saved to: {combined_output_file}")
+
 
 def _publish_dataset(repo_id):
     """Uploads the dataset to Hugging Face Hub."""
@@ -262,7 +283,7 @@ def _publish_dataset(repo_id):
             repo_id=repo_id,
             repo_type="dataset",
             path_in_repo=".",
-            ignore_patterns=["*.lock", "*.tmp"]
+            ignore_patterns=["*.lock", "*.tmp"],
         )
         api.upload_file(
             path_or_fileobj=README_FILE,
@@ -280,30 +301,34 @@ def _publish_dataset(repo_id):
     except Exception as e:
         print(f"Error uploading dataset: {e}")
 
+
 def download_dataset(repo_id="Kripi/Lean-Github-Raw"):
     """Downloads the dataset from Hugging Face Hub."""
     output_dir = DATA_DIR
-        
+
     os.makedirs(output_dir, exist_ok=True)
-    
+
     print(f"Downloading dataset from {repo_id} to {output_dir}...")
     snapshot_download(
         repo_id=repo_id,
         repo_type="dataset",
         local_dir=output_dir,
         local_dir_use_symlinks=False,
-        ignore_patterns=["*.lock", "*.tmp"]
+        ignore_patterns=["*.lock", "*.tmp"],
     )
     print("Download complete.")
+
 
 def _show_dataset(split="train", B=4, T=512, offset=0, num_batches=10):
     """Show the first N batches from the dataset."""
     print(f"Loading dataset (split={split})...")
     tokenizer = get_tokenizer()
-    
+
     try:
         dataloader = leangithubraw_batches(B=B, T=T, split=split, device="cpu")
-        for batch_idx, batch in enumerate(islice(dataloader, offset, offset + num_batches)):
+        for batch_idx, batch in enumerate(
+            islice(dataloader, offset, offset + num_batches)
+        ):
             if len(batch) == 4:
                 inputs, targets, approx_progress, last_step = batch
             else:
@@ -316,19 +341,23 @@ def _show_dataset(split="train", B=4, T=512, offset=0, num_batches=10):
             print(f"  Targets shape: {targets.shape}")
             print(f"  Approx progress: {approx_progress}")
             print(f"  Last step: {last_step}")
-            
+
             for i in range(min(2, inputs.size(0))):  # Show first 2 samples per batch
                 print(f"\n  Sample {i}:")
-                print(f"    Input tokens: {inputs[i][:50].tolist()}...")  # First 50 tokens
+                print(
+                    f"    Input tokens: {inputs[i][:50].tolist()}..."
+                )  # First 50 tokens
                 print(f"    Input text (first 200 chars):")
                 decoded = tokenizer.decode(inputs[i].tolist())
                 print(f"      {decoded[:200]}...")
-                
-                print(f"    Target tokens: {targets[i][:50].tolist()}...")  # First 50 tokens
+
+                print(
+                    f"    Target tokens: {targets[i][:50].tolist()}..."
+                )  # First 50 tokens
                 print(f"    Target text (first 200 chars):")
                 decoded_target = tokenizer.decode(targets[i].tolist())
                 print(f"      {decoded_target[:200]}...")
-            
+
             print("-" * 100)
     except StopIteration:
         print("Dataset exhausted before reaching requested number of batches.")
@@ -336,34 +365,41 @@ def _show_dataset(split="train", B=4, T=512, offset=0, num_batches=10):
         print(f"Error showing dataset: {e}")
         raise
 
+
 def _show_whole_dataset(split="train", B=32, T=768):
     print(f"Iterating through dataset (split={split}, B={B}, T={T})...")
-    
+
     dataloader = leangithubraw_batches(B=B, T=T, split=split)
     batch_count = 0
     first_last_step = None
-    
+
     for i, batch in enumerate(dataloader):
         if split == "train":
             inputs, targets, approx_progress, last_step = batch
-            print(f"Batch {i:05d}: inputs.shape={inputs.shape}, targets.shape={targets.shape}, approx_progress={approx_progress}, last_step={last_step}")
+            print(
+                f"Batch {i:05d}: inputs.shape={inputs.shape}, targets.shape={targets.shape}, approx_progress={approx_progress}, last_step={last_step}"
+            )
         else:
             inputs, targets = batch
-            print(f"Batch {i:05d}: inputs.shape={inputs.shape}, targets.shape={targets.shape}")
-        
+            print(
+                f"Batch {i:05d}: inputs.shape={inputs.shape}, targets.shape={targets.shape}"
+            )
+
         batch_count += 1
-        
+
         if last_step and first_last_step is None:
             print(f"\nTotal batches: {batch_count}")
             first_last_step = i
         if first_last_step is not None and i - first_last_step >= 100:
             break
-    
 
-def leangithubraw_batches(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device="cuda"):
+
+def leangithubraw_batches(
+    B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device="cuda"
+):
     """
     Create batches for unsupervised training from the leangithubraw parquet file.
-    
+
     Args:
         B: Batch size
         T: Sequence length (tokens per sample)
@@ -386,14 +422,20 @@ def leangithubraw_batches(B, T, split, tokenizer_threads=4, tokenizer_batch_size
 
     parquet_path = os.path.join(DATA_DIR, "leangithubraw.parquet")
     if not os.path.exists(parquet_path):
-        raise FileNotFoundError(f"Parquet file not found at {parquet_path}. Build it or download it first.")
+        raise FileNotFoundError(
+            f"Parquet file not found at {parquet_path}. Build it or download it first."
+        )
     pf = pq.ParquetFile(parquet_path)
 
     def document_batches():
         # last 4 are validation, rest is train
         num_groups = pf.num_row_groups
         assert num_groups > 10
-        group_indices = list(range(num_groups - 4) if split == "train" else range(num_groups - 4, num_groups))
+        group_indices = list(
+            range(num_groups - 4)
+            if split == "train"
+            else range(num_groups - 4, num_groups)
+        )
 
         random.Random(0).shuffle(group_indices)
 
@@ -401,7 +443,10 @@ def leangithubraw_batches(B, T, split, tokenizer_threads=4, tokenizer_batch_size
 
         time.sleep(random.random())
         group_sizes = [pf.metadata.row_group(idx).num_rows for idx in group_indices]
-        print(f"{ddp_rank=} {ddp_world_size=} {len(group_indices)=} {group_indices=} {group_sizes=}", flush=True)
+        print(
+            f"{ddp_rank=} {ddp_world_size=} {len(group_indices)=} {group_indices=} {group_sizes=}",
+            flush=True,
+        )
 
         last_step = False
         while True:
@@ -410,13 +455,27 @@ def leangithubraw_batches(B, T, split, tokenizer_threads=4, tokenizer_batch_size
                 samples = group.column("text").to_pylist()
                 # batches for tokenizer
                 for offset in range(0, len(samples), tokenizer_batch_size):
-                    last_step = last_step or (i == len(group_indices) - 1 and offset + tokenizer_batch_size >= len(samples))
-                    approx_progress = (i + offset / len(samples)) / len(group_indices) if not last_step else 1.0
-                    yield samples[offset:offset+tokenizer_batch_size], approx_progress, last_step
-            print(f"Warning: Rank {ddp_rank} will loop again on Lean-Github-Raw ({split=}).", flush=True)
+                    last_step = last_step or (
+                        i == len(group_indices) - 1
+                        and offset + tokenizer_batch_size >= len(samples)
+                    )
+                    approx_progress = (
+                        (i + offset / len(samples)) / len(group_indices)
+                        if not last_step
+                        else 1.0
+                    )
+                    yield (
+                        samples[offset : offset + tokenizer_batch_size],
+                        approx_progress,
+                        last_step,
+                    )
+            print(
+                f"Warning: Rank {ddp_rank} will loop again on Lean-Github-Raw ({split=}).",
+                flush=True,
+            )
 
     batches = document_batches()
-    
+
     needed_tokens = B * T + 1  # +1 because we also need the target at the last token
     token_buffer = deque()  # we stream tokens on the right and pop from the left
 
@@ -432,25 +491,32 @@ def leangithubraw_batches(B, T, split, tokenizer_threads=4, tokenizer_batch_size
             token_lists = tokenizer.encode(doc_batch, prepend=bos_token)
             for tokens in token_lists:
                 token_buffer.extend(tokens)
-        
+
         if len(token_buffer) < needed_tokens:
             break  # drop last
-        
+
         tokens = [token_buffer.popleft() for _ in range(needed_tokens)]
         use_cuda_optimizations = device == "cuda"
-        scratch = torch.tensor(tokens, dtype=torch.long, pin_memory=use_cuda_optimizations)
-        
+        scratch = torch.tensor(
+            tokens, dtype=torch.long, pin_memory=use_cuda_optimizations
+        )
+
         inputs_cpu = scratch[:-1]
         targets_cpu = scratch[1:]
-        
+
         # reshape to 2D and move to device async
-        inputs = inputs_cpu.view(B, T).to(device=device, non_blocking=use_cuda_optimizations)
-        targets = targets_cpu.view(B, T).to(device=device, non_blocking=use_cuda_optimizations)
+        inputs = inputs_cpu.view(B, T).to(
+            device=device, non_blocking=use_cuda_optimizations
+        )
+        targets = targets_cpu.view(B, T).to(
+            device=device, non_blocking=use_cuda_optimizations
+        )
 
         if split == "train":
             yield inputs, targets, approx_progress, last_step
         else:
             yield inputs, targets
+
 
 def iter_texts_batched(split, url_whitelist=None):
     """
@@ -461,10 +527,12 @@ def iter_texts_batched(split, url_whitelist=None):
     assert split in ("train", "valid"), f"Invalid split: {split!r}"
     parquet_path = os.path.join(DATA_DIR, "leangithubraw.parquet")
     if not os.path.exists(parquet_path):
-        raise FileNotFoundError(f"Parquet file not found at {parquet_path}. Build it or download it first.")
-    
+        raise FileNotFoundError(
+            f"Parquet file not found at {parquet_path}. Build it or download it first."
+        )
+
     pf = pq.ParquetFile(parquet_path)
-    
+
     # last two groups are validation, rest is train
     num_groups = pf.num_row_groups
     assert num_groups > 10
@@ -476,7 +544,7 @@ def iter_texts_batched(split, url_whitelist=None):
     for rg_idx in group_indices:
         rg = pf.read_row_group(rg_idx)
         texts = rg.column("text").to_pylist()
-        
+
         if url_whitelist is not None:
             urls = rg.column("url").to_pylist()
             filtered_texts = []
@@ -484,8 +552,9 @@ def iter_texts_batched(split, url_whitelist=None):
                 if any(url.startswith(prefix) for prefix in url_whitelist):
                     filtered_texts.append(text)
             texts = filtered_texts
-        
+
         yield texts
+
 
 def _dataset_stats():
     parquet_path = os.path.join(DATA_DIR, "leangithubraw.parquet")
@@ -502,67 +571,102 @@ def _dataset_stats():
 
     texts = table.column("text").to_pylist()
     num_samples = len(texts)
-    
+
     print(f"Calculating statistics for {num_samples} samples...")
-    
+
     total_chars = 0
     total_bytes = 0
     total_tokens = 0
-    
+
     tokenizer = get_tokenizer()
-    
+
     batch_size = 1000
     for i in tqdm(range(0, num_samples, batch_size)):
-        batch_texts = texts[i:i+batch_size]
-        
+        batch_texts = texts[i : i + batch_size]
+
         for text in batch_texts:
             total_chars += len(text)
             total_bytes += len(text.encode("utf-8"))
-            
+
         encoded_batch = tokenizer.encode(batch_texts)
         for ids in encoded_batch:
             total_tokens += len(ids)
-            
+
     print("\nDataset Stats:")
     print(f"{'Samples (Files):':<20} {num_samples:,}")
     print(f"{'Tokens:':<20} {total_tokens:,}")
     print(f"{'Characters:':<20} {total_chars:,}")
     print(f"{'Bytes:':<20} {total_bytes:,} ({total_bytes / 1024 / 1024:.2f} MB)")
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Manage Lean GitHub Raw Dataset", allow_abbrev=False)
+    parser = argparse.ArgumentParser(
+        description="Manage Lean GitHub Raw Dataset", allow_abbrev=False
+    )
     subparsers = parser.add_subparsers(dest="action", required=True)
-    
+
     # Build
-    build_parser = subparsers.add_parser("build", help="Build the dataset from source URLs")
-    
+    build_parser = subparsers.add_parser(
+        "build", help="Build the dataset from source URLs"
+    )
+
     # Publish
-    publish_parser = subparsers.add_parser("publish", help="Upload dataset to Hugging Face")
-    publish_parser.add_argument("--repo_id", default="Kripi/Lean-Github-Raw", help="Hugging Face dataset repository ID (e.g. username/dataset)")
-    
+    publish_parser = subparsers.add_parser(
+        "publish", help="Upload dataset to Hugging Face"
+    )
+    publish_parser.add_argument(
+        "--repo_id",
+        default="Kripi/Lean-Github-Raw",
+        help="Hugging Face dataset repository ID (e.g. username/dataset)",
+    )
+
     # Download
-    download_parser = subparsers.add_parser("download", help="Download dataset from Hugging Face")
-    download_parser.add_argument("--repo_id", default="Kripi/Lean-Github-Raw", help="Hugging Face dataset repository ID (e.g. username/dataset)")
-    
+    download_parser = subparsers.add_parser(
+        "download", help="Download dataset from Hugging Face"
+    )
+    download_parser.add_argument(
+        "--repo_id",
+        default="Kripi/Lean-Github-Raw",
+        help="Hugging Face dataset repository ID (e.g. username/dataset)",
+    )
+
     # Show
-    show_parser = subparsers.add_parser("show", help="Show the first N batches from the dataset")
-    show_parser.add_argument("--split", default="train", choices=["train", "valid"], help="Dataset split to show")
+    show_parser = subparsers.add_parser(
+        "show", help="Show the first N batches from the dataset"
+    )
+    show_parser.add_argument(
+        "--split",
+        default="train",
+        choices=["train", "valid"],
+        help="Dataset split to show",
+    )
     show_parser.add_argument("--B", type=int, default=4, help="Batch size")
     show_parser.add_argument("--T", type=int, default=512, help="Sequence length")
     show_parser.add_argument("--offset", type=int, default=0)
-    show_parser.add_argument("--num-batches", type=int, default=10, help="Number of batches to show")
+    show_parser.add_argument(
+        "--num-batches", type=int, default=10, help="Number of batches to show"
+    )
 
     # Show whole
-    show_whole_parser = subparsers.add_parser("show_whole", help="Show the whole dataset")
-    show_whole_parser.add_argument("--split", default="train", choices=["train", "valid"], help="Dataset split to show")
+    show_whole_parser = subparsers.add_parser(
+        "show_whole", help="Show the whole dataset"
+    )
+    show_whole_parser.add_argument(
+        "--split",
+        default="train",
+        choices=["train", "valid"],
+        help="Dataset split to show",
+    )
     show_whole_parser.add_argument("--B", type=int, default=32, help="Batch size")
     show_whole_parser.add_argument("--T", type=int, default=768, help="Sequence length")
 
     # Stats
-    subparsers.add_parser("stats", help="Display dataset statistics (tokens, chars, bytes, samples)")
-    
+    subparsers.add_parser(
+        "stats", help="Display dataset statistics (tokens, chars, bytes, samples)"
+    )
+
     args = parser.parse_args()
-    
+
     if args.action == "build":
         _build_dataset()
     elif args.action == "publish":
@@ -570,12 +674,18 @@ def main():
     elif args.action == "download":
         download_dataset(args.repo_id)
     elif args.action == "show":
-        _show_dataset(split=args.split, B=args.B, T=args.T, offset=args.offset, num_batches=args.num_batches)
+        _show_dataset(
+            split=args.split,
+            B=args.B,
+            T=args.T,
+            offset=args.offset,
+            num_batches=args.num_batches,
+        )
     elif args.action == "show_whole":
         _show_whole_dataset(split=args.split, B=args.B, T=args.T)
     elif args.action == "stats":
         _dataset_stats()
 
+
 if __name__ == "__main__":
     main()
-

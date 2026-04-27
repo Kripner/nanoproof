@@ -24,9 +24,11 @@ torch.backends.cudnn.benchmark = False
 # -----------------------------------------------------------------------------
 # Mock classes for testing Engine without loading a real model
 
+
 @dataclass
 class MockConfig:
     """Minimal config for Engine tests."""
+
     n_kv_head: int = 4
     n_head: int = 4
     n_embd: int = 64
@@ -40,6 +42,7 @@ class MockModel:
     This ensures that with temperature > 0, different samples should
     (with very high probability) produce different tokens.
     """
+
     def __init__(self, vocab_size=262):
         self.vocab_size = vocab_size
         self.config = MockConfig()
@@ -48,7 +51,7 @@ class MockModel:
     def get_device(self):
         return self._device
 
-    def forward(self, ids, kv_cache=None, loss_reduction='mean'):
+    def forward(self, ids, kv_cache=None, loss_reduction="mean"):
         """Return uniform logits so sampling is spread across vocab."""
         B, T = ids.shape
         # Simulate what a real transformer does: advance the KV cache
@@ -66,6 +69,7 @@ class ByteTokenizer:
     Simple byte-level tokenizer for testing.
     Tokens 0-255 are raw bytes, 256+ are special tokens.
     """
+
     def __init__(self):
         self._special_tokens = {
             "<|python_start|>": 256,
@@ -103,6 +107,7 @@ class ByteTokenizer:
 
 # -----------------------------------------------------------------------------
 # KVCache tests
+
 
 def test_kv_cache_basic():
     """Test basic KVCache operations."""
@@ -149,6 +154,7 @@ def test_kv_cache_get_layer_cache():
 # -----------------------------------------------------------------------------
 # Engine tests
 
+
 def test_multi_sample_first_token_diversity():
     """
     Test that when generating multiple samples, each sample gets an independently
@@ -193,10 +199,14 @@ def test_batched_generation_single_prompt():
     generation_kwargs = dict(max_tokens=8, temperature=0.0, seed=0)
 
     # Generate non-batched
-    single_results, single_masks = engine.generate_batch(prompt, num_samples=num_samples, **generation_kwargs)
+    single_results, single_masks = engine.generate_batch(
+        prompt, num_samples=num_samples, **generation_kwargs
+    )
 
     # Generate batched with single prompt
-    batched_results, batched_masks = engine.generate_batch([prompt], num_samples=num_samples, **generation_kwargs)
+    batched_results, batched_masks = engine.generate_batch(
+        [prompt], num_samples=num_samples, **generation_kwargs
+    )
 
     assert single_results == batched_results[0]
     assert single_masks == batched_masks[0]
@@ -218,7 +228,9 @@ def test_batched_generation_stochastic():
     num_samples = 4
     generation_kwargs = dict(max_tokens=16, temperature=1.0, seed=0)
 
-    results, _ = engine.generate_batch(prompts, num_samples=num_samples, **generation_kwargs)
+    results, _ = engine.generate_batch(
+        prompts, num_samples=num_samples, **generation_kwargs
+    )
 
     assert len(results) == len(prompts)
     for prompt_idx, samples in enumerate(results):
@@ -248,7 +260,9 @@ def test_batched_generation_variable_length():
     generation_kwargs = dict(max_tokens=5, temperature=0.0, seed=0)
 
     # This should not crash even with different-length prompts
-    results, masks = engine.generate_batch(prompts, num_samples=num_samples, **generation_kwargs)
+    results, masks = engine.generate_batch(
+        prompts, num_samples=num_samples, **generation_kwargs
+    )
 
     assert len(results) == len(prompts)
     for prompt_idx, samples in enumerate(results):

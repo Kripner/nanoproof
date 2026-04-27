@@ -33,14 +33,7 @@ MINIF2F_PREAMBLE = (
 
 # LeanWorkBook preamble. Matches InternLM's upstream header at
 # https://github.com/InternLM/InternLM-Math/blob/main/leanworkbook/header.lean
-LEANWORKBOOK_PREAMBLE = (
-    "open BigOperators\n"
-    "open Nat\n"
-    "open Real\n"
-    "open Rat\n\n"
-)
+LEANWORKBOOK_PREAMBLE = "open BigOperators\nopen Nat\nopen Real\nopen Rat\n\n"
 
 # DeepSeek-Prover-V1 preamble. All 27k rows share the same header upstream.
-DEEPSEEK_PROVER_PREAMBLE = (
-    "open BigOperators Real Nat Topology Rat\n\n"
-)
+DEEPSEEK_PROVER_PREAMBLE = "open BigOperators Real Nat Topology Rat\n\n"

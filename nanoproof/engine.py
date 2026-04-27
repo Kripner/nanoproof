@@ -24,7 +24,16 @@ class KVCache:
     Pre-allocated tensors with per-batch-element position tracking.
     """
 
-    def __init__(self, batch_size, num_heads, seq_len, head_dim, num_layers, device="cpu", dtype=None):
+    def __init__(
+        self,
+        batch_size,
+        num_heads,
+        seq_len,
+        head_dim,
+        num_layers,
+        device="cpu",
+        dtype=None,
+    ):
         if dtype is None:
             dtype = COMPUTE_DTYPE
         self.batch_size = batch_size
@@ -33,8 +42,24 @@ class KVCache:
         self.n_heads = num_heads
         self.head_dim = head_dim
         # Pre-allocate cache tensors: (n_layers, B, T, H, D)
-        self.k_cache = torch.zeros(num_layers, batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype)
-        self.v_cache = torch.zeros(num_layers, batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype)
+        self.k_cache = torch.zeros(
+            num_layers,
+            batch_size,
+            seq_len,
+            num_heads,
+            head_dim,
+            device=device,
+            dtype=dtype,
+        )
+        self.v_cache = torch.zeros(
+            num_layers,
+            batch_size,
+            seq_len,
+            num_heads,
+            head_dim,
+            device=device,
+            dtype=dtype,
+        )
         # Current sequence length per batch element (FA3 needs int32)
         self.cache_seqlens = torch.zeros(batch_size, dtype=torch.int32, device=device)
         # Previous token's normalized embedding for smear (set by model forward pass)
@@ -62,14 +87,20 @@ class KVCache:
         Used when we do batch=1 prefill and then want to generate multiple samples in parallel.
         """
         assert self.get_pos() == 0, "Cannot prefill a non-empty KV cache"
-        assert self.n_layers == other.n_layers and self.n_heads == other.n_heads and self.head_dim == other.head_dim
+        assert (
+            self.n_layers == other.n_layers
+            and self.n_heads == other.n_heads
+            and self.head_dim == other.head_dim
+        )
         assert self.max_seq_len >= other.max_seq_len
         other_pos = other.get_pos()
         self.k_cache[:, :, :other_pos, :, :] = other.k_cache[:, :, :other_pos, :, :]
         self.v_cache[:, :, :other_pos, :, :] = other.v_cache[:, :, :other_pos, :, :]
         self.cache_seqlens.fill_(other_pos)
         if other.prev_embedding is not None:
-            self.prev_embedding = other.prev_embedding.expand(self.batch_size, -1, -1).clone()
+            self.prev_embedding = other.prev_embedding.expand(
+                self.batch_size, -1, -1
+            ).clone()
 
 
 # -----------------------------------------------------------------------------
@@ -91,13 +122,16 @@ def sample_next_token(logits, rng, temperature=1.0, top_k=None):
         probs = F.softmax(logits, dim=-1)
         return torch.multinomial(probs, num_samples=1, generator=rng)
 
+
 # -----------------------------------------------------------------------------
+
 
 class RowState:
     # Per-row state tracking during generation
     def __init__(self, current_tokens=None):
         self.current_tokens = current_tokens or []
         self.completed = False
+
 
 class Engine:
     def __init__(self, model, tokenizer):
@@ -106,10 +140,24 @@ class Engine:
 
     def _kv_model_kwargs(self):
         m = self.model.config
-        return {"num_heads": m.n_kv_head, "head_dim": m.n_embd // m.n_head, "num_layers": m.n_layer}
+        return {
+            "num_heads": m.n_kv_head,
+            "head_dim": m.n_embd // m.n_head,
+            "num_layers": m.n_layer,
+        }
 
     @torch.inference_mode()
-    def generate(self, tokens, num_samples=1, max_tokens=None, min_tokens=None, temperature=1.0, top_k=None, seed=42, return_logits=False):
+    def generate(
+        self,
+        tokens,
+        num_samples=1,
+        max_tokens=None,
+        min_tokens=None,
+        temperature=1.0,
+        top_k=None,
+        seed=42,
+        return_logits=False,
+    ):
         """
         Generate tokens from prompt(s). Accepts either list[int] (single prompt) or
         list[list[int]] (batched prompts).
@@ -130,7 +178,9 @@ class Engine:
         if is_batched:
             prompts = tokens
         else:
-            assert isinstance(tokens[0], int), "expecting list of ints or list of lists of ints"
+            assert isinstance(tokens[0], int), (
+                "expecting list of ints or list of lists of ints"
+            )
             prompts = [tokens]
 
         device = self.model.get_device()
@@ -151,7 +201,11 @@ class Engine:
         max_prompt_len = max(prompt_lengths)
 
         # Determine decode cache size
-        kv_length_hint = (max_prompt_len + max_tokens) if max_tokens is not None else self.model.config.sequence_len
+        kv_length_hint = (
+            (max_prompt_len + max_tokens)
+            if max_tokens is not None
+            else self.model.config.sequence_len
+        )
 
         kv_cache_decode = None
         try:
@@ -159,11 +213,23 @@ class Engine:
             # decode cache.  This avoids allocating a separate prefill KV
             # cache for the whole batch (which would coexist with the decode
             # cache and double peak memory).
-            kv_cache_decode = KVCache(batch_size=total_rows, seq_len=kv_length_hint, device=device, dtype=dtype, **kv_kwargs)
+            kv_cache_decode = KVCache(
+                batch_size=total_rows,
+                seq_len=kv_length_hint,
+                device=device,
+                dtype=dtype,
+                **kv_kwargs,
+            )
             all_logits = []
             for i, prompt in enumerate(prompts):
                 ids = torch.tensor([prompt], dtype=torch.long, device=device)
-                kv_single = KVCache(batch_size=1, seq_len=len(prompt), device=device, dtype=dtype, **kv_kwargs)
+                kv_single = KVCache(
+                    batch_size=1,
+                    seq_len=len(prompt),
+                    device=device,
+                    dtype=dtype,
+                    **kv_kwargs,
+                )
                 prompt_logits = self.model.forward(ids, kv_cache=kv_single)
                 # .clone() to release the full (1, prompt_len, vocab) tensor.
                 prompt_logits = prompt_logits[:, -1, :].clone()  # (1, vocab_size)
@@ -171,25 +237,41 @@ class Engine:
                 # Copy into decode cache for each sample
                 for j in range(num_samples):
                     row_idx = i * num_samples + j
-                    kv_cache_decode.k_cache[:, row_idx:row_idx+1, :pos, :, :] = kv_single.k_cache[:, :, :pos, :, :]
-                    kv_cache_decode.v_cache[:, row_idx:row_idx+1, :pos, :, :] = kv_single.v_cache[:, :, :pos, :, :]
+                    kv_cache_decode.k_cache[:, row_idx : row_idx + 1, :pos, :, :] = (
+                        kv_single.k_cache[:, :, :pos, :, :]
+                    )
+                    kv_cache_decode.v_cache[:, row_idx : row_idx + 1, :pos, :, :] = (
+                        kv_single.v_cache[:, :, :pos, :, :]
+                    )
                     kv_cache_decode.cache_seqlens[row_idx] = pos
                     if kv_single.prev_embedding is not None:
                         if kv_cache_decode.prev_embedding is None:
-                            kv_cache_decode.prev_embedding = torch.zeros(total_rows, 1, self.model.config.n_embd, device=device, dtype=dtype)
-                        kv_cache_decode.prev_embedding[row_idx] = kv_single.prev_embedding[0]
+                            kv_cache_decode.prev_embedding = torch.zeros(
+                                total_rows,
+                                1,
+                                self.model.config.n_embd,
+                                device=device,
+                                dtype=dtype,
+                            )
+                        kv_cache_decode.prev_embedding[row_idx] = (
+                            kv_single.prev_embedding[0]
+                        )
                 all_logits.append(prompt_logits.expand(num_samples, -1))
                 del kv_single
             logits = torch.cat(all_logits, dim=0)  # (total_rows, vocab_size)
 
             # 2) Decode loop
-            row_states = [RowState(prompt.copy()) for prompt in prompts for _ in range(num_samples)]
+            row_states = [
+                RowState(prompt.copy())
+                for prompt in prompts
+                for _ in range(num_samples)
+            ]
             num_generated = 0
 
             while True:
                 if min_tokens is not None and num_generated < min_tokens:
-                    logits[:, eos] = float('-inf')
-                    logits[:, bos] = float('-inf')
+                    logits[:, eos] = float("-inf")
+                    logits[:, bos] = float("-inf")
                 # Sample the next token for each row
                 next_ids = sample_next_token(logits, rng, temperature, top_k)
                 sampled_tokens = next_ids[:, 0].tolist()
@@ -205,8 +287,16 @@ class Engine:
                         state.completed = True
 
                 if is_batched:
-                    result = ([token_column[i * num_samples:(i + 1) * num_samples] for i in range(num_prompts)],
-                              [token_masks[i * num_samples:(i + 1) * num_samples] for i in range(num_prompts)])
+                    result = (
+                        [
+                            token_column[i * num_samples : (i + 1) * num_samples]
+                            for i in range(num_prompts)
+                        ],
+                        [
+                            token_masks[i * num_samples : (i + 1) * num_samples]
+                            for i in range(num_prompts)
+                        ],
+                    )
                 else:
                     result = (token_column, token_masks)
 
@@ -221,14 +311,18 @@ class Engine:
                     break
 
                 # Prepare logits for next iteration
-                ids = torch.tensor(token_column, dtype=torch.long, device=device).unsqueeze(1)
+                ids = torch.tensor(
+                    token_column, dtype=torch.long, device=device
+                ).unsqueeze(1)
                 logits = self.model.forward(ids, kv_cache=kv_cache_decode)
                 logits = logits[:, -1, :]
         except torch.cuda.OutOfMemoryError:
             # Dump the snapshot BEFORE the finally block frees the KV cache so
             # the snapshot captures the actual state at OOM (with live KV cache
             # and peak fragmentation), not the cleaned-up state afterwards.
-            maybe_dump_memory_snapshot(f"OOM in Engine.generate (num_prompts={num_prompts}, max_prompt_len={max_prompt_len}, num_samples={num_samples})")
+            maybe_dump_memory_snapshot(
+                f"OOM in Engine.generate (num_prompts={num_prompts}, max_prompt_len={max_prompt_len}, num_samples={num_samples})"
+            )
             raise
         finally:
             # Explicitly free the KV cache. @torch.inference_mode() on a generator
@@ -251,7 +345,11 @@ class Engine:
 
         results = [p.copy() for p in prompts for _ in range(num_samples)]
         masks = [[0] * len(p) for p in prompts for _ in range(num_samples)]
-        all_logits = [[None] * len(p) for p in prompts for _ in range(num_samples)] if return_logits else None
+        all_logits = (
+            [[None] * len(p) for p in prompts for _ in range(num_samples)]
+            if return_logits
+            else None
+        )
         completed = [False] * len(results)
 
         gen = self.generate(tokens, num_samples, return_logits=return_logits, **kwargs)
@@ -282,10 +380,19 @@ class Engine:
         gen.close()
 
         if is_batched:
-            results = [results[i * num_samples:(i + 1) * num_samples] for i in range(len(prompts))]
-            masks = [masks[i * num_samples:(i + 1) * num_samples] for i in range(len(prompts))]
+            results = [
+                results[i * num_samples : (i + 1) * num_samples]
+                for i in range(len(prompts))
+            ]
+            masks = [
+                masks[i * num_samples : (i + 1) * num_samples]
+                for i in range(len(prompts))
+            ]
             if return_logits:
-                all_logits = [all_logits[i * num_samples:(i + 1) * num_samples] for i in range(len(prompts))]
+                all_logits = [
+                    all_logits[i * num_samples : (i + 1) * num_samples]
+                    for i in range(len(prompts))
+                ]
 
         if return_logits:
             return results, masks, all_logits

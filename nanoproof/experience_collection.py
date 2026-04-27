@@ -61,8 +61,12 @@ def load_collected_transitions(run_dir: str) -> list[tuple[str, str, float]]:
     any FIFO truncation or length filtering themselves.
     """
     shards: list[tuple[int, str]] = []
-    for shard_path in glob.glob(os.path.join(run_dir, f"{_COLLECTION_PREFIX}*", COLLECTED_FILENAME)):
-        shard_step = int(os.path.basename(os.path.dirname(shard_path))[len(_COLLECTION_PREFIX):])
+    for shard_path in glob.glob(
+        os.path.join(run_dir, f"{_COLLECTION_PREFIX}*", COLLECTED_FILENAME)
+    ):
+        shard_step = int(
+            os.path.basename(os.path.dirname(shard_path))[len(_COLLECTION_PREFIX) :]
+        )
         shards.append((shard_step, shard_path))
     shards.sort()
     transitions: list[tuple[str, str, float]] = []
@@ -82,6 +86,7 @@ def load_collected_transitions(run_dir: str) -> list[tuple[str, str, float]]:
 # Theorem sampler
 # -----------------------------------------------------------------------------
 
+
 class TheoremsSampler:
     """Samples theorems for experience collection from multiple datasets.
 
@@ -90,15 +95,28 @@ class TheoremsSampler:
     """
 
     ALL_DATASETS = {
-        "leanworkbook": lambda lean_version: leanworkbook.list_theorems(split="train", lean_version=lean_version),
-        "deepseek_prover": lambda lean_version: deepseek_prover.list_theorems(split="train", lean_version=lean_version),
-        "numinamath": lambda lean_version: numinamath.list_theorems(split="train", lean_version=lean_version),
+        "leanworkbook": lambda lean_version: leanworkbook.list_theorems(
+            split="train", lean_version=lean_version
+        ),
+        "deepseek_prover": lambda lean_version: deepseek_prover.list_theorems(
+            split="train", lean_version=lean_version
+        ),
+        "numinamath": lambda lean_version: numinamath.list_theorems(
+            split="train", lean_version=lean_version
+        ),
     }
 
-    def __init__(self, seed: int | None = 0, datasets: list[str] | None = None, lean_version: str | None = None):
+    def __init__(
+        self,
+        seed: int | None = 0,
+        datasets: list[str] | None = None,
+        lean_version: str | None = None,
+    ):
         if datasets is None:
             datasets = list(self.ALL_DATASETS.keys())
-        self.datasets = {name: self.ALL_DATASETS[name](lean_version) for name in datasets}
+        self.datasets = {
+            name: self.ALL_DATASETS[name](lean_version) for name in datasets
+        }
         self.dataset_names = list(self.datasets.keys())
         self.rng = random.Random(seed)
         self._lock = threading.Lock()
@@ -121,6 +139,7 @@ class ReplayBuffer:
     ``window_size``, and broadcasts the result so all ranks sample from the
     same buffer during training.
     """
+
     def __init__(self, window_size: int, seed: int):
         self.window_size = window_size
         self.buffer: list[tuple[str, str, float]] = []
@@ -132,7 +151,7 @@ class ReplayBuffer:
 
         self.buffer.extend(new_transitions)
         if len(self.buffer) > self.window_size:
-            self.buffer = self.buffer[-self.window_size:]
+            self.buffer = self.buffer[-self.window_size :]
 
         if ddp:
             buffer_list = [self.buffer]
@@ -149,9 +168,12 @@ class ReplayBuffer:
         log0(f"Loading replay buffer from {run_dir}", component="ReplayBuffer")
         transitions = load_collected_transitions(run_dir)
         if len(transitions) > self.window_size:
-            transitions = transitions[-self.window_size:]
+            transitions = transitions[-self.window_size :]
         self.buffer = transitions
-        log0(f"Loaded {len(self.buffer)} transitions from {run_dir}", component="ReplayBuffer")
+        log0(
+            f"Loaded {len(self.buffer)} transitions from {run_dir}",
+            component="ReplayBuffer",
+        )
 
     def sample_transition(self) -> tuple[str, str, float]:
         return self.rng.choice(self.buffer)
@@ -167,12 +189,13 @@ class CollectedProof:
     """One successful proof from a collection phase, with enough data to
     reproduce the training transitions and inspect the search tree in the UI.
     """
-    theorem: str                                    # BenchTheorem.source
-    name: str | None                                # theorem name if any
-    num_iterations: int                             # MCTS iterations run
-    full_tree: dict                                 # pre-prune tree (game.unsimplified_root.serialize())
-    simplified_tree: dict                           # post-prune tree (game.root.serialize())
-    transitions: list[tuple[str, str, float]]      # (state, tactic, value_target)
+
+    theorem: str  # BenchTheorem.source
+    name: str | None  # theorem name if any
+    num_iterations: int  # MCTS iterations run
+    full_tree: dict  # pre-prune tree (game.unsimplified_root.serialize())
+    simplified_tree: dict  # post-prune tree (game.root.serialize())
+    transitions: list[tuple[str, str, float]]  # (state, tactic, value_target)
 
 
 class CollectedExperience:
@@ -200,7 +223,11 @@ class CollectedExperience:
     def record_proof(self, theorem: BenchTheorem, game) -> None:
         """Snapshot a solved game as a :class:`CollectedProof` and append it."""
         transitions = extract_transitions(game.root)
-        full_tree = game.unsimplified_root.serialize() if getattr(game, "unsimplified_root", None) else None
+        full_tree = (
+            game.unsimplified_root.serialize()
+            if getattr(game, "unsimplified_root", None)
+            else None
+        )
         simplified_tree = game.root.serialize()
         proof = CollectedProof(
             theorem=theorem.source,
@@ -215,13 +242,17 @@ class CollectedExperience:
 
     def record_tactic(self, state: str, tactic: str, status: str) -> None:
         """Buffer a tactic attempt. Lock-free (list.append is atomic under the GIL)."""
-        self.tactics.append({
-            "status": status,
-            "state": state.replace("\n", "\\n"),
-            "tactic": tactic,
-        })
+        self.tactics.append(
+            {
+                "status": status,
+                "state": state.replace("\n", "\\n"),
+                "tactic": tactic,
+            }
+        )
 
-    def record_train_samples(self, inputs, targets, per_token_loss, sources: list) -> None:
+    def record_train_samples(
+        self, inputs, targets, per_token_loss, sources: list
+    ) -> None:
         """Reservoir-sample rows of one training micro-batch into ``self.train_samples``.
 
         ``inputs`` / ``targets`` / ``per_token_loss`` are all shape ``(B, T)``
@@ -289,11 +320,20 @@ class CollectedExperience:
         for context, tactic, value_target in raw:
             context = context.strip()
             tactic = tactic.strip()
-            if len(context) > GLOBAL_CONFIG.state_max_len or len(tactic) > GLOBAL_CONFIG.tactic_max_len:
+            if (
+                len(context) > GLOBAL_CONFIG.state_max_len
+                or len(tactic) > GLOBAL_CONFIG.tactic_max_len
+            ):
                 continue
-            assert len(context) != 0, f"Empty context in transition: tactic={tactic}, value_target={value_target}"
-            assert len(tactic) != 0, f"Empty tactic in transition: context={context}, value_target={value_target}"
-            assert value_target is not None, f"None value_target in transition: context={context}, tactic={tactic}"
+            assert len(context) != 0, (
+                f"Empty context in transition: tactic={tactic}, value_target={value_target}"
+            )
+            assert len(tactic) != 0, (
+                f"Empty tactic in transition: context={context}, value_target={value_target}"
+            )
+            assert value_target is not None, (
+                f"None value_target in transition: context={context}, tactic={tactic}"
+            )
             out.append((context, tactic, value_target))
         return out
 
@@ -316,16 +356,20 @@ class CollectedExperience:
                 f.write(json.dumps(s) + "\n")
 
 
-
-
 def compute_value_target(node: Node) -> float:
     """Computes the actual value for a node, to be used as a target in learning."""
-    assert node.is_solved, f"Node is not solved in compute_value_target (is root={node.action is None}, is terminal={node.is_terminal}, to_play={node.to_play})"
+    assert node.is_solved, (
+        f"Node is not solved in compute_value_target (is root={node.action is None}, is terminal={node.is_terminal}, to_play={node.to_play})"
+    )
     if node.is_terminal:
         node.value_target = 0
         return 0
     elif node.to_play == Player.OR:
-        max_child_value = max(compute_value_target(child) for child in node.children.values() if child.is_solved)
+        max_child_value = max(
+            compute_value_target(child)
+            for child in node.children.values()
+            if child.is_solved
+        )
         value = -1 + max_child_value
         node.value_target = value
         return value
@@ -346,35 +390,48 @@ def prune_redundant_nodes(root: Node) -> int:
         pruned_count += 1
     return pruned_count
 
+
 # TODO: when executing the tree, we can stop once the states match
 def prune_redundant_node(root: Node) -> bool:
     # All solved interior OR nodes that don't directly finish the proof - candidates for pruning.
     # Sorted in BFS order to delete as much as possible early.
     nodes = [
-        n for n in root.get_tree_nodes() if (
-            n.is_solved and
-            n.to_play == Player.OR and
-            not n.is_terminal and
-            not any(child.is_terminal for child in n.children.values())
+        n
+        for n in root.get_tree_nodes()
+        if (
+            n.is_solved
+            and n.to_play == Player.OR
+            and not n.is_terminal
+            and not any(child.is_terminal for child in n.children.values())
         )
     ]
     for to_consider in nodes:
-        solved_actions = [a for a in to_consider.children if to_consider.children[a].is_solved]
-        assert len(solved_actions) == 1, f"prune_redundant_node: Expected 1 solved action, got {len(solved_actions)}"
+        solved_actions = [
+            a for a in to_consider.children if to_consider.children[a].is_solved
+        ]
+        assert len(solved_actions) == 1, (
+            f"prune_redundant_node: Expected 1 solved action, got {len(solved_actions)}"
+        )
         action = solved_actions[0]
         child = to_consider.children[action]
-        child_solved_actions = [a for a in child.children if child.children[a].is_solved]
+        child_solved_actions = [
+            a for a in child.children if child.children[a].is_solved
+        ]
         assert child_solved_actions, f"prune_redundant_node: No solved actions in child"
         # TODO: instead of selecting the shortest, execute all of them and filter out the failed ones
         min_len = min(len(str(a)) for a in child_solved_actions)
         shortest_actions = [a for a in child_solved_actions if len(str(a)) == min_len]
         child_solved_action = shortest_actions[0]
         if child.to_play == Player.OR:
-            assert len(to_consider.state) == 1, f"prune_redundant_node: Expected 1 branch at OR node, got {len(to_consider.state)}"
+            assert len(to_consider.state) == 1, (
+                f"prune_redundant_node: Expected 1 branch at OR node, got {len(to_consider.state)}"
+            )
             try:
                 # Skip the action, execute the subtree without it.
                 # TODO: set allow_premature_end=True and then potentially remove unnecessary nodes
-                node_to_state = execute_tree(child, to_consider.state[0], allow_premature_end=False)
+                node_to_state = execute_tree(
+                    child, to_consider.state[0], allow_premature_end=False
+                )
             except AssertionError as e:
                 # The tree is not valid anymore.
                 continue
@@ -389,7 +446,9 @@ def prune_redundant_node(root: Node) -> bool:
         elif child.to_play == Player.AND:
             pass  # TODO
         else:
-            raise AssertionError(f"prune_redundant_node: Unknown node type: {child.to_play}")
+            raise AssertionError(
+                f"prune_redundant_node: Unknown node type: {child.to_play}"
+            )
     return False
 
 
@@ -407,6 +466,7 @@ def extract_transitions(node: Node) -> list[tuple[str, str, float]]:
     _extract_transitions_recursive(node, transitions)
     return transitions
 
+
 def _extract_transitions_recursive(node: Node, transitions: list):
     """Recursively extract transitions from solved paths."""
     # if not node.is_solved:
@@ -414,7 +474,9 @@ def _extract_transitions_recursive(node: Node, transitions: list):
 
     # Walk down the OR nodes
     while node.to_play == Player.OR and not node.is_terminal:
-        assert len(node.state) == 1, f"extract_transitions: Expected 1 branch at OR node, got {len(node.state)}"
+        assert len(node.state) == 1, (
+            f"extract_transitions: Expected 1 branch at OR node, got {len(node.state)}"
+        )
         assert node.children, f"extract_transitions: No children at OR node"
 
         # Find solved actions

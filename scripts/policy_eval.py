@@ -4,7 +4,14 @@ import torch
 import torch.distributed as dist
 
 
-from nanoproof.common import compute_init, autodetect_device_type, print0, is_ddp, get_dist_info, GLOBAL_CONFIG
+from nanoproof.common import (
+    compute_init,
+    autodetect_device_type,
+    print0,
+    is_ddp,
+    get_dist_info,
+    GLOBAL_CONFIG,
+)
 from nanoproof.checkpoints import load_model
 from nanoproof.data.sft.leantree import leantree_transitions
 from nanoproof.data.sft.leantree_dataloader import sft_data_generator
@@ -19,7 +26,7 @@ def _reduce_if_ddp(tensor):
 
 def _compute_entropy(logits):
     """Compute entropy of a distribution from logits. Returns entropy per sample.
-    
+
     Args:
         logits: (..., V) logits over vocabulary
     Returns:
@@ -53,21 +60,23 @@ def eval_critic_errors(model, tokenizer, leantree_batches, eval_steps=None):
     """
     value_delim_tok = tokenizer.encode_special("<|value|>")
     device = next(model.parameters()).device
-    
+
     # Bin token IDs in order: index i corresponds to bin value (i+1)
-    bin_token_ids = torch.tensor([
-        tokenizer.encode_special(f"<|bin_{i:02d}|>")
-        for i in range(1, GLOBAL_CONFIG.num_value_bins + 1)
-    ])
+    bin_token_ids = torch.tensor(
+        [
+            tokenizer.encode_special(f"<|bin_{i:02d}|>")
+            for i in range(1, GLOBAL_CONFIG.num_value_bins + 1)
+        ]
+    )
     # Reverse mapping: token_id -> bin_index (0-based)
     token_to_bin_idx = {tok.item(): i for i, tok in enumerate(bin_token_ids)}
-    
+
     y_true = []  # actual bin values (1-64)
     y_pred = []  # predicted bin values (1-64)
     soft_squared_error_sum = 0.0
     argmax_squared_error_sum = 0.0
     entropy_sum = 0.0
-    
+
     steps_done = 0
     for x, y, _, _ in leantree_batches:
         if eval_steps is not None and steps_done >= eval_steps:
@@ -77,45 +86,54 @@ def eval_critic_errors(model, tokenizer, leantree_batches, eval_steps=None):
             continue
         x, y = x[has_value], y[has_value]
         steps_done += 1
-        
+
         logits = model(x)  # (B, T, V)
-        
+
         # Find value position and extract logits there
         value_positions = (x == value_delim_tok).int().argmax(dim=1)
         batch_indices = torch.arange(x.shape[0], device=x.device)
         actual_tokens = y[batch_indices, value_positions]
         value_logits = logits[batch_indices, value_positions]  # (B, V)
-        
+
         # Extract bin logits and compute predictions
         bin_logits = value_logits[:, bin_token_ids.to(x.device)]  # (B, 64)
         argmax_bin_idx = bin_logits.argmax(dim=-1)  # (B,) 0-indexed
         bin_probs = torch.softmax(bin_logits, dim=-1)  # (B, 64)
-        bin_values = torch.arange(1, GLOBAL_CONFIG.num_value_bins + 1, dtype=bin_probs.dtype, device=x.device)
+        bin_values = torch.arange(
+            1, GLOBAL_CONFIG.num_value_bins + 1, dtype=bin_probs.dtype, device=x.device
+        )
         soft_predictions = (bin_probs * bin_values).sum(dim=-1)  # (B,)
-        
+
         # Compute entropy over bin tokens
         bin_entropy = _compute_entropy(bin_logits)  # (B,)
-        
+
         # Collect predictions for samples with valid actual bin token
         for i, actual_tok in enumerate(actual_tokens.tolist()):
             if actual_tok in token_to_bin_idx:
                 actual_idx = token_to_bin_idx[actual_tok]
                 pred_idx = argmax_bin_idx[i].item()
                 y_true.append(actual_idx + 1)  # 1-indexed bin value
-                y_pred.append(pred_idx + 1)    # 1-indexed bin value
+                y_pred.append(pred_idx + 1)  # 1-indexed bin value
                 argmax_squared_error_sum += (actual_idx + 1 - (pred_idx + 1)) ** 2
-                soft_squared_error_sum += (actual_idx + 1 - soft_predictions[i].item()) ** 2
+                soft_squared_error_sum += (
+                    actual_idx + 1 - soft_predictions[i].item()
+                ) ** 2
                 entropy_sum += bin_entropy[i].item()
-    
+
     total_samples = len(y_true)
-    
+
     # Reduce across DDP ranks
-    stats = torch.tensor([argmax_squared_error_sum, soft_squared_error_sum, entropy_sum, total_samples], 
-                         dtype=torch.float64, device=device)
+    stats = torch.tensor(
+        [argmax_squared_error_sum, soft_squared_error_sum, entropy_sum, total_samples],
+        dtype=torch.float64,
+        device=device,
+    )
     _reduce_if_ddp(stats)
-    argmax_squared_error_sum, soft_squared_error_sum, entropy_sum, total_samples = stats.tolist()
+    argmax_squared_error_sum, soft_squared_error_sum, entropy_sum, total_samples = (
+        stats.tolist()
+    )
     total_samples = int(total_samples)
-    
+
     # Gather y_true/y_pred from all ranks for confusion matrix
     if is_ddp():
         _, _, _, ddp_world_size = get_dist_info()
@@ -125,16 +143,22 @@ def eval_critic_errors(model, tokenizer, leantree_batches, eval_steps=None):
         dist.all_gather_object(all_y_pred, y_pred)
         y_true = [v for sublist in all_y_true for v in sublist]
         y_pred = [v for sublist in all_y_pred for v in sublist]
-    
+
     if total_samples == 0:
-        return {"y_true": [], "y_pred": [], "argmax_mse": float('nan'), "soft_mse": float('nan'), 
-                "entropy": float('nan'), "total_samples": 0}
-    
+        return {
+            "y_true": [],
+            "y_pred": [],
+            "argmax_mse": float("nan"),
+            "soft_mse": float("nan"),
+            "entropy": float("nan"),
+            "total_samples": 0,
+        }
+
     # Compute final metrics from reduced sums
     argmax_mse = argmax_squared_error_sum / total_samples
     soft_mse = soft_squared_error_sum / total_samples
     entropy = entropy_sum / total_samples
-    
+
     return {
         "y_true": y_true,
         "y_pred": y_pred,
@@ -170,7 +194,7 @@ def eval_tactic_accuracy(model, tokenizer, leantree_batches, eval_steps=None):
     total_tokens = 0  # count of all masked tokens for entropy averaging
     value_delim_tok = tokenizer.encode_special("<|value|>")
     device = next(model.parameters()).device
-    
+
     steps_done = 0
     for x, y, _, _ in leantree_batches:
         if eval_steps is not None and steps_done >= eval_steps:
@@ -182,67 +206,109 @@ def eval_tactic_accuracy(model, tokenizer, leantree_batches, eval_steps=None):
             continue
         steps_done += 1
 
-        logits = model(x) # (B, T, V)
-        predictions = torch.argmax(logits, dim=-1) # (B, T)
+        logits = model(x)  # (B, T, V)
+        predictions = torch.argmax(logits, dim=-1)  # (B, T)
 
-        mask = (y != -1)
+        mask = y != -1
         correct = predictions == y
 
         assert mask.any(dim=1).all(), "leantree sample contained no output tokens"
         total_samples += logits.shape[0]
 
         # Full Accuracy: correctness on all non-masked tokens
-        total_full_correct += (correct | torch.logical_not(mask)).all(dim=1).sum().item()
+        total_full_correct += (
+            (correct | torch.logical_not(mask)).all(dim=1).sum().item()
+        )
 
         # First Token Accuracy: correctness on the first non-masked token
-        first_token_indices = mask.int().argmax(dim=1)  # argmax returns the first True index
+        first_token_indices = mask.int().argmax(
+            dim=1
+        )  # argmax returns the first True index
         batch_indices = torch.arange(logits.shape[0], device=logits.device)
-        total_first_token_correct += correct[batch_indices, first_token_indices].sum().item()
-        
+        total_first_token_correct += (
+            correct[batch_indices, first_token_indices].sum().item()
+        )
+
         # Entropy calculations
         token_entropy = _compute_entropy(logits)  # (B, T)
-        
+
         # First token entropy
-        first_token_entropy_sum += token_entropy[batch_indices, first_token_indices].sum().item()
-        
+        first_token_entropy_sum += (
+            token_entropy[batch_indices, first_token_indices].sum().item()
+        )
+
         # All tokens entropy (only for masked positions)
         all_tokens_entropy_sum += (token_entropy * mask).sum().item()
         total_tokens += mask.sum().item()
 
     # Reduce across DDP ranks
-    stats = torch.tensor([
-        total_full_correct, total_first_token_correct, 
-        first_token_entropy_sum, all_tokens_entropy_sum, 
-        total_samples, total_tokens
-    ], dtype=torch.float64, device=device)
+    stats = torch.tensor(
+        [
+            total_full_correct,
+            total_first_token_correct,
+            first_token_entropy_sum,
+            all_tokens_entropy_sum,
+            total_samples,
+            total_tokens,
+        ],
+        dtype=torch.float64,
+        device=device,
+    )
     _reduce_if_ddp(stats)
-    (total_full_correct, total_first_token_correct, 
-     first_token_entropy_sum, all_tokens_entropy_sum, 
-     total_samples, total_tokens) = stats.tolist()
+    (
+        total_full_correct,
+        total_first_token_correct,
+        first_token_entropy_sum,
+        all_tokens_entropy_sum,
+        total_samples,
+        total_tokens,
+    ) = stats.tolist()
     total_samples = int(total_samples)
     total_tokens = int(total_tokens)
-    
+
     if total_samples == 0:
-        return {"full_acc": float('nan'), "first_token_acc": float('nan'), 
-                "first_token_entropy": float('nan'), "all_tokens_entropy": float('nan'),
-                "total_samples": 0}
+        return {
+            "full_acc": float("nan"),
+            "first_token_acc": float("nan"),
+            "first_token_entropy": float("nan"),
+            "all_tokens_entropy": float("nan"),
+            "total_samples": 0,
+        }
 
     return {
         "full_acc": total_full_correct / total_samples,
         "first_token_acc": total_first_token_correct / total_samples,
         "first_token_entropy": first_token_entropy_sum / total_samples,
-        "all_tokens_entropy": all_tokens_entropy_sum / total_tokens if total_tokens > 0 else float('nan'),
+        "all_tokens_entropy": all_tokens_entropy_sum / total_tokens
+        if total_tokens > 0
+        else float("nan"),
         "total_samples": total_samples,
     }
 
 
-
 def _main():
-    parser = argparse.ArgumentParser(description="Evaluate a model's tactic and critic accuracy on the leantree validation set", allow_abbrev=False)
-    parser.add_argument("--model-path", type=str, required=True, help="path to model_NNNNNN.pt (relative to models/ or absolute)")
-    parser.add_argument("--split", type=str, default="valid", help="dataset split to evaluate on")
-    parser.add_argument("--batch-size", type=int, default=32, help="evaluation batch size")
-    parser.add_argument("--eval-steps", type=int, default=None, help="cap on number of contributing batches per eval (default: full split)")
+    parser = argparse.ArgumentParser(
+        description="Evaluate a model's tactic and critic accuracy on the leantree validation set",
+        allow_abbrev=False,
+    )
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        required=True,
+        help="path to model_NNNNNN.pt (relative to models/ or absolute)",
+    )
+    parser.add_argument(
+        "--split", type=str, default="valid", help="dataset split to evaluate on"
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=32, help="evaluation batch size"
+    )
+    parser.add_argument(
+        "--eval-steps",
+        type=int,
+        default=None,
+        help="cap on number of contributing batches per eval (default: full split)",
+    )
     args = parser.parse_args()
 
     device_type = autodetect_device_type()
@@ -260,10 +326,16 @@ def _main():
         return
     print0(f"Dataset rows: {len(dataset)}")
 
-    build_loader = lambda: sft_data_generator(dataset, batch_size=args.batch_size, device=device)
+    build_loader = lambda: sft_data_generator(
+        dataset, batch_size=args.batch_size, device=device
+    )
 
-    tactic_results = eval_tactic_accuracy(model, tokenizer, build_loader(), eval_steps=args.eval_steps)
-    critic_results = eval_critic_errors(model, tokenizer, build_loader(), eval_steps=args.eval_steps)
+    tactic_results = eval_tactic_accuracy(
+        model, tokenizer, build_loader(), eval_steps=args.eval_steps
+    )
+    critic_results = eval_critic_errors(
+        model, tokenizer, build_loader(), eval_steps=args.eval_steps
+    )
 
     print0(f"Results for split '{args.split}':")
     print0(f"  Tactic samples:           {tactic_results['total_samples']}")

@@ -1,6 +1,7 @@
 """
 Utilities for saving and loading model/optim/state checkpoints.
 """
+
 import os
 import json
 import logging
@@ -15,12 +16,16 @@ from nanoproof.common import get_base_dir, setup_default_logging
 # Set up logging
 setup_default_logging()
 logger = logging.getLogger(__name__)
+
+
 def log0(message):
-    if int(os.environ.get('RANK', 0)) == 0:
+    if int(os.environ.get("RANK", 0)) == 0:
         logger.info(message)
 
 
-def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data, rank=0):
+def save_checkpoint(
+    checkpoint_dir, step, model_data, optimizer_data, meta_data, rank=0
+):
     if rank == 0:
         os.makedirs(checkpoint_dir, exist_ok=True)
         # Save the model state parameters
@@ -34,7 +39,9 @@ def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data,
         logger.info(f"Saved metadata to: {meta_path}")
     # Note that optimizer state is sharded across ranks, so each rank must save its own.
     if optimizer_data is not None:
-        optimizer_path = os.path.join(checkpoint_dir, f"optim_{step:06d}_rank{rank:d}.pt")
+        optimizer_path = os.path.join(
+            checkpoint_dir, f"optim_{step:06d}_rank{rank:d}.pt"
+        )
         torch.save(optimizer_data, optimizer_path)
         logger.info(f"Saved optimizer state to: {optimizer_path}")
 
@@ -47,6 +54,7 @@ def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data,
 # ``$NANOPROOF_HOME/models/``. We never resolve "latest in directory" magic
 # anywhere - every load explicitly names the checkpoint file it wants.
 
+
 def parse_checkpoint_path(model_path: str) -> tuple[str, int]:
     """Resolve a checkpoint file path and parse the step from its filename.
 
@@ -56,7 +64,11 @@ def parse_checkpoint_path(model_path: str) -> tuple[str, int]:
 
     Returns ``(checkpoint_dir, step)``.
     """
-    full = model_path if os.path.isabs(model_path) else os.path.join(get_base_dir(), "models", model_path)
+    full = (
+        model_path
+        if os.path.isabs(model_path)
+        else os.path.join(get_base_dir(), "models", model_path)
+    )
     basename = os.path.basename(full)
     if not basename.startswith("model_") or not basename.endswith(".pt"):
         raise ValueError(
@@ -79,7 +91,9 @@ def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False, rank=0):
     # Load the optimizer state if requested
     optimizer_data = None
     if load_optimizer:
-        optimizer_path = os.path.join(checkpoint_dir, f"optim_{step:06d}_rank{rank:d}.pt")
+        optimizer_path = os.path.join(
+            checkpoint_dir, f"optim_{step:06d}_rank{rank:d}.pt"
+        )
         optimizer_data = torch.load(optimizer_path, map_location=device)
     # Load the metadata
     meta_path = os.path.join(checkpoint_dir, f"meta_{step:06d}.json")
@@ -97,7 +111,9 @@ def build_model(checkpoint_dir, step, device, phase):
     - meta data saved during base model training
     """
     assert phase in ["train", "eval"], f"Invalid phase: {phase}"
-    model_data, optimizer_data, meta_data = load_checkpoint(checkpoint_dir, step, device, load_optimizer=False)
+    model_data, optimizer_data, meta_data = load_checkpoint(
+        checkpoint_dir, step, device, load_optimizer=False
+    )
     if device.type in {"cpu", "mps"}:
         # Convert bfloat16 tensors to float for CPU inference
         model_data = {
@@ -111,12 +127,14 @@ def build_model(checkpoint_dir, step, device, phase):
     # Filter to known NetworkConfig fields so older checkpoints (which carried
     # extra fields like num_value_bins / max_tactic_len) still load.
     valid_fields = {f.name for f in fields(NetworkConfig)}
-    model_config = NetworkConfig(**{k: v for k, v in model_config_kwargs.items() if k in valid_fields})
+    model_config = NetworkConfig(
+        **{k: v for k, v in model_config_kwargs.items() if k in valid_fields}
+    )
     with torch.device("meta"):
         model = Transformer(model_config)
     # Load the model state
     model.to_empty(device=device)
-    model.init_weights() # note: this is dumb, but we need to init the rotary embeddings. TODO: fix model re-init
+    model.init_weights()  # note: this is dumb, but we need to init the rotary embeddings. TODO: fix model re-init
 
     model.load_state_dict(model_data, strict=True, assign=True)
     # Put the model in the right training phase / mode
@@ -137,19 +155,26 @@ def build_model(checkpoint_dir, step, device, phase):
 
 from dataclasses import dataclass
 
+
 @dataclass
 class CheckpointInfo:
     """Information about a loaded checkpoint, used for saving eval results."""
+
     checkpoint_dir: str
     step: int
     seed: int = 0
 
     def get_eval_path(self, dataset_name: str) -> str:
         seed_suffix = f"-{self.seed}" if self.seed != 0 else ""
-        return os.path.join(self.checkpoint_dir, f"eval_{self.step:06d}_{dataset_name}{seed_suffix}.jsonl")
+        return os.path.join(
+            self.checkpoint_dir,
+            f"eval_{self.step:06d}_{dataset_name}{seed_suffix}.jsonl",
+        )
 
 
-def write_eval_results_jsonl(jsonl_path: str, results: dict, prepend_entries: list[dict] = None):
+def write_eval_results_jsonl(
+    jsonl_path: str, results: dict, prepend_entries: list[dict] = None
+):
     """Write evaluation results to a JSONL file."""
     detailed_results = results.get("detailed_results", [])
 
@@ -175,17 +200,26 @@ def write_eval_results_jsonl(jsonl_path: str, results: dict, prepend_entries: li
             }
             f.write(json.dumps(entry) + "\n")
 
-    total_count = len(detailed_results) + (len(prepend_entries) if prepend_entries else 0)
+    total_count = len(detailed_results) + (
+        len(prepend_entries) if prepend_entries else 0
+    )
     logger.info(f"Saved {total_count} eval results to {jsonl_path}")
 
 
-def save_eval_results(checkpoint_info: CheckpointInfo, dataset_name: str, results: dict, prepend_entries: list[dict] = None):
+def save_eval_results(
+    checkpoint_info: CheckpointInfo,
+    dataset_name: str,
+    results: dict,
+    prepend_entries: list[dict] = None,
+):
     """Save evaluation results alongside the checkpoint."""
     jsonl_path = checkpoint_info.get_eval_path(dataset_name)
     write_eval_results_jsonl(jsonl_path, results, prepend_entries=prepend_entries)
 
 
-def save_eval_results_to_run_dir(output_dir: str, step: int, dataset_name: str, results: dict):
+def save_eval_results_to_run_dir(
+    output_dir: str, step: int, dataset_name: str, results: dict
+):
     """Save evaluation results in the RL run's eval directory."""
     eval_dir = os.path.join(output_dir, "evals", f"{step:05d}")
     os.makedirs(eval_dir, exist_ok=True)
@@ -240,6 +274,7 @@ def load_existing_eval_results(jsonl_path: str) -> tuple[list[dict], list[dict]]
 
 
 # -----------------------------------------------------------------------------
+
 
 def load_model(model_path: str, device, phase: str):
     """Load a model from a checkpoint .pt file path.

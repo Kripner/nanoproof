@@ -48,7 +48,9 @@ def find_latest_checkpoint(model_dir: str) -> str:
     return str(latest)
 
 
-def run_subprocess(name: str, cmd: list[str], train_log_dir: Path) -> tuple[str | None, str | None]:
+def run_subprocess(
+    name: str, cmd: list[str], train_log_dir: Path
+) -> tuple[str | None, str | None]:
     """Run a stage subprocess, tee output to a per-stage log file, and parse out
     its log_dir / model_dir from the captured output (if reported)."""
     print(f"\n{'=' * 70}\n[run_train] >>> {name}\n{'=' * 70}", flush=True)
@@ -93,17 +95,40 @@ def link_into_train_dir(train_log_dir: Path, link_name: str, target: str) -> Non
 
 
 def main():
-    parser = argparse.ArgumentParser(description="End-to-end nanoproof training pipeline", allow_abbrev=False)
-    parser.add_argument("--run", type=str, default="dummy", help="run name (used as wandb run name in each stage)")
-    parser.add_argument("--stages", type=str, default=",".join(ALL_STAGES),
-                        help=f"comma-separated subset of {ALL_STAGES} to run, in order")
-    parser.add_argument("--start-model-path", type=str, default=None,
-                        help="model path fed into the first stage; required if 'pretrain' is not in --stages")
+    parser = argparse.ArgumentParser(
+        description="End-to-end nanoproof training pipeline", allow_abbrev=False
+    )
+    parser.add_argument(
+        "--run",
+        type=str,
+        default="dummy",
+        help="run name (used as wandb run name in each stage)",
+    )
+    parser.add_argument(
+        "--stages",
+        type=str,
+        default=",".join(ALL_STAGES),
+        help=f"comma-separated subset of {ALL_STAGES} to run, in order",
+    )
+    parser.add_argument(
+        "--start-model-path",
+        type=str,
+        default=None,
+        help="model path fed into the first stage; required if 'pretrain' is not in --stages",
+    )
     for st in ALL_STAGES:
-        parser.add_argument(f"--{st}-args", type=str, default="",
-                            help=f"extra CLI args forwarded to the {st} stage (single quoted string)")
-    parser.add_argument("--prover-eval-args", type=str, default="",
-                        help="extra CLI args forwarded to the post-sft prover_eval invocation")
+        parser.add_argument(
+            f"--{st}-args",
+            type=str,
+            default="",
+            help=f"extra CLI args forwarded to the {st} stage (single quoted string)",
+        )
+    parser.add_argument(
+        "--prover-eval-args",
+        type=str,
+        default="",
+        help="extra CLI args forwarded to the post-sft prover_eval invocation",
+    )
     args = parser.parse_args()
 
     stages = [s.strip() for s in args.stages.split(",") if s.strip()]
@@ -111,7 +136,9 @@ def main():
         if s not in ALL_STAGES:
             parser.error(f"unknown stage {s!r}; valid: {ALL_STAGES}")
     if "pretrain" not in stages and not args.start_model_path:
-        parser.error("--start-model-path is required when 'pretrain' is not in --stages")
+        parser.error(
+            "--start-model-path is required when 'pretrain' is not in --stages"
+        )
 
     extra = {st: shlex.split(getattr(args, f"{st}_args")) for st in ALL_STAGES}
     extra_prover = shlex.split(args.prover_eval_args)
@@ -129,24 +156,54 @@ def main():
 
     for stage in stages:
         if stage == "pretrain":
-            cmd = [sys.executable, "-m", "nanoproof.pretrain", "--run", args.run] + extra["pretrain"]
+            cmd = [
+                sys.executable,
+                "-m",
+                "nanoproof.pretrain",
+                "--run",
+                args.run,
+            ] + extra["pretrain"]
         elif stage == "midtrain":
-            cmd = [sys.executable, "-m", "nanoproof.midtrain",
-                   "--run", args.run, "--model-path", current_model] + extra["midtrain"]
+            cmd = [
+                sys.executable,
+                "-m",
+                "nanoproof.midtrain",
+                "--run",
+                args.run,
+                "--model-path",
+                current_model,
+            ] + extra["midtrain"]
         elif stage == "sft":
-            cmd = [sys.executable, "-m", "nanoproof.sft",
-                   "--run", args.run, "--model-path", current_model] + extra["sft"]
+            cmd = [
+                sys.executable,
+                "-m",
+                "nanoproof.sft",
+                "--run",
+                args.run,
+                "--model-path",
+                current_model,
+            ] + extra["sft"]
         elif stage == "rl":
             # Non-distributed: empty --infra-file disables distributed mode in rl.py
-            cmd = [sys.executable, "-m", "nanoproof.rl",
-                   "--run", args.run, "--model-path", current_model,
-                   "--infra-file", ""] + extra["rl"]
+            cmd = [
+                sys.executable,
+                "-m",
+                "nanoproof.rl",
+                "--run",
+                args.run,
+                "--model-path",
+                current_model,
+                "--infra-file",
+                "",
+            ] + extra["rl"]
         else:
             raise AssertionError(stage)
 
         log_dir, model_dir = run_subprocess(stage, cmd, train_log_dir)
         if log_dir is None or model_dir is None:
-            raise RuntimeError(f"{stage}: could not parse log/model directory from output")
+            raise RuntimeError(
+                f"{stage}: could not parse log/model directory from output"
+            )
         link_into_train_dir(train_log_dir, f"{stage}_log", log_dir)
         link_into_train_dir(train_log_dir, f"{stage}_model", model_dir)
 
@@ -155,9 +212,14 @@ def main():
 
         # After SFT, run prover_eval on minif2f before continuing to RL.
         if stage == "sft":
-            pe_cmd = [sys.executable, "scripts/prover_eval.py",
-                      "--model-path", current_model,
-                      "--datasets", "minif2f"] + extra_prover
+            pe_cmd = [
+                sys.executable,
+                "scripts/prover_eval.py",
+                "--model-path",
+                current_model,
+                "--datasets",
+                "minif2f",
+            ] + extra_prover
             run_subprocess("prover_eval_minif2f", pe_cmd, train_log_dir)
             # prover_eval writes its results next to the sft checkpoint dir;
             # the per-stage .log file in train_log_dir captures stdout.

@@ -13,6 +13,7 @@ Usage (drop-in replacement for FA3):
     # Inference (with KV cache)
     y = flash_attn.flash_attn_with_kvcache(q, k_cache, v_cache, k=k, v=v, ...)
 """
+
 import os
 
 import torch
@@ -36,7 +37,8 @@ def _load_flash_attention_3():
             return None
         os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
         from kernels import get_kernel
-        return get_kernel('varunneal/flash-attention-3').flash_attn_interface
+
+        return get_kernel("varunneal/flash-attention-3").flash_attn_interface
     except Exception:
         return None
 
@@ -50,10 +52,10 @@ _override_impl = None
 
 def _resolve_use_fa3():
     """Decide once whether to use FA3, based on availability, override, and dtype."""
-    if _override_impl == 'fa3':
+    if _override_impl == "fa3":
         assert HAS_FA3, "Cannot override to FA3: not available on this hardware"
         return True
-    if _override_impl == 'sdpa':
+    if _override_impl == "sdpa":
         return False
     if HAS_FA3:
         # FA3 Hopper kernels only support bf16 and fp8; fp16/fp32 must use SDPA fallback
@@ -61,6 +63,7 @@ def _resolve_use_fa3():
             return True
         return False
     return False
+
 
 USE_FA3 = _resolve_use_fa3()
 
@@ -79,7 +82,9 @@ def _sdpa_attention(q, k, v, window_size, enable_gqa):
 
     # Full context, same length
     if (window < 0 or window >= Tq) and Tq == Tk:
-        return F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=enable_gqa)
+        return F.scaled_dot_product_attention(
+            q, k, v, is_causal=True, enable_gqa=enable_gqa
+        )
 
     # Single token generation
     if Tq == 1:
@@ -88,7 +93,9 @@ def _sdpa_attention(q, k, v, window_size, enable_gqa):
             start = max(0, Tk - (window + 1))
             k = k[:, :, start:, :]
             v = v[:, :, start:, :]
-        return F.scaled_dot_product_attention(q, k, v, is_causal=False, enable_gqa=enable_gqa)
+        return F.scaled_dot_product_attention(
+            q, k, v, is_causal=False, enable_gqa=enable_gqa
+        )
 
     # Need explicit mask for sliding window/chunk inference
     device = q.device
@@ -101,7 +108,10 @@ def _sdpa_attention(q, k, v, window_size, enable_gqa):
     if window >= 0 and window < Tk:
         mask = mask & ((row_idx - col_idx) <= window)
 
-    return F.scaled_dot_product_attention(q, k, v, attn_mask=mask, enable_gqa=enable_gqa)
+    return F.scaled_dot_product_attention(
+        q, k, v, attn_mask=mask, enable_gqa=enable_gqa
+    )
+
 
 # =============================================================================
 # Public API: Same interface as FA3
@@ -130,8 +140,16 @@ def flash_attn_func(q, k, v, causal=False, window_size=(-1, -1)):
     return y.transpose(1, 2)  # back to (B, T, H, D)
 
 
-def flash_attn_with_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seqlens=None,
-                            causal=False, window_size=(-1, -1)):
+def flash_attn_with_kvcache(
+    q,
+    k_cache,
+    v_cache,
+    k=None,
+    v=None,
+    cache_seqlens=None,
+    causal=False,
+    window_size=(-1, -1),
+):
     """
     Flash Attention with KV cache for inference.
 
@@ -150,8 +168,14 @@ def flash_attn_with_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seqlens=N
     """
     if USE_FA3:
         return _fa3.flash_attn_with_kvcache(
-            q, k_cache, v_cache, k=k, v=v, cache_seqlens=cache_seqlens,
-            causal=causal, window_size=window_size
+            q,
+            k_cache,
+            v_cache,
+            k=k,
+            v=v,
+            cache_seqlens=cache_seqlens,
+            causal=causal,
+            window_size=window_size,
         )
 
     # SDPA fallback: manually manage KV cache
@@ -160,8 +184,8 @@ def flash_attn_with_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seqlens=N
 
     # Insert new k, v into cache (in-place, matching FA3 behavior)
     if k is not None and v is not None:
-        k_cache[:, pos:pos+T_new, :, :] = k
-        v_cache[:, pos:pos+T_new, :, :] = v
+        k_cache[:, pos : pos + T_new, :, :] = k
+        v_cache[:, pos : pos + T_new, :, :] = v
 
     # Get full cache up to current position + new tokens
     end_pos = pos + T_new
@@ -183,6 +207,7 @@ def flash_attn_with_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seqlens=N
 # Export: flash_attn module interface (drop-in replacement for FA3)
 # =============================================================================
 from types import SimpleNamespace
+
 flash_attn = SimpleNamespace(
     flash_attn_func=flash_attn_func,
     flash_attn_with_kvcache=flash_attn_with_kvcache,

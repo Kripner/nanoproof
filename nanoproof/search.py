@@ -9,7 +9,13 @@ from leantree.repl_adapter.server import LeanProofBranch, LeanClient
 from leantree.repl_adapter.interaction import LeanProcess, LeanProcessException
 from leantree.utils import RemoteException
 
-from nanoproof.common import pretty_print_tree, ValueOrError, theorem_to_example, Player, TimelineRecorder
+from nanoproof.common import (
+    pretty_print_tree,
+    ValueOrError,
+    theorem_to_example,
+    Player,
+    TimelineRecorder,
+)
 from nanoproof.cli import get_monitor, log
 from nanoproof.inference import TacticModel, BlockingTacticModel
 
@@ -67,7 +73,9 @@ class Node:
     def __post_init__(self):
         if not self.id:
             self.id = str(uuid.uuid4())
-        assert (self.parent is None) == (self.action is None), f"Node __post_init__: parent={self.parent} action={self.action}"
+        assert (self.parent is None) == (self.action is None), (
+            f"Node __post_init__: parent={self.parent} action={self.action}"
+        )
 
     def expanded(self) -> bool:
         return self.children is not None
@@ -91,9 +99,13 @@ class Node:
             self.is_solved = False
         else:
             if self.to_play == Player.OR:
-                self.is_solved = any(child.calculate_solved() for child in self.children.values())
+                self.is_solved = any(
+                    child.calculate_solved() for child in self.children.values()
+                )
             else:
-                self.is_solved = all(child.calculate_solved() for child in self.children.values())
+                self.is_solved = all(
+                    child.calculate_solved() for child in self.children.values()
+                )
         return self.is_solved
 
     def pp_tree(self) -> str:
@@ -101,10 +113,16 @@ class Node:
             return node.children.values() if node.children is not None else []
 
         def get_node_label(node: Node):
-            state_str = "\n\n".join(str(branch.state) for branch in node.state) if len(node.state) > 0 else "<empty>"
+            state_str = (
+                "\n\n".join(str(branch.state) for branch in node.state)
+                if len(node.state) > 0
+                else "<empty>"
+            )
             type_str = "AND" if node.to_play == Player.AND else "OR"
             solved_str = " (SOLVED)" if node.is_solved else ""
-            value_target_str = f"[v={node.value_target:.2f}]" if node.value_target is not None else ""
+            value_target_str = (
+                f"[v={node.value_target:.2f}]" if node.value_target is not None else ""
+            )
             return f"[{type_str}{solved_str}{value_target_str}]\nvis={node.visit_count} evals={node.evaluations} val={node.value():.2f}\n{state_str}"
 
         def get_edge_label(node: Node):
@@ -114,22 +132,28 @@ class Node:
             reward_str = f"r={node.reward:.2f}" if node.reward is not None else "r=None"
             return f"[{prior_str} {reward_str}] {str(node.action)}"
 
-        return pretty_print_tree(self, get_children, get_node_label, get_edge_label, max_label_len=200,
-                                 max_edge_label_len=50)
+        return pretty_print_tree(
+            self,
+            get_children,
+            get_node_label,
+            get_edge_label,
+            max_label_len=200,
+            max_edge_label_len=50,
+        )
 
     def serialize(self) -> dict:
         """Serialize the node tree to a JSON-compatible dict."""
         # Serialize state as list of state strings (LeanProofBranch objects can't be serialized)
         state_strs = [str(branch.state) for branch in self.state] if self.state else []
-        
+
         # Serialize children recursively
         children_data = None
         if self.children is not None:
             children_data = {
-                str(action): child.serialize() 
+                str(action): child.serialize()
                 for action, child in self.children.items()
             }
-        
+
         return {
             "id": self.id,
             "parent_id": self.parent.id if self.parent else None,
@@ -150,10 +174,10 @@ class Node:
     def deserialize(cls, data: dict, id_to_node: dict[str, Self] | None = None) -> Self:
         """
         Deserialize a node tree from a dict.
-        
+
         Creates MockProofBranch objects for the state so that transition
         extraction code (which expects branch.state) works correctly.
-        
+
         Args:
             data: The serialized node data.
             id_to_node: Dict mapping node ids to node instances, used to look up parents.
@@ -161,18 +185,20 @@ class Node:
         """
         if id_to_node is None:
             id_to_node = {}
-        
+
         # Create mock proof branches with .state attribute
         state_strs = data.get("state", [])
         state = [MockProofBranch(s) for s in state_strs]
-        
+
         # Look up parent from dict using parent_id
         parent_id = data.get("parent_id")
         parent = None
         if parent_id:
-            assert parent_id in id_to_node, f"deserialize: Parent node not found: {parent_id}"
+            assert parent_id in id_to_node, (
+                f"deserialize: Parent node not found: {parent_id}"
+            )
             parent = id_to_node[parent_id]
-        
+
         # Create the node first (without children)
         node = cls(
             parent=parent,
@@ -189,10 +215,10 @@ class Node:
             children=None,
             id=data["id"],
         )
-        
+
         # Add node to dict so children can look it up
         id_to_node[node.id] = node
-        
+
         # Deserialize children recursively, passing the dict
         if data.get("children") is not None:
             children = {}
@@ -204,7 +230,7 @@ class Node:
                     action = action_str
                 children[action] = cls.deserialize(child_data, id_to_node)
             node.children = children
-        
+
         return node
 
     def clone(self) -> Self:
@@ -226,33 +252,46 @@ class Node:
                 return node
         return None
 
+
 class MockProofBranch:
     """Mock proof branch for deserialized nodes. Mimics LeanProofBranch.state."""
-    
+
     def __init__(self, state_str: str):
         self.state = state_str
-    
+
     def __str__(self):
         return self.state
 
 
 # TODO: deduplicate with execute_tree (just execute & check that all states equal to the expected values)
 def verify_node(node: Node, timeout: int = 5000):
-    assert node.to_play == Player.OR, f"verify_node: Expected OR root, got {node.to_play}"
-    assert len(node.state) == 1, f"verify_node: Expected 1 branch at root, got {len(node.state)}"
+    assert node.to_play == Player.OR, (
+        f"verify_node: Expected OR root, got {node.to_play}"
+    )
+    assert len(node.state) == 1, (
+        f"verify_node: Expected 1 branch at root, got {len(node.state)}"
+    )
     init_branch = node.state[0]
     to_verify = [(node, [init_branch])]
     i = 0
     while to_verify:
         node, branches = to_verify.pop(0)
         if node.to_play == Player.AND:
-            assert len(branches) == len(node.state), f"verify_node: {len(branches)=} != {len(node.state)=}"
-            for (action, child) in node.children.items():
-                assert isinstance(action, int), f"verify_node: Expected int action below AND node, got {type(action)}"
-                assert child.to_play == Player.OR, f"verify_node: Expected OR node below AND node, got {child.to_play}"
+            assert len(branches) == len(node.state), (
+                f"verify_node: {len(branches)=} != {len(node.state)=}"
+            )
+            for action, child in node.children.items():
+                assert isinstance(action, int), (
+                    f"verify_node: Expected int action below AND node, got {type(action)}"
+                )
+                assert child.to_play == Player.OR, (
+                    f"verify_node: Expected OR node below AND node, got {child.to_play}"
+                )
                 to_verify.append((child, child.state))
         elif node.to_play == Player.OR:
-            assert len(branches) == 1, f"verify_node: Expected 1 branch at OR node, got {len(branches)}"
+            assert len(branches) == 1, (
+                f"verify_node: Expected 1 branch at OR node, got {len(branches)}"
+            )
             branch = branches[0]
             solved_actions = [a for a in node.children if node.children[a].is_solved]
             # More than one terminal node can be solved when expanding.
@@ -262,7 +301,7 @@ def verify_node(node: Node, timeout: int = 5000):
                 result = branch.try_apply_tactic(action, timeout=timeout)
                 if not result.is_success():
                     return f"verify_node: Tactic application error: '{result.error}'; state: '{branch.state}'; action: `{action}`"
-                
+
                 new_branches = result.value
                 if len(new_branches) != len(child.state):
                     return f"Unexpected number of branches after tactic application: {len(new_branches)=} != {len(child.state)=}; state: '{branch.state}'; action: `{action}`"
@@ -273,15 +312,23 @@ def verify_node(node: Node, timeout: int = 5000):
 
         i += 1
         if i > 1000:
-            raise AssertionError(f"verify_node: Exceeded maximum number of iterations ({i=})")
+            raise AssertionError(
+                f"verify_node: Exceeded maximum number of iterations ({i=})"
+            )
 
 
-def execute_tree(root: Node, init_branch: LeanProofBranch, allow_premature_end: bool = False) -> list[tuple[Node, State]]:
+def execute_tree(
+    root: Node, init_branch: LeanProofBranch, allow_premature_end: bool = False
+) -> list[tuple[Node, State]]:
     """
     Execute the tree starting from the initial branch. Return the actual obtained state for each node.
     """
-    assert root.to_play == Player.OR, f"execute_tree: Expected OR root, got {root.to_play}"
-    assert len(root.state) == 1, f"execute_tree: Expected 1 branch at root, got {len(root.state)}"
+    assert root.to_play == Player.OR, (
+        f"execute_tree: Expected OR root, got {root.to_play}"
+    )
+    assert len(root.state) == 1, (
+        f"execute_tree: Expected 1 branch at root, got {len(root.state)}"
+    )
 
     node_to_state = []
     to_execute = [(root, [init_branch])]
@@ -290,13 +337,21 @@ def execute_tree(root: Node, init_branch: LeanProofBranch, allow_premature_end: 
         node, branches = to_execute.pop(0)
         node_to_state.append((node, branches))
         if node.to_play == Player.AND:
-            assert len(branches) == len(node.state) == len(node.children), f"execute_tree (AND): {len(branches)=} != {len(node.state)=} != {len(node.children)=}"
+            assert len(branches) == len(node.state) == len(node.children), (
+                f"execute_tree (AND): {len(branches)=} != {len(node.state)=} != {len(node.children)=}"
+            )
             for branch, (action, child) in zip(branches, node.children.items()):
-                assert isinstance(action, int), f"execute_tree (AND): Expected int action below AND node, got {type(action)}"
-                assert child.to_play == Player.OR, f"execute_tree (AND): Expected OR node below AND node, got {child.to_play}"
+                assert isinstance(action, int), (
+                    f"execute_tree (AND): Expected int action below AND node, got {type(action)}"
+                )
+                assert child.to_play == Player.OR, (
+                    f"execute_tree (AND): Expected OR node below AND node, got {child.to_play}"
+                )
                 to_execute.append((child, [branch]))
         elif node.to_play == Player.OR:
-            assert len(branches) == 1, f"execute_tree (OR): Expected 1 branch at OR node, got {len(branches)}"
+            assert len(branches) == 1, (
+                f"execute_tree (OR): Expected 1 branch at OR node, got {len(branches)}"
+            )
             branch = branches[0]
             solved_actions = [a for a in node.children if node.children[a].is_solved]
             # More than one terminal node can be solved when expanding.
@@ -304,11 +359,17 @@ def execute_tree(root: Node, init_branch: LeanProofBranch, allow_premature_end: 
                 child = node.children[action]
 
                 result = branch.try_apply_tactic(action, timeout=5000)
-                assert result.is_success(), f"execute_tree (OR): Tactic application error: '{result.error}'; state: '{branch.state}'; action: `{action}`"
-                
+                assert result.is_success(), (
+                    f"execute_tree (OR): Tactic application error: '{result.error}'; state: '{branch.state}'; action: `{action}`"
+                )
+
                 new_branches = result.value
-                if len(new_branches) != len(child.state) and not (allow_premature_end and len(new_branches) == 0):
-                    raise AssertionError(f"execute_tree (OR): Unexpected number of branches after tactic application: {len(new_branches)=} != {len(child.state)=}; state: '{branch.state}'; action: `{action}`")
+                if len(new_branches) != len(child.state) and not (
+                    allow_premature_end and len(new_branches) == 0
+                ):
+                    raise AssertionError(
+                        f"execute_tree (OR): Unexpected number of branches after tactic application: {len(new_branches)=} != {len(child.state)=}; state: '{branch.state}'; action: `{action}`"
+                    )
                 if len(new_branches) > 0:
                     to_execute.append((child, new_branches))
         else:
@@ -316,12 +377,17 @@ def execute_tree(root: Node, init_branch: LeanProofBranch, allow_premature_end: 
 
         i += 1
         if i > 1000:
-            raise AssertionError(f"execute_tree: Exceeded maximum number of iterations ({i=})")
+            raise AssertionError(
+                f"execute_tree: Exceeded maximum number of iterations ({i=})"
+            )
     return node_to_state
+
 
 def revive_tree_states(root: Node, theorem_str: str, lean_process: LeanProcess):
     init_branch = lean_process.proof_from_sorry(theorem_to_example(theorem_str))
-    assert init_branch.is_success(), f"revive_tree_states: Failed to create initial branch: '{init_branch.error}'"
+    assert init_branch.is_success(), (
+        f"revive_tree_states: Failed to create initial branch: '{init_branch.error}'"
+    )
     init_branch = init_branch.value
     node_to_state = execute_tree(root, init_branch)
     for node, state in node_to_state:
@@ -330,6 +396,7 @@ def revive_tree_states(root: Node, theorem_str: str, lean_process: LeanProcess):
 
 class Game:
     """A single episode of interaction with the environment."""
+
     def __init__(self, theorem: str, num_simulations: int | None = None):
         self.theorem = theorem
         # Number of simulations to run.
@@ -342,6 +409,7 @@ class Game:
 
 class MCTSAbortedError(Exception):
     """Raised when MCTS is aborted early (e.g., prover paused during evaluation)."""
+
     pass
 
 
@@ -387,11 +455,17 @@ def run_mcts(
         node = root
         search_path = [node]
 
-        while node.expanded() and len(node.children) > 0 and not progressive_sample(node, config):
+        while (
+            node.expanded()
+            and len(node.children) > 0
+            and not progressive_sample(node, config)
+        ):
             _, node = select_child(config, node)
             search_path.append(node)
 
-        assert node.state is not None, f"run_mcts: node.state is None, node.id={node.id}"
+        assert node.state is not None, (
+            f"run_mcts: node.state is None, node.id={node.id}"
+        )
         if timeline:
             with timeline.record("llm"):
                 result = model.sample_tactic(node.state)
@@ -402,12 +476,20 @@ def run_mcts(
                 continue
             raise RuntimeError(f"Tactic/value prediction failed: {result.error}")
         tactics, value = result.value
-        tactic_logprobs = [1.0] * len(tactics)  # TODO (!): use the actual action logprobs
+        tactic_logprobs = [1.0] * len(
+            tactics
+        )  # TODO (!): use the actual action logprobs
         value = -value  # convert to MCTS value scale (negative proof depth)
 
-        expand_node(node, tactics, tactic_logprobs, config.prior_temperature,
-                    timeline=timeline, abort_check=abort_check,
-                    tactic_sink=tactic_sink)
+        expand_node(
+            node,
+            tactics,
+            tactic_logprobs,
+            config.prior_temperature,
+            timeline=timeline,
+            abort_check=abort_check,
+            tactic_sink=tactic_sink,
+        )
 
         # Record expansion for monitoring
         monitor = get_monitor()
@@ -424,7 +506,7 @@ def run_mcts(
 
         if root.is_solved:
             break
-    
+
     game.num_iterations = num_iterations
     # if not root.is_solved:
     #     print(f"GIVING UP after {num_iterations} iterations")
@@ -434,8 +516,8 @@ def run_mcts(
 def progressive_sample(node: Node, config: SearchConfig) -> bool:
     """Whether to expand a node in the search tree again (progressive sampling)."""
     return (
-            node.to_play == Player.OR
-            and node.evaluations <= config.ps_c * node.visit_count ** config.ps_alpha
+        node.to_play == Player.OR
+        and node.evaluations <= config.ps_c * node.visit_count**config.ps_alpha
     )
 
 
@@ -461,7 +543,7 @@ def ucb_score(config: SearchConfig, parent: Node, child: Node) -> float:
     prior_score = pb_c * child.prior / parent.prior_sum()
     if child.visit_count > 0:
         value = child.reward + child.value()
-        value_score = config.value_discount ** (- 1 - value)
+        value_score = config.value_discount ** (-1 - value)
     else:
         value_score = 0  # TODO: this is from the official pseudocode, but probably could be improved
 
@@ -473,25 +555,30 @@ def ucb_score(config: SearchConfig, parent: Node, child: Node) -> float:
             value_score = -1e9
     return prior_score + value_score
 
+
 # If a new state is equal to the state of a parent, we are in a cycle.
 def is_cycling(node: Node, new_branches: list[LeanProofBranch]) -> bool:
     p = node.parent
     while p is not None:
-        if len(p.state) == len(new_branches) and all(branch.state.semantic_equals(p_branch.state) for branch, p_branch in zip(new_branches, p.state)):
+        if len(p.state) == len(new_branches) and all(
+            branch.state.semantic_equals(p_branch.state)
+            for branch, p_branch in zip(new_branches, p.state)
+        ):
             return True
         p = p.parent
     return False
 
+
 # We expand a node using the value and sampled actions obtained from the neural
 # network. Immediately attempt the actions in the environment.
 def expand_node(
-        node: Node,
-        actions: list[str],
-        action_logprobs: list[float],
-        temperature: float,
-        timeline: TimelineRecorder | None = None,
-        abort_check=None,
-        tactic_sink: "Callable[[str, str, str], None] | None" = None,
+    node: Node,
+    actions: list[str],
+    action_logprobs: list[float],
+    temperature: float,
+    timeline: TimelineRecorder | None = None,
+    abort_check=None,
+    tactic_sink: "Callable[[str, str, str], None] | None" = None,
 ):
     node.evaluations += 1
     policy = {
@@ -499,7 +586,9 @@ def expand_node(
         for a, logprob in zip(actions, action_logprobs)
     }
     node.children = {}
-    state_str = str(node.state[0].state).strip() if len(node.state) == 1 else "<multi-branch>"
+    state_str = (
+        str(node.state[0].state).strip() if len(node.state) == 1 else "<multi-branch>"
+    )
 
     def _emit(status: str) -> None:
         if tactic_sink is not None:
@@ -522,8 +611,13 @@ def expand_node(
                     new_branches = branch.try_apply_tactic(action)
             else:
                 new_branches = branch.try_apply_tactic(action)
-        except (RemoteException, LeanProcessException, ConnectionError, TimeoutError) as e:
-            short_err = str(e).split('\n', 1)[0]
+        except (
+            RemoteException,
+            LeanProcessException,
+            ConnectionError,
+            TimeoutError,
+        ) as e:
+            short_err = str(e).split("\n", 1)[0]
             log(f"Lean crash on tactic {action!r}: {short_err}", component="Search")
             raise
         if not new_branches.is_success():
@@ -567,9 +661,9 @@ def expand_node(
 # At the end of a simulation, we propagate the evaluation all the way up the
 # tree to the root.
 def backpropagate(
-        search_path: list[Node],
-        value: float,
-        config: SearchConfig,
+    search_path: list[Node],
+    value: float,
+    config: SearchConfig,
 ):
     if len(search_path[-1].children) == 0:
         value = config.no_legal_actions_value

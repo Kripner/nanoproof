@@ -30,7 +30,11 @@ from nanoproof.data.check_init import (
     run_check_init_cli,
     whitelist_path,
 )
-from nanoproof.data.rl.common import download_file, download_whitelists, shuffle_train_valid_split
+from nanoproof.data.rl.common import (
+    download_file,
+    download_whitelists,
+    shuffle_train_valid_split,
+)
 
 DATA_DIR = os.path.join(get_base_dir(), "data", "deepseek_prover")
 JSONL_PATH = os.path.join(DATA_DIR, "deepseek_prover.jsonl")
@@ -96,7 +100,9 @@ def list_theorems(split: str, lean_version: str | None = None) -> list[BenchTheo
     assert split in ("train", "valid"), f"Invalid split: {split!r}"
     sources = _load_sources()
     split_sources = shuffle_train_valid_split(sources, valid_size=500, seed=0)[split]
-    theorems = [BenchTheorem(source=DEEPSEEK_PROVER_PREAMBLE + s) for s in split_sources]
+    theorems = [
+        BenchTheorem(source=DEEPSEEK_PROVER_PREAMBLE + s) for s in split_sources
+    ]
 
     if lean_version is not None:
         theorems = filter_by_whitelist(
@@ -115,8 +121,11 @@ def _all_theorems() -> list[BenchTheorem]:
 # -----------------------------------------------------------------------------
 # CLI: download / show / stats / check-init
 
+
 def _main():
-    parser = argparse.ArgumentParser(description="DeepSeek-Prover-V1 dataset", allow_abbrev=False)
+    parser = argparse.ArgumentParser(
+        description="DeepSeek-Prover-V1 dataset", allow_abbrev=False
+    )
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("download", help="Download the source JSONL from HuggingFace")
     show = sub.add_parser("show", help="Print the first N theorems from a split")
@@ -133,7 +142,7 @@ def _main():
     if args.action == "download":
         download_dataset()
     elif args.action == "show":
-        for thm in list_theorems(args.split)[:args.n]:
+        for thm in list_theorems(args.split)[: args.n]:
             print(thm.source)
             print("-" * 80)
     elif args.action == "stats":
