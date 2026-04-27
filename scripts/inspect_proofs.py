@@ -4,14 +4,17 @@
 import argparse
 import json
 import random
-from collections import Counter
 from pathlib import Path
 
 from leantree.repl_adapter.server import LeanClient
 
-from nanoproof.common import linearize_proof, format_linearized_proof
+from nanoproof.common import linearize_proof, format_linearized_proof, construct_proof_source
+from nanoproof.data.bench import minif2f, proofnet
 from nanoproof.search import Node, revive_tree_states
 from nanoproof.experience_collection import prune_redundant_nodes, compute_value_target
+
+# Datasets that the RL training loop evaluates each step (see rl.py).
+EVAL_DATASETS = ["minif2f", "proofnet"]
 
 # Imports needed when writing exported proofs as standalone .lean files.
 # (Not sent to the REPL - the server is launched with --imports Mathlib
@@ -23,13 +26,45 @@ import FormalConjectures.Util.Answer
 """
 
 
-def _record_header(item: dict) -> str:
-    """Return the header to send to the REPL for a stored proof record.
+_DECL_KEYWORDS = ("theorem ", "lemma ", "example ", "example:", "def ")
 
-    Older JSONL records have a separate ``header`` field. Newer records
-    embed the preamble in ``theorem`` directly, so this returns an empty
-    string. Falls back to the miniF2F preamble for the oldest records
-    that have neither.
+
+def _proof_preview(item: dict, max_len: int = 80) -> str:
+    """Linearized tactics joined with the literal ``\\n``, capped to
+    ``max_len`` chars. Empty for unproven records."""
+    proof_dict = item.get("proof")
+    if proof_dict is None:
+        return ""
+    node = Node.deserialize(proof_dict)
+    tactics = linearize_proof(node)
+    text = "\\n".join(tactics)
+    if len(text) > max_len:
+        text = text[: max_len - 3] + "..."
+    return text
+
+
+def _theorem_summary(item: dict) -> str:
+    """Single-line label for a record. Prefers the stored ``name``; else
+    extracts the declaration line from the source (skipping the preamble)."""
+    name = item.get("name")
+    if name:
+        return name
+    source = item.get("theorem", "(no theorem)")
+    for line in source.split("\n"):
+        stripped = line.lstrip()
+        if any(stripped.startswith(kw) for kw in _DECL_KEYWORDS):
+            return stripped
+    return source.replace("\n", " ").strip()
+
+
+def _record_header(item: dict) -> str:
+    """Return the per-record REPL header, or "" when the record has none.
+
+    Current eval JSONL records embed all opens / aux defs inside the
+    ``theorem`` source itself (BenchTheorem.header was folded into
+    .source), so this returns "" for those. The lookup remains for
+    backwards compat with older JSONL files that stored a header
+    separately.
     """
     return item.get("header") or ""
 
@@ -166,67 +201,37 @@ def cmd_view(args):
 def cmd_stats(args):
     """Print statistics about the evaluation results."""
     proofs = load_proofs(args.path)
-    
-    if len(proofs) == 0:
+
+    if not proofs:
         print("No proofs found.")
         return
-    
-    # Count proven/unproven
+
     proven = [p for p in proofs if p.get("proof") is not None]
-    unproven = [p for p in proofs if p.get("proof") is None]
-    
-    # Iteration statistics
-    iterations = [p.get("num_iterations", 0) for p in proofs]
-    proven_iterations = [p.get("num_iterations", 0) for p in proven]
-    unproven_iterations = [p.get("num_iterations", 0) for p in unproven]
-    
-    print(f"Evaluation Results Statistics")
-    print(f"{'=' * 60}")
+    errors = [p for p in proofs if p.get("error") is not None]
+
     print(f"Path: {args.path}")
-    print(f"Total theorems: {len(proofs):,}")
+    print(f"Total: {len(proofs):,}")
+    print(f"Proven: {len(proven):,} ({100 * len(proven) / len(proofs):.1f}%)")
+    print(f"Errors: {len(errors):,}")
+
+    if not proven:
+        return
+
+    proof_lengths = []   # tactics per proven proof
+    tactic_lengths = []  # chars per tactic across all proven proofs
+    for p in proven:
+        node = Node.deserialize(p["proof"])
+        tactics = linearize_proof(node)
+        proof_lengths.append(len(tactics))
+        tactic_lengths.extend(len(t) for t in tactics)
+
+    def _print_stats(label: str, values: list[int]) -> None:
+        avg = sum(values) / len(values)
+        print(f"{label}: avg={avg:.1f} min={min(values)} max={max(values)}")
+
     print()
-    
-    print(f"Success Rate:")
-    success_rate = len(proven) / len(proofs) if proofs else 0
-    print(f"  Proven: {len(proven):,} ({100 * success_rate:.1f}%)")
-    print(f"  Unproven: {len(unproven):,} ({100 * (1 - success_rate):.1f}%)")
-    print()
-    
-    print(f"MCTS Iterations:")
-    if iterations:
-        avg_iter = sum(iterations) / len(iterations)
-        print(f"  Overall average: {avg_iter:.1f}")
-        print(f"  Min: {min(iterations)}")
-        print(f"  Max: {max(iterations)}")
-    if proven_iterations:
-        avg_proven = sum(proven_iterations) / len(proven_iterations)
-        print(f"  Average for proven: {avg_proven:.1f}")
-    if unproven_iterations:
-        avg_unproven = sum(unproven_iterations) / len(unproven_iterations)
-        print(f"  Average for unproven: {avg_unproven:.1f}")
-    print()
-    
-    # Iteration distribution
-    if iterations:
-        print(f"Iteration Distribution:")
-        # Bucket iterations into ranges
-        buckets = Counter()
-        for it in iterations:
-            if it <= 10:
-                buckets["1-10"] += 1
-            elif it <= 50:
-                buckets["11-50"] += 1
-            elif it <= 100:
-                buckets["51-100"] += 1
-            elif it <= 500:
-                buckets["101-500"] += 1
-            else:
-                buckets["500+"] += 1
-        
-        for bucket in ["1-10", "11-50", "51-100", "101-500", "500+"]:
-            count = buckets.get(bucket, 0)
-            pct = 100 * count / len(iterations)
-            print(f"  {bucket:>10}: {count:,} ({pct:.1f}%)")
+    _print_stats("Proof length (tactics)", proof_lengths)
+    _print_stats("Tactic length (chars)", tactic_lengths)
 
 
 def cmd_list(args):
@@ -252,15 +257,18 @@ def cmd_list(args):
     selected = proofs[start:end]
     
     for i, item in enumerate(selected):
-        theorem = item.get("theorem", "(no theorem)")
-        # Truncate long theorems
-        if len(theorem) > 80:
-            theorem = theorem[:77] + "..."
-        
+        summary = _theorem_summary(item)
+        if len(summary) > 80:
+            summary = summary[:77] + "..."
+
         status = "✓" if item.get("proof") is not None else "✗"
         iterations = item.get("num_iterations", "?")
-        
-        print(f"[{start + i:4d}] {status} (iter={iterations:>4}) {theorem}")
+        preview = _proof_preview(item)
+
+        line = f"[{start + i:4d}] {status} (iter={iterations:>4}) {summary}"
+        if preview:
+            line += f"  |  {preview}"
+        print(line)
 
 
 def cmd_simplify(args):
@@ -363,80 +371,134 @@ def cmd_simplify(args):
             print()
 
 
+def cmd_check(args):
+    """Check that an eval JSONL file contains exactly the benchmark theorems."""
+    bench_loaders = {
+        "minif2f": lambda: minif2f.list_theorems(split="valid"),
+        "proofnet": lambda: proofnet.list_theorems(split="valid"),
+    }
+
+    path = Path(args.path)
+    stem = path.stem.lower()
+    dataset = next((name for name in bench_loaders if name in stem), None)
+    if dataset is None:
+        print(f"Cannot determine dataset from filename: {path.name}")
+        print(f"Expected one of: {', '.join(bench_loaders)}")
+        return
+
+    bench_theorems = bench_loaders[dataset]()
+    proofs = load_proofs(str(path))
+
+    print(f"Dataset: {dataset} (split=valid)")
+    print(f"Expected: {len(bench_theorems)} theorems")
+    print(f"In file:  {len(proofs)} records")
+
+    expected = {t.source for t in bench_theorems}
+    file_sources = [p.get("theorem", "") for p in proofs]
+    file_set = set(file_sources)
+
+    duplicates = len(file_sources) - len(file_set)
+    missing = expected - file_set
+    extra = file_set - expected
+
+    if duplicates == 0 and not missing and not extra:
+        print("OK: file contains exactly the benchmark theorems.")
+        return
+
+    print()
+    print("MISMATCH:")
+    if duplicates:
+        print(f"  Duplicate records: {duplicates}")
+    if missing:
+        print(f"  Missing from file: {len(missing)}")
+        for s in sorted(missing)[:5]:
+            print(f"    - {_one_line_preview(s)}")
+        if len(missing) > 5:
+            print(f"    ... ({len(missing) - 5} more)")
+    if extra:
+        print(f"  Extra in file (not in benchmark): {len(extra)}")
+        for s in sorted(extra)[:5]:
+            print(f"    - {_one_line_preview(s)}")
+        if len(extra) > 5:
+            print(f"    ... ({len(extra) - 5} more)")
+
+
+def _one_line_preview(source: str, max_len: int = 120) -> str:
+    """Compact one-line representation of a Lean source for diff output."""
+    for line in source.split("\n"):
+        stripped = line.lstrip()
+        if any(stripped.startswith(kw) for kw in _DECL_KEYWORDS):
+            return stripped[:max_len] + ("..." if len(stripped) > max_len else "")
+    flat = " ".join(source.split())
+    return flat[:max_len] + ("..." if len(flat) > max_len else "")
+
+
 def cmd_gather_lean(args):
     """Gather Lean theorems with proofs from evaluation steps."""
     run_dir = Path(args.run_dir)
     evals_dir = run_dir / "evals"
-    
+
     if not evals_dir.exists():
         print(f"Error: evals directory not found at {evals_dir}")
         return
-    
-    # Parse step subdirs as ints and sort
-    steps = []
-    for subdir in evals_dir.iterdir():
-        if subdir.is_dir():
-            step = int(subdir.name)
-            steps.append(step)
-    
-    steps.sort()
-    
-    if not steps:
+
+    step_dirs = sorted(
+        (d for d in evals_dir.iterdir() if d.is_dir()),
+        key=lambda d: int(d.name),
+    )
+
+    if not step_dirs:
         print(f"No step directories found in {evals_dir}")
         return
-    
+
     # Create output directory
     output_base = Path(args.output_dir) / run_dir.name
     output_base.mkdir(parents=True, exist_ok=True)
-    
-    print(f"Found {len(steps)} evaluation steps: {steps}")
+
+    print(f"Found {len(step_dirs)} evaluation steps: {[d.name for d in step_dirs]}")
     print(f"Output directory: {output_base}")
     print()
-    
-    for step in steps:
-        step_dir = evals_dir / str(step)
-        minif2f_path = step_dir / "minif2f.jsonl"
-        
-        if not minif2f_path.exists():
-            print(f"Warning: {minif2f_path} not found, skipping step {step}")
-            continue
-        
-        proofs = load_proofs(str(minif2f_path))
 
-        # Collect theorems, each wrapped in its own `section ... end` with
-        # its stored header so opens/defs don't leak between theorems.
-        lean_blocks = []
-        proven_count = 0
+    for step_dir in step_dirs:
+        for dataset in EVAL_DATASETS:
+            jsonl_path = step_dir / f"{dataset}.jsonl"
+            if not jsonl_path.exists():
+                continue
 
-        for item in proofs:
-            theorem = item.get("theorem", "").strip()
-            proof_dict = item.get("proof")
+            proofs = load_proofs(str(jsonl_path))
 
-            if proof_dict is not None:
-                node = Node.deserialize(proof_dict)
-                tactics = linearize_proof(node)
+            # Collect theorems, each wrapped in its own `section ... end` with
+            # its stored header so opens/defs don't leak between theorems.
+            lean_blocks = []
+            proven_count = 0
 
-                assert theorem.endswith("sorry"), "theorem should end with 'sorry'"
-                proven_count += 1
-                theorem_body = theorem[:-len("sorry")]
-                if len(tactics) == 1:
-                    theorem = theorem_body + tactics[0]
+            for item in proofs:
+                theorem = item.get("theorem", "").strip()
+                proof_dict = item.get("proof")
+
+                if proof_dict is not None:
+                    proven_count += 1
+                    # Prefer the cached source written by the prover; fall
+                    # back to reconstructing it for older JSONL records.
+                    cached = item.get("linearized_proof")
+                    if cached:
+                        theorem = cached
+                    else:
+                        node = Node.deserialize(proof_dict)
+                        tactics = linearize_proof(node)
+                        theorem = construct_proof_source(theorem, tactics)
+
+                header = _record_header(item)
+                if header:
+                    lean_blocks.append(f"section\n{header}\n\n{theorem}\n\nend")
                 else:
-                    proof_lines = "\n  ".join(tactics)
-                    theorem = theorem_body + proof_lines
+                    lean_blocks.append(f"section\n\n{theorem}\n\nend")
 
-            header = _record_header(item)
-            if header:
-                lean_blocks.append(f"section\n{header}\n\n{theorem}\n\nend")
-            else:
-                lean_blocks.append(f"section\n\n{theorem}\n\nend")
+            output_path = output_base / f"{step_dir.name}-{dataset}.lean"
+            with open(output_path, "w") as f:
+                f.write(_EXPORT_IMPORTS.strip() + "\n\n\n" + "\n\n".join(lean_blocks))
 
-        # Write the Lean file
-        output_path = output_base / f"{step}-minif2f.lean"
-        with open(output_path, "w") as f:
-            f.write(_EXPORT_IMPORTS.strip() + "\n\n\n" + "\n\n".join(lean_blocks))
-        
-        print(f"Step {step}: {proven_count}/{len(lean_blocks)} proven -> {output_path}")
+            print(f"Step {step_dir.name} [{dataset}]: {proven_count}/{len(lean_blocks)} proven -> {output_path}")
 
 
 def main():
@@ -476,6 +538,14 @@ def main():
     stats_parser = subparsers.add_parser("stats", help="Print statistics")
     stats_parser.add_argument("path", help="Path to the evaluation results JSONL file")
     stats_parser.set_defaults(func=cmd_stats)
+
+    # Check subcommand
+    check_parser = subparsers.add_parser(
+        "check",
+        help="Verify the eval JSONL contains exactly the benchmark theorems",
+    )
+    check_parser.add_argument("path", help="Path to the evaluation results JSONL file")
+    check_parser.set_defaults(func=cmd_check)
     
     # List subcommand
     list_parser = subparsers.add_parser("list", help="List theorems with status")
