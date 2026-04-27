@@ -13,6 +13,7 @@ CLI: see ``python -m nanoproof.data.bench.proofnet --help``.
 import argparse
 import json
 import os
+from collections import Counter
 from pathlib import Path
 
 from nanoproof.common import get_base_dir
@@ -24,6 +25,8 @@ DATA_DIR = os.path.join(get_base_dir(), "data", "proofnet")
 SOURCE_URL = "https://raw.githubusercontent.com/Kripner/ProofNet/refs/heads/main/data/proofnet.jsonl"
 FILENAME = "proofnet.jsonl"
 FILE_PATH = os.path.join(DATA_DIR, FILENAME)
+
+DATASET_NAME = "proofnet"
 
 _SPLITS = ("valid", "test")
 
@@ -64,21 +67,24 @@ def list_theorems(split: str) -> list[BenchTheorem]:
         # miniF2F exactly and we don't rely on leantree's ``:= sorry`` regex
         # rewrite in ``_eliminate_sorry_without_by``.
         stmt = r["formal_statement"].rstrip()
+        name = r["name"]
         if stmt.endswith(":= by"):
             source = stmt + "\n  sorry"
         elif stmt.endswith(":="):
             source = stmt + " by\n  sorry"
         else:
             raise ValueError(
-                f"unexpected suffix in formal_statement for {r.get('name')!r}: {stmt!r}"
+                f"unexpected suffix in formal_statement for {name!r}: {stmt!r}"
             )
         preamble = _strip_imports(r["header"])
         if preamble:
             source = preamble + "\n\n" + source
-        theorems.append(BenchTheorem(source=source, name=r.get("name")))
+        theorems.append(BenchTheorem(source=source, dataset=DATASET_NAME, id=name))
     assert all(t.source.count("sorry") == 1 for t in theorems), (
         "Found a theorem with no or multiple `sorry`."
     )
+    duplicates = [tid for tid, n in Counter(t.id for t in theorems).items() if n > 1]
+    assert not duplicates, f"proofnet/{split}: duplicate theorem ids: {duplicates}"
     return theorems
 
 
@@ -112,7 +118,7 @@ def _main():
         download_dataset()
     elif args.action == "show":
         for thm in list_theorems(args.split)[: args.n]:
-            print(f"# {thm.name}")
+            print(f"# {thm.id}")
             print(thm.source)
             print("-" * 80)
     elif args.action == "stats":

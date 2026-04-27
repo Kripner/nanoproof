@@ -15,8 +15,17 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class BenchTheorem:
+    """One benchmark/RL theorem.
+
+    ``(dataset, id)`` is the global key used by the matchmaker, the on-disk
+    attempt log, the inspector script, and the web UI. ``id`` must be unique
+    within ``dataset`` and stable across runs (sourced from the upstream
+    dataset, not synthesized at load time).
+    """
+
     source: str
-    name: str | None = None
+    dataset: str
+    id: str
 
 
 # Per-dataset preambles (open statements). These are prepended to each

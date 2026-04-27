@@ -64,7 +64,11 @@ def download_dataset() -> None:
     download_whitelists(JSONL_PATH)
 
 
-def _load_sources() -> list[str]:
+DATASET_NAME = "deepseek_prover"
+
+
+def _load_sources() -> list[tuple[str, str]]:
+    """Return ``(name, processed_source)`` pairs from the JSONL."""
     if not os.path.exists(JSONL_PATH):
         raise FileNotFoundError(
             f"DeepSeek-Prover-V1 dataset not found at {JSONL_PATH}. Run with `download` first."
@@ -73,7 +77,7 @@ def _load_sources() -> list[str]:
     with open(JSONL_PATH, "r") as f:
         rows = [json.loads(line) for line in f]
 
-    theorems = []
+    theorems: list[tuple[str, str]] = []
     skipped = 0
     skipped_example = None
     for row in rows:
@@ -87,7 +91,7 @@ def _load_sources() -> list[str]:
             if skipped_example is None:
                 skipped_example = raw
             continue
-        theorems.append(processed)
+        theorems.append((row["name"], processed))
 
     if skipped > 0 and int(os.environ.get("RANK", 0)) == 0:
         print(f"Skipped {skipped} statements that could not be parsed (no `:=`)")
@@ -101,7 +105,10 @@ def list_theorems(split: str, lean_version: str | None = None) -> list[BenchTheo
     sources = _load_sources()
     split_sources = shuffle_train_valid_split(sources, valid_size=500, seed=0)[split]
     theorems = [
-        BenchTheorem(source=DEEPSEEK_PROVER_PREAMBLE + s) for s in split_sources
+        BenchTheorem(
+            source=DEEPSEEK_PROVER_PREAMBLE + s, dataset=DATASET_NAME, id=name
+        )
+        for name, s in split_sources
     ]
 
     if lean_version is not None:
@@ -115,7 +122,12 @@ def list_theorems(split: str, lean_version: str | None = None) -> list[BenchTheo
 
 def _all_theorems() -> list[BenchTheorem]:
     """Every theorem across both splits, for whitelist generation."""
-    return [BenchTheorem(source=DEEPSEEK_PROVER_PREAMBLE + s) for s in _load_sources()]
+    return [
+        BenchTheorem(
+            source=DEEPSEEK_PROVER_PREAMBLE + s, dataset=DATASET_NAME, id=name
+        )
+        for name, s in _load_sources()
+    ]
 
 
 # -----------------------------------------------------------------------------

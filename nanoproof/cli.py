@@ -558,78 +558,97 @@ def _tree_depth_and_size(node: dict | None) -> tuple[int, int]:
     return max_child_depth + 1, size
 
 
-_collection_stats_cache: dict[str, tuple[float, dict]] = {}
+_step_stats_cache: dict[str, tuple[float, dict]] = {}
 
 
-def _collection_stats(path: str | None) -> dict:
-    """Count proofs and transitions in a ``collected.jsonl`` file (mtime-cached)."""
+def _step_stats(path: str | None) -> dict:
+    """Count attempts (proven/unproven/error) and transitions in a
+    ``theorems.jsonl`` file (mtime-cached)."""
+    empty = {
+        "num_attempts": 0,
+        "num_proven": 0,
+        "num_unproven": 0,
+        "num_errors": 0,
+        "num_transitions": 0,
+    }
     if not path or not os.path.exists(path):
-        return {"num_proofs": 0, "num_transitions": 0}
+        return empty
     mtime = os.path.getmtime(path)
-    cached = _collection_stats_cache.get(path)
+    cached = _step_stats_cache.get(path)
     if cached and cached[0] == mtime:
         return cached[1]
-    num_proofs = 0
-    num_transitions = 0
+    stats = dict(empty)
     with open(path, "r") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
-            num_proofs += 1
             try:
                 obj = json.loads(line)
             except Exception:
                 continue
-            num_transitions += len(obj.get("transitions", []))
-    stats = {"num_proofs": num_proofs, "num_transitions": num_transitions}
-    _collection_stats_cache[path] = (mtime, stats)
+            stats["num_attempts"] += 1
+            stats["num_transitions"] += len(obj.get("transitions", []))
+            outcome = obj.get("outcome")
+            if outcome == "proven":
+                stats["num_proven"] += 1
+            elif outcome == "unproven":
+                stats["num_unproven"] += 1
+            elif outcome == "error":
+                stats["num_errors"] += 1
+    _step_stats_cache[path] = (mtime, stats)
     return stats
 
 
-def _serve_collected_summary(path: str | None) -> Response:
-    """Return lightweight proof summaries from a ``collected.jsonl`` file.
+def _attempt_summary_row(obj: dict) -> dict:
+    full_depth, full_size = _tree_depth_and_size(obj.get("full_tree"))
+    simp_depth, simp_size = _tree_depth_and_size(obj.get("simplified_tree"))
+    return {
+        "dataset": obj.get("dataset"),
+        "id": obj.get("id"),
+        "theorem": obj.get("theorem"),
+        "outcome": obj.get("outcome"),
+        "error": obj.get("error"),
+        "num_simulations": obj.get("num_simulations", 0),
+        "num_iterations": obj.get("num_iterations", 0),
+        "num_transitions": len(obj.get("transitions", [])),
+        "full_tree_depth": full_depth,
+        "full_tree_size": full_size,
+        "simplified_tree_depth": simp_depth,
+        "simplified_tree_size": simp_size,
+    }
 
-    Full trees are expensive (50-200KB each) so we only return per-proof
-    metadata here; clients fetch trees via :func:`_serve_collected_entry`.
+
+def _serve_attempts_summary(path: str | None) -> Response:
+    """Return lightweight per-attempt summaries from a ``theorems.jsonl`` file.
+
+    Full trees are expensive (50-200KB each) so we only return per-attempt
+    metadata here; clients fetch trees via :func:`_serve_attempt_entry`.
     """
     if not path or not os.path.exists(path):
         return jsonify({"error": "Not found"}), 404
-    proofs: list[dict] = []
-    for_totals_transitions = 0
+    attempts: list[dict] = []
+    total_transitions = 0
     with open(path, "r") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             obj = json.loads(line)
-            full_depth, full_size = _tree_depth_and_size(obj.get("full_tree"))
-            simp_depth, simp_size = _tree_depth_and_size(obj.get("simplified_tree"))
-            num_trans = len(obj.get("transitions", []))
-            for_totals_transitions += num_trans
-            proofs.append(
-                {
-                    "name": obj.get("name"),
-                    "theorem": obj.get("theorem"),
-                    "num_iterations": obj.get("num_iterations", 0),
-                    "num_transitions": num_trans,
-                    "full_tree_depth": full_depth,
-                    "full_tree_size": full_size,
-                    "simplified_tree_depth": simp_depth,
-                    "simplified_tree_size": simp_size,
-                }
-            )
+            row = _attempt_summary_row(obj)
+            total_transitions += row["num_transitions"]
+            attempts.append(row)
     return jsonify(
         {
-            "proofs": proofs,
-            "total": len(proofs),
-            "total_transitions": for_totals_transitions,
+            "attempts": attempts,
+            "total": len(attempts),
+            "total_transitions": total_transitions,
         }
     )
 
 
-def _serve_collected_entry(path: str | None, index: int) -> Response:
-    """Return the full record (trees + transitions) for one proof."""
+def _serve_attempt_entry(path: str | None, index: int) -> Response:
+    """Return the full record (trees + transitions) for one attempt."""
     if not path or not os.path.exists(path):
         return jsonify({"error": "Not found"}), 404
     i = 0
@@ -644,8 +663,8 @@ def _serve_collected_entry(path: str | None, index: int) -> Response:
     return jsonify({"error": "Index out of range"}), 404
 
 
-def _serve_collected_transitions(path: str | None, args) -> Response:
-    """Flatten transitions across all proofs in a ``collected.jsonl`` file.
+def _serve_step_transitions(path: str | None, args) -> Response:
+    """Flatten transitions across all proven attempts in a ``theorems.jsonl`` file.
 
     Query params: ``offset`` (default 0), ``limit`` (default 200, 0 = all).
     """
@@ -667,12 +686,12 @@ def _serve_collected_transitions(path: str | None, args) -> Response:
             if not line:
                 continue
             obj = json.loads(line)
-            proof_name = obj.get("name")
+            theorem_id = obj.get("id")
             for t in obj.get("transitions", []):
                 if offset <= total and (limit == 0 or len(items) < limit):
                     items.append(
                         {
-                            "proof": proof_name,
+                            "id": theorem_id,
                             "state": t[0],
                             "tactic": t[1],
                             "value": t[2],
@@ -736,6 +755,11 @@ class WebMonitor:
 
         # Multiple lean servers (for distributed mode monitoring)
         self.lean_servers: list[LeanServerStatus] = []
+
+        # Matchmaker (set by RL training loop). Used by /api/theorems/* to
+        # list datasets and to recompute per-attempt weights using the same
+        # config the live training loop is using.
+        self.matchmaker = None  # type: ignore[assignment]
 
         # Timeline instrumentation
         self.actor_timelines: dict[int, deque] = {}  # actor_id -> deque of event dicts
@@ -973,6 +997,10 @@ class WebMonitor:
         )
         self._lean_servers_monitor_thread.start()
 
+    def set_matchmaker(self, matchmaker) -> None:
+        with self._lock:
+            self.matchmaker = matchmaker
+
     def set_llm_endpoints(self, endpoints: list[str]):
         """Register per-rank inference server endpoints for LLM profiler.
 
@@ -1152,30 +1180,42 @@ class WebMonitor:
         def get_stderr():
             return jsonify({"lines": self._tail_run_log("stderr.log", 1000)})
 
-        @app.route("/api/collections")
+        @app.route("/api/steps")
         def list_collections():
-            """List available collection steps with per-step proof / transition counts."""
-            steps = _list_phase_steps(self.output_dir, "collection_")
+            """List available collection steps with per-step attempt / outcome / transition counts."""
+            steps = _list_phase_steps(self.output_dir, "step_")
             entries: list[dict] = []
-            total_proofs = 0
+            total_attempts = 0
+            total_proven = 0
+            total_unproven = 0
+            total_errors = 0
             total_transitions = 0
             for s in steps:
-                path = self._phase_file(f"collection_{s:05d}", "collected.jsonl")
-                stats = _collection_stats(path)
+                path = self._phase_file(f"step_{s:05d}", "theorems.jsonl")
+                stats = _step_stats(path)
                 entries.append(
                     {
                         "step": s,
-                        "num_proofs": stats["num_proofs"],
+                        "num_attempts": stats["num_attempts"],
+                        "num_proven": stats["num_proven"],
+                        "num_unproven": stats["num_unproven"],
+                        "num_errors": stats["num_errors"],
                         "num_transitions": stats["num_transitions"],
                     }
                 )
-                total_proofs += stats["num_proofs"]
+                total_attempts += stats["num_attempts"]
+                total_proven += stats["num_proven"]
+                total_unproven += stats["num_unproven"]
+                total_errors += stats["num_errors"]
                 total_transitions += stats["num_transitions"]
             return jsonify(
                 {
                     "steps": [e["step"] for e in entries],
                     "entries": entries,
-                    "total_proofs": total_proofs,
+                    "total_attempts": total_attempts,
+                    "total_proven": total_proven,
+                    "total_unproven": total_unproven,
+                    "total_errors": total_errors,
                     "total_transitions": total_transitions,
                 }
             )
@@ -1199,40 +1239,40 @@ class WebMonitor:
             steps.sort()
             return jsonify({"steps": steps})
 
-        @app.route("/api/collections/<int:step>/collected")
-        def list_collected_proofs(step: int):
-            """Proof summaries for a collection step (no trees - fetch detail separately)."""
-            return _serve_collected_summary(
-                self._phase_file(f"collection_{step:05d}", "collected.jsonl"),
+        @app.route("/api/steps/<int:step>/theorems")
+        def list_step_attempts(step: int):
+            """Attempt summaries for a step (no trees - fetch detail separately)."""
+            return _serve_attempts_summary(
+                self._phase_file(f"step_{step:05d}", "theorems.jsonl"),
             )
 
-        @app.route("/api/collections/<int:step>/collected/<int:index>")
-        def get_collected_proof(step: int, index: int):
-            """Full detail (trees + transitions) for one proof in a collection step."""
-            return _serve_collected_entry(
-                self._phase_file(f"collection_{step:05d}", "collected.jsonl"),
+        @app.route("/api/steps/<int:step>/theorems/<int:index>")
+        def get_step_attempt(step: int, index: int):
+            """Full detail (trees + transitions) for one attempt in a step."""
+            return _serve_attempt_entry(
+                self._phase_file(f"step_{step:05d}", "theorems.jsonl"),
                 index,
             )
 
-        @app.route("/api/collections/<int:step>/transitions")
-        def get_collection_transitions(step: int):
-            return _serve_collected_transitions(
-                self._phase_file(f"collection_{step:05d}", "collected.jsonl"),
+        @app.route("/api/steps/<int:step>/transitions")
+        def get_step_transitions(step: int):
+            return _serve_step_transitions(
+                self._phase_file(f"step_{step:05d}", "theorems.jsonl"),
                 request.args,
             )
 
-        @app.route("/api/collections/<int:step>/generated_tactics")
-        def get_collection_tactics(step: int):
+        @app.route("/api/steps/<int:step>/generated_tactics")
+        def get_step_tactics(step: int):
             return _serve_jsonl_slice(
-                self._phase_file(f"collection_{step:05d}", "generated_tactics.jsonl"),
+                self._phase_file(f"step_{step:05d}", "generated_tactics.jsonl"),
                 request.args,
                 "tactics",
             )
 
-        @app.route("/api/collections/<int:step>/train_data")
-        def get_collection_train_data(step: int):
+        @app.route("/api/steps/<int:step>/train_data")
+        def get_step_train_data(step: int):
             return _serve_jsonl_slice(
-                self._phase_file(f"collection_{step:05d}", "train_subsample.jsonl"),
+                self._phase_file(f"step_{step:05d}", "train_subsample.jsonl"),
                 request.args,
                 "samples",
             )
@@ -1245,6 +1285,80 @@ class WebMonitor:
                 ),
                 request.args,
                 "tactics",
+            )
+
+        @app.route("/api/theorems/datasets")
+        def list_theorem_datasets():
+            """Return the matchmaker's loaded datasets and theorem counts."""
+            mm = self.matchmaker
+            if mm is None:
+                return jsonify({"datasets": []})
+            counts: dict[str, int] = {}
+            for t in mm.theorems:
+                counts[t.dataset] = counts.get(t.dataset, 0) + 1
+            return jsonify(
+                {
+                    "datasets": [
+                        {"name": name, "theorem_count": counts.get(name, 0)}
+                        for name in mm.datasets
+                    ]
+                }
+            )
+
+        @app.route("/api/theorems/<dataset>/<path:theorem_id>")
+        def get_theorem_history(dataset: str, theorem_id: str):
+            """Return the per-step history for one ``(dataset, id)`` theorem.
+
+            Walks every ``step_*/theorems.jsonl`` shard in step order,
+            collects matching attempts, and replays them through the same
+            :class:`TheoremStats` logic the matchmaker uses so the client can
+            display the running weight after each attempt.
+            """
+            from nanoproof.experience_collection import (  # local import: keeps cli.py decoupled at import time
+                MatchmakerConfig,
+                TheoremStats,
+                list_step_shards,
+            )
+
+            output_dir = self.output_dir
+            if not output_dir:
+                return jsonify({"error": "No output dir"}), 404
+
+            mm = self.matchmaker
+            config = mm.config if mm is not None else MatchmakerConfig()
+
+            stats = TheoremStats()
+            history: list[dict] = []
+            for step, shard_path in list_step_shards(output_dir):
+                with open(shard_path, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        obj = json.loads(line)
+                        if obj.get("dataset") != dataset or obj.get("id") != theorem_id:
+                            continue
+                        stats.update(obj["outcome"])
+                        history.append(
+                            {
+                                "step": step,
+                                "outcome": obj.get("outcome"),
+                                "error": obj.get("error"),
+                                "num_simulations": obj.get("num_simulations", 0),
+                                "num_iterations": obj.get("num_iterations", 0),
+                                "num_transitions": len(obj.get("transitions", [])),
+                                "weight_after": stats.weight(config),
+                                "full_tree": obj.get("full_tree"),
+                                "simplified_tree": obj.get("simplified_tree"),
+                            }
+                        )
+            return jsonify(
+                {
+                    "dataset": dataset,
+                    "id": theorem_id,
+                    "history": history,
+                    "current_weight": stats.weight(config),
+                }
             )
 
         @app.route("/api/instrumentation")

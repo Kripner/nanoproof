@@ -32,7 +32,8 @@ from nanoproof.common import (
 from nanoproof.cli import get_monitor, log_actionable_error
 from nanoproof.data.bench.common import BenchTheorem
 from nanoproof.experience_collection import (
-    TheoremsSampler,
+    Matchmaker,
+    Outcome,
     CollectedExperience,
     compute_value_target,
     prune_redundant_nodes,
@@ -99,13 +100,14 @@ class Prover:
         self,
         client: LeanClient,
         theorem: BenchTheorem,
+        num_simulations: int,
         expansion_callback: Callable[[], None] | None = None,
         abort_check: Callable[[], bool] | None = None,
         timeline: TimelineRecorder | None = None,
         tactic_sink: Callable[[str, str, str], None] | None = None,
     ) -> Game | None:
         """
-        Run a single MCTS proof game.
+        Run a single MCTS proof game with the supplied per-call simulation budget.
         Returns a :class:`Game` with results, or ``None`` if Lean setup fails.
         """
         logger.debug(f"Proving: {theorem.source[:80]}...")
@@ -135,7 +137,7 @@ class Prover:
                 return None
             init_branch = init_branch.value
 
-            game = Game(theorem.source, self.config.num_simulations)
+            game = Game(theorem.source, num_simulations)
             game.root = Node(
                 parent=None,
                 action=None,
@@ -223,10 +225,14 @@ class _Job:
     ``tactic_sink``). A late-completing straggler from a finished job thus
     keeps reporting back to that job, never to whatever job is current
     now.
+
+    ``get_theorem`` returns ``(theorem_id, theorem, num_simulations)``;
+    ``on_result`` is invoked with the same ``num_simulations`` so the
+    callback can persist the budget alongside the outcome.
     """
 
-    get_theorem: Callable[[], Optional[tuple[str, BenchTheorem]]]
-    on_result: Callable[[str, BenchTheorem, Optional[Game], Optional[str]], None]
+    get_theorem: Callable[[], Optional[tuple[str, BenchTheorem, int]]]
+    on_result: Callable[[str, BenchTheorem, int, Optional[Game], Optional[str]], None]
     done_check: Callable[[], bool]
     poll_callback: Optional[Callable[[list[str]], None]]
     record_timeline: bool
@@ -332,14 +338,15 @@ class ProverWorker:
     @torch.no_grad()
     def collect(
         self,
-        sampler: TheoremsSampler,
+        matchmaker: Matchmaker,
         target_transitions: int,
         experience: CollectedExperience,
-        num_simulations: int,
         tactic_sink: Callable[[str, str, str], None] | None = None,
     ) -> int:
-        """Record successful proofs into ``experience`` until the target
-        number of transitions is reached. Parks with *pause* on exit."""
+        """Drive the actor pool until ``experience`` accumulates
+        ``target_transitions`` transitions. Records every attempt
+        (proven/unproven/error), feeds outcomes back to the matchmaker, and
+        parks with *pause* on exit."""
         monitor = get_monitor()
 
         logger.info(
@@ -349,18 +356,23 @@ class ProverWorker:
         theorem_counter = [0]
 
         def get_theorem():
-            theorem = sampler.sample_theorem()
+            theorem, num_sims = matchmaker.next_assignment()
             theorem_counter[0] += 1
-            return (f"collect_{theorem_counter[0]}", theorem)
+            return (f"collect_{theorem_counter[0]}", theorem, num_sims)
 
-        def on_result(theorem_id, theorem, game, error):
-            if error is not None or game is None or game.root is None:
-                return
-            if not game.root.is_solved:
-                return
+        def derive_outcome(game, error) -> Outcome:
+            if error is not None:
+                return "error"
+            if game is not None and game.root is not None and game.root.is_solved:
+                return "proven"
+            return "unproven"
+
+        def on_result(theorem_id, theorem, num_simulations, game, error):
+            outcome = derive_outcome(game, error)
             transitions_before = experience.num_transitions()
-            experience.record_proof(theorem, game)
-            if monitor is not None:
+            experience.record_attempt(theorem, outcome, num_simulations, game, error)
+            matchmaker.send_result(theorem, outcome)
+            if outcome == "proven" and monitor is not None:
                 monitor.add_collected_samples(
                     experience.num_transitions() - transitions_before
                 )
@@ -386,9 +398,7 @@ class ProverWorker:
             done_check=done_check,
             poll_callback=poll_callback,
             record_timeline=True,
-            prover=Prover(
-                SearchConfig(num_simulations=num_simulations), self.tactic_model
-            ),
+            prover=Prover(SearchConfig(), self.tactic_model),
             tactic_sink=tactic_sink,
         )
         self._run_job(job, park="pause")
@@ -442,9 +452,9 @@ class ProverWorker:
                     solved = sum(1 for r in results if r["is_solved"])
                     errors = sum(1 for r in results if r["error"])
                 progress_callback(started, finished, solved, errors)
-            return (tid, theorem)
+            return (tid, theorem, num_simulations)
 
-        def on_result(theorem_id, theorem: BenchTheorem, game, error):
+        def on_result(theorem_id, theorem: BenchTheorem, num_simulations, game, error):
             is_solved = bool(game and game.root and game.root.is_solved)
             num_iterations = game.num_iterations if game else 0
 
@@ -462,7 +472,8 @@ class ProverWorker:
                 results.append(
                     {
                         "theorem": theorem.source,
-                        "name": theorem.name,
+                        "dataset": theorem.dataset,
+                        "id": theorem.id,
                         "is_solved": is_solved,
                         "error": error,
                         "proof_tree": proof_tree,
@@ -497,10 +508,7 @@ class ProverWorker:
             poll_callback=None,
             record_timeline=True,
             prover=Prover(
-                SearchConfig(
-                    num_simulations=num_simulations, verify_timeout=verify_timeout
-                ),
-                self.tactic_model,
+                SearchConfig(verify_timeout=verify_timeout), self.tactic_model
             ),
             tactic_sink=tactic_sink,
         )
@@ -600,7 +608,7 @@ class ProverWorker:
                 time.sleep(0.5)
                 continue
 
-            theorem_id, theorem = theorem_data
+            theorem_id, theorem, num_simulations = theorem_data
             self._set_thread_state(actor_id, "running")
 
             game = None
@@ -617,6 +625,7 @@ class ProverWorker:
                         game = job.prover.prove(
                             client,
                             theorem,
+                            num_simulations=num_simulations,
                             abort_check=self._release_event.is_set,
                             timeline=timeline,
                             tactic_sink=job.tactic_sink,
@@ -687,7 +696,7 @@ class ProverWorker:
                         )
                     if error is not None:
                         self._set_thread_state(actor_id, "error")
-                    job.on_result(theorem_id, theorem, game, error)
+                    job.on_result(theorem_id, theorem, num_simulations, game, error)
             finally:
                 with self._lock:
                     self._actors_mid_proof -= 1

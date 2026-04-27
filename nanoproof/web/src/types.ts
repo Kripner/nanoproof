@@ -123,3 +123,22 @@ export interface InstrumentationData {
   mode?: "live" | "standalone";
 }
 
+export type Outcome = "proven" | "unproven" | "error";
+
+export interface TheoremAttempt {
+  step: number;
+  outcome: Outcome;
+  error: string | null;
+  num_simulations: number;
+  num_iterations: number;
+  num_transitions: number;
+  weight_after: number;
+}
+
+export interface TheoremHistory {
+  dataset: string;
+  id: string;
+  history: TheoremAttempt[];
+  current_weight: number;
+}
+

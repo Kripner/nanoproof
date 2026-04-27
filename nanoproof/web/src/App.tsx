@@ -8,6 +8,7 @@ import { DataPanel } from './components/DataPanel'
 import { LeanServerPanel } from './components/LeanServerPanel'
 import { ProfilerPanel } from './components/ProfilerPanel'
 import { LLMProfilerPanel } from './components/LLMProfilerPanel'
+import { TheoremsPanel } from './components/TheoremsPanel'
 
 const POLL_INTERVAL = 1000;
 
@@ -17,7 +18,7 @@ function App() {
   const [stderrLines, setStderrLines] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const [tab, setTab] = useState<'monitor' | 'profiler' | 'llm' | 'data'>('monitor');
+  const [tab, setTab] = useState<'monitor' | 'profiler' | 'llm' | 'data' | 'theorems'>('monitor');
 
   // Default to profiler tab in standalone mode
   useEffect(() => {
@@ -123,6 +124,8 @@ function App() {
                   onClick={() => setTab('llm')}>LLM Profiler</button>
           <button className={`tab-btn ${tab === 'data' ? 'active' : ''}`}
                   onClick={() => setTab('data')}>Data</button>
+          <button className={`tab-btn ${tab === 'theorems' ? 'active' : ''}`}
+                  onClick={() => setTab('theorems')}>Theorems</button>
         </div>
         {tab === 'monitor' && (
           <>
@@ -191,6 +194,10 @@ function App() {
 
       {tab === 'data' && (
         <DataPanel />
+      )}
+
+      {tab === 'theorems' && (
+        <TheoremsPanel />
       )}
     </div>
   );

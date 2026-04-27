@@ -80,7 +80,11 @@ def download_dataset() -> None:
     download_whitelists(PARQUET_PATH)
 
 
-def _load_sources() -> list[str]:
+DATASET_NAME = "numinamath"
+
+
+def _load_sources() -> list[tuple[str, str]]:
+    """Return ``(uuid, processed_source)`` pairs from the parquet."""
     if not os.path.exists(PARQUET_PATH):
         raise FileNotFoundError(
             f"NuminaMath-LEAN dataset not found at {PARQUET_PATH}. Run with `download` first."
@@ -88,18 +92,19 @@ def _load_sources() -> list[str]:
 
     table = pq.read_table(PARQUET_PATH)
     raw_statements = table.column("formal_statement").to_pylist()
+    raw_uuids = table.column("uuid").to_pylist()
 
-    theorems = []
+    theorems: list[tuple[str, str]] = []
     skipped = 0
     skipped_example = None
-    for stmt in raw_statements:
+    for uuid, stmt in zip(raw_uuids, raw_statements):
         processed = _process_statement(stmt)
         if processed is None:
             skipped += 1
             if skipped_example is None:
                 skipped_example = stmt
             continue
-        theorems.append(processed)
+        theorems.append((uuid, processed))
 
     if skipped > 0 and int(os.environ.get("RANK", 0)) == 0:
         print(
@@ -114,7 +119,10 @@ def list_theorems(split: str, lean_version: str | None = None) -> list[BenchTheo
     assert split in ("train", "valid"), f"Invalid split: {split!r}"
     sources = _load_sources()
     split_sources = shuffle_train_valid_split(sources, valid_size=500, seed=0)[split]
-    theorems = [BenchTheorem(source=s) for s in split_sources]
+    theorems = [
+        BenchTheorem(source=s, dataset=DATASET_NAME, id=uuid)
+        for uuid, s in split_sources
+    ]
 
     if lean_version is not None:
         theorems = filter_by_whitelist(
@@ -127,7 +135,10 @@ def list_theorems(split: str, lean_version: str | None = None) -> list[BenchTheo
 
 def _all_theorems() -> list[BenchTheorem]:
     """Every theorem across both splits, for whitelist generation."""
-    return [BenchTheorem(source=s) for s in _load_sources()]
+    return [
+        BenchTheorem(source=s, dataset=DATASET_NAME, id=uuid)
+        for uuid, s in _load_sources()
+    ]
 
 
 # -----------------------------------------------------------------------------

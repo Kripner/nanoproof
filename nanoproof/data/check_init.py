@@ -238,9 +238,8 @@ def run_check_init(
             num_done[0] += 1
             n = num_done[0]
             if not ok:
-                name = f" {theorem.name}" if theorem.name else ""
                 print(
-                    f"[{n}/{total}]{name} FAILED ({h}): {err}\n"
+                    f"[{n}/{total}] {theorem.dataset}/{theorem.id} FAILED ({h}): {err}\n"
                     f"--- source ---\n{theorem.source}\n",
                     flush=True,
                 )

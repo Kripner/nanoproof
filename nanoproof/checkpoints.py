@@ -186,7 +186,8 @@ def write_eval_results_jsonl(
             entry = {
                 "theorem": item["theorem"],
                 "header": item.get("header"),
-                "name": item.get("name"),
+                "dataset": item["dataset"],
+                "id": item["id"],
                 "proof": item["proof_tree"],
                 "unsimplified_proof": item.get("unsimplified_proof_tree"),
                 "linearized_proof": item.get("linearized_proof"),

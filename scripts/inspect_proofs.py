@@ -48,11 +48,12 @@ def _proof_preview(item: dict, max_len: int = 80) -> str:
 
 
 def _theorem_summary(item: dict) -> str:
-    """Single-line label for a record. Prefers the stored ``name``; else
+    """Single-line label for a record. Prefers ``dataset/id``; else
     extracts the declaration line from the source (skipping the preamble)."""
-    name = item.get("name")
-    if name:
-        return name
+    dataset = item.get("dataset")
+    tid = item.get("id")
+    if dataset and tid:
+        return f"{dataset}/{tid}"
     source = item.get("theorem", "(no theorem)")
     for line in source.split("\n"):
         stripped = line.lstrip()

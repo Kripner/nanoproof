@@ -10,6 +10,8 @@ CLI: see ``python -m nanoproof.data.bench.minif2f --help``.
 
 import argparse
 import os
+import re
+from collections import Counter
 from pathlib import Path
 
 from nanoproof.common import get_base_dir
@@ -22,9 +24,15 @@ BASE_URL = (
     "https://raw.githubusercontent.com/google-deepmind/miniF2F/refs/heads/main/MiniF2F/"
 )
 
+DATASET_NAME = "minif2f"
+
 # The split name -> source filename mapping. Both files contain ``sorry``-stub
 # theorems, except for two test entries that ship with proofs (patched below).
 _SPLIT_FILES = {"valid": "Valid.lean", "test": "Test.lean"}
+
+# Theorem names live in the source as ``theorem <name>``; we recover them as
+# the per-theorem id.
+_THEOREM_NAME_RE = re.compile(r"\btheorem\s+(\S+)")
 
 
 def download_dataset() -> None:
@@ -85,7 +93,19 @@ def list_theorems(split: str) -> list[BenchTheorem]:
     assert len(sources) == expected_count, (
         f"minif2f: expected {expected_count} theorems, got {len(sources)}"
     )
-    return [BenchTheorem(source=MINIF2F_PREAMBLE + s) for s in sources]
+
+    ids: list[str] = []
+    for s in sources:
+        m = _THEOREM_NAME_RE.search(s)
+        assert m is not None, f"minif2f: could not extract id from: {s[:120]!r}"
+        ids.append(m.group(1))
+    duplicates = [tid for tid, n in Counter(ids).items() if n > 1]
+    assert not duplicates, f"minif2f/{split}: duplicate theorem ids: {duplicates}"
+
+    return [
+        BenchTheorem(source=MINIF2F_PREAMBLE + s, dataset=DATASET_NAME, id=tid)
+        for s, tid in zip(sources, ids)
+    ]
 
 
 # -----------------------------------------------------------------------------

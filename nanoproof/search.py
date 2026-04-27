@@ -24,9 +24,9 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SearchConfig:
-    num_simulations: int
-
-    # MCTS hyperparameters (defaults - rarely tuned)
+    # ``num_simulations`` is passed per-call to :meth:`Prover.prove` (the
+    # matchmaker assigns adaptive per-theorem budgets) and stored on the
+    # :class:`Game` itself; nothing about MCTS hyperparameters varies with it.
     pb_c_base: int = 3200
     pb_c_init: float = 0.001
     value_discount: float = 0.99

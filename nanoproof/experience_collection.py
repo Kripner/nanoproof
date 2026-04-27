@@ -1,15 +1,18 @@
 """
-Experience collection: replay buffer, theorem sampling, and proof-tree-to-transitions pipeline.
+Experience collection: replay buffer, matchmaker, and proof-tree-to-transitions pipeline.
 
 This module owns:
-- TheoremsSampler: weighted sampler over configured training datasets.
+- Matchmaker / MatchmakerConfig: per-theorem stat tracking, weighted problem
+  selection, and adaptive simulation budgets (AlphaProof-style). Stats are
+  fully derived from on-disk theorems.jsonl shards so a resumed run
+  reconstructs identical state via :meth:`Matchmaker.reconstruct_from_run_dir`.
 - ReplayBuffer: DDP-aware buffer of (context, tactic, value_target) transitions
   sampled during training.
-- CollectedExperience: per-phase accumulator of full proof trees (plus their
-  simplified versions and extracted transitions) and generated tactics.
-  ``record_tactic`` is wired up as the per-job ``tactic_sink`` passed to
-  ``prover.collect()`` / ``prover.evaluate()``; results are written to disk
-  by :meth:`CollectedExperience.save` (``collected.jsonl`` /
+- CollectedExperience: per-phase accumulator of every prove attempt (proven /
+  unproven / error) plus generated tactics. ``record_tactic`` is wired up as
+  the per-job ``tactic_sink`` passed to ``prover.collect()`` /
+  ``prover.evaluate()``; results are written to disk by
+  :meth:`CollectedExperience.save` (``theorems.jsonl`` /
   ``generated_tactics.jsonl``).
 - compute_value_target: assigns regression targets to nodes of a solved proof tree
 - extract_transitions: walks a solved proof tree and yields training transitions
@@ -25,7 +28,8 @@ import logging
 import os
 import random
 import threading
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
+from typing import Literal
 
 import torch.distributed as dist
 
@@ -39,16 +43,18 @@ from nanoproof.tokenizer import get_tokenizer
 
 
 # -----------------------------------------------------------------------------
-# On-disk layout helpers (one place that knows about the collection_/evals/ dirs)
+# On-disk layout helpers (one place that knows about the step_/evals/ dirs)
 # -----------------------------------------------------------------------------
 
-_COLLECTION_PREFIX = "collection_"
-COLLECTED_FILENAME = "collected.jsonl"
+_STEP_PREFIX = "step_"
+THEOREMS_FILENAME = "theorems.jsonl"
+
+Outcome = Literal["proven", "unproven", "error"]
 
 
-def collection_dir(run_dir: str, step: int) -> str:
+def step_dir(run_dir: str, step: int) -> str:
     """Path to the per-step collection directory under ``run_dir``."""
-    return os.path.join(run_dir, f"{_COLLECTION_PREFIX}{step:05d}")
+    return os.path.join(run_dir, f"{_STEP_PREFIX}{step:05d}")
 
 
 def eval_dir(run_dir: str, step: int) -> str:
@@ -56,23 +62,28 @@ def eval_dir(run_dir: str, step: int) -> str:
     return os.path.join(run_dir, "evals", f"{step:05d}")
 
 
-def load_collected_transitions(run_dir: str) -> list[tuple[str, str, float]]:
-    """Concatenate transitions from every ``collection_<s>/collected.jsonl``
-    in ``run_dir``, preserving step order across shards and file order within
-    a shard. Returns raw (context, tactic, value_target) tuples; callers apply
-    any FIFO truncation or length filtering themselves.
-    """
+def list_step_shards(run_dir: str) -> list[tuple[int, str]]:
+    """Return ``[(step, theorems.jsonl_path), ...]`` sorted by step."""
     shards: list[tuple[int, str]] = []
     for shard_path in glob.glob(
-        os.path.join(run_dir, f"{_COLLECTION_PREFIX}*", COLLECTED_FILENAME)
+        os.path.join(run_dir, f"{_STEP_PREFIX}*", THEOREMS_FILENAME)
     ):
         shard_step = int(
-            os.path.basename(os.path.dirname(shard_path))[len(_COLLECTION_PREFIX) :]
+            os.path.basename(os.path.dirname(shard_path))[len(_STEP_PREFIX) :]
         )
         shards.append((shard_step, shard_path))
     shards.sort()
+    return shards
+
+
+def load_collected_transitions(run_dir: str) -> list[tuple[str, str, float]]:
+    """Concatenate transitions from every ``step_<s>/theorems.jsonl`` in
+    ``run_dir``, preserving step order across shards and file order within a
+    shard. Skips entries with no transitions (unproven / errored). Callers
+    apply FIFO truncation or length filtering themselves.
+    """
     transitions: list[tuple[str, str, float]] = []
-    for _, shard_path in shards:
+    for _, shard_path in list_step_shards(run_dir):
         with open(shard_path, "r") as f:
             for line in f:
                 line = line.strip()
@@ -85,51 +96,190 @@ def load_collected_transitions(run_dir: str) -> list[tuple[str, str, float]]:
 
 
 # -----------------------------------------------------------------------------
-# Theorem sampler
+# Matchmaker
 # -----------------------------------------------------------------------------
 
 
-class TheoremsSampler:
-    """Samples theorems for experience collection from multiple datasets.
+_DATASET_LOADERS = {
+    "leanworkbook": leanworkbook.list_theorems,
+    "deepseek_prover": deepseek_prover.list_theorems,
+    "numinamath": numinamath.list_theorems,
+}
 
-    Samples uniformly at random from one of the available datasets, then
-    uniformly at random from that dataset. Thread-safe.
+
+def list_available_datasets() -> list[str]:
+    return list(_DATASET_LOADERS.keys())
+
+
+@dataclass(frozen=True)
+class MatchmakerConfig:
+    """AlphaProof-style matchmaker hyperparameters (Sup. Table 7, prove-only).
+
+    The "last N" window for weight and budget computation walks only
+    proven/unproven outcomes; errors are filtered out -- with one exception
+    handled inside :class:`Matchmaker`: two consecutive raw error outcomes
+    drop the theorem permanently.
     """
 
-    ALL_DATASETS = {
-        "leanworkbook": lambda lean_version: leanworkbook.list_theorems(
-            split="train", lean_version=lean_version
-        ),
-        "deepseek_prover": lambda lean_version: deepseek_prover.list_theorems(
-            split="train", lean_version=lean_version
-        ),
-        "numinamath": lambda lean_version: numinamath.list_theorems(
-            split="train", lean_version=lean_version
-        ),
-    }
+    trust_count: int = 8
+    trust_count_proved: int = 12
+    weight_interesting: float = 1.0
+    weight_undecided: float = 0.1
+    weight_fully_proved: float = 1e-3
+    base_simulations: int = 250
+    failure_multiplier: float = 1.17
+    cap_simulations: int = 16000
+
+
+@dataclass
+class TheoremStats:
+    """Per-theorem attempt log used by the matchmaker. Public so the web UI
+    can replay the same logic over an on-disk attempt history.
+
+    Two parallel slices:
+
+    - ``raw``: every attempt's outcome in arrival order (used only for the
+      "two consecutive errors" dropout check).
+    - ``decided``: outcomes filtered to ``"proven"`` / ``"unproven"`` (used
+      for weight + budget computation).
+    """
+
+    raw: list[Outcome] = field(default_factory=list)
+    decided: list[Outcome] = field(default_factory=list)
+
+    def update(self, outcome: Outcome) -> None:
+        self.raw.append(outcome)
+        if outcome != "error":
+            self.decided.append(outcome)
+
+    def is_dropped_for_errors(self) -> bool:
+        return len(self.raw) >= 2 and self.raw[-1] == "error" and self.raw[-2] == "error"
+
+    def weight(self, config: MatchmakerConfig) -> float:
+        if self.is_dropped_for_errors():
+            return 0.0
+        if not self.decided:
+            return config.weight_interesting
+        if len(self.decided) < config.trust_count:
+            return config.weight_interesting
+        proved = any(o == "proven" for o in self.decided)
+        if not proved:
+            return config.weight_undecided
+        recent = self.decided[-config.trust_count_proved :]
+        if len(recent) >= config.trust_count_proved and all(o == "proven" for o in recent):
+            return config.weight_fully_proved
+        return config.weight_interesting
+
+    def num_simulations(self, config: MatchmakerConfig) -> int:
+        recent = self.decided[-config.trust_count :]
+        num_failures = sum(1 for o in recent if o == "unproven")
+        budget = config.base_simulations * (config.failure_multiplier**num_failures)
+        return min(config.cap_simulations, int(budget))
+
+
+class Matchmaker:
+    """Tracks per-theorem outcomes and assigns (theorem, num_simulations)
+    pairs to actors. Thread-safe.
+
+    Replaces the old per-dataset uniform sampler: weighting is flat across
+    all loaded theorems so interestingness alone drives selection.
+    """
 
     def __init__(
         self,
-        seed: int | None = 0,
-        datasets: list[str] | None = None,
-        lean_version: str | None = None,
+        datasets: list[str],
+        lean_version: str | None,
+        config: MatchmakerConfig,
+        seed: int,
     ):
-        if datasets is None:
-            datasets = list(self.ALL_DATASETS.keys())
-        self.datasets = {
-            name: self.ALL_DATASETS[name](lean_version) for name in datasets
+        self.config = config
+        self.datasets = list(datasets)
+        self.theorems: list[BenchTheorem] = []
+        for name in self.datasets:
+            assert name in _DATASET_LOADERS, (
+                f"Unknown dataset: {name!r} (known: {list(_DATASET_LOADERS)})"
+            )
+            theorems = _DATASET_LOADERS[name](split="train", lean_version=lean_version)
+            info0(logger, f"Loaded {len(theorems)} theorems from {name}")
+            self.theorems.extend(theorems)
+        self._index: dict[tuple[str, str], int] = {
+            (t.dataset, t.id): i for i, t in enumerate(self.theorems)
         }
-        self.dataset_names = list(self.datasets.keys())
-        self.rng = random.Random(seed)
+        assert len(self._index) == len(self.theorems), (
+            "Matchmaker: duplicate (dataset, id) across loaded theorems"
+        )
+        self._stats: list[TheoremStats] = [
+            TheoremStats() for _ in range(len(self.theorems))
+        ]
+        self._rng = random.Random(seed)
         self._lock = threading.Lock()
 
-        for name, theorems in self.datasets.items():
-            info0(logger, f"Loaded {len(theorems)} theorems from {name}")
-
-    def sample_theorem(self) -> BenchTheorem:
+    def next_assignment(self) -> tuple[BenchTheorem, int]:
+        """Return ``(theorem, num_simulations)`` for the next attempt."""
         with self._lock:
-            dataset_name = self.rng.choice(self.dataset_names)
-            return self.rng.choice(self.datasets[dataset_name])
+            weights = [s.weight(self.config) for s in self._stats]
+            total = sum(weights)
+            assert total > 0, "Matchmaker: all theorems have weight 0 (every theorem dropped or fully proved at minimum weight 0)"
+            (idx,) = self._rng.choices(range(len(self.theorems)), weights=weights, k=1)
+            theorem = self.theorems[idx]
+            num_sims = self._stats[idx].num_simulations(self.config)
+            return theorem, num_sims
+
+    def send_result(self, theorem: BenchTheorem, outcome: Outcome) -> None:
+        key = (theorem.dataset, theorem.id)
+        with self._lock:
+            idx = self._index.get(key)
+            assert idx is not None, (
+                f"Matchmaker.send_result: unknown theorem {key!r}"
+            )
+            self._stats[idx].update(outcome)
+
+    def weight_for(self, theorem: BenchTheorem) -> float:
+        with self._lock:
+            idx = self._index[(theorem.dataset, theorem.id)]
+            return self._stats[idx].weight(self.config)
+
+    def reconstruct_from_run_dir(self, run_dir: str) -> int:
+        """Replay every saved attempt under ``run_dir/step_*/theorems.jsonl``
+        through :meth:`send_result`. Returns the number of attempts replayed.
+
+        The run's ``args.json`` must declare the same ``--datasets`` as this
+        matchmaker; otherwise per-theorem stats would silently mix across
+        dataset configurations.
+        """
+        args_path = os.path.join(run_dir, "args.json")
+        assert os.path.exists(args_path), (
+            f"Matchmaker.reconstruct_from_run_dir: missing {args_path}"
+        )
+        with open(args_path, "r") as f:
+            prior_args = json.load(f)
+        prior_datasets = prior_args.get("datasets")
+        assert prior_datasets is not None, (
+            f"Matchmaker.reconstruct_from_run_dir: {args_path} has no 'datasets' field"
+        )
+        assert sorted(prior_datasets) == sorted(self.datasets), (
+            f"Matchmaker.reconstruct_from_run_dir: datasets mismatch -- "
+            f"resumed run had {sorted(prior_datasets)}, current run has {sorted(self.datasets)}"
+        )
+
+        replayed = 0
+        for _, shard_path in list_step_shards(run_dir):
+            with open(shard_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    obj = json.loads(line)
+                    key = (obj["dataset"], obj["id"])
+                    idx = self._index.get(key)
+                    if idx is None:
+                        # Theorem present in the prior run but not in the
+                        # current loaded list (e.g. whitelist drift). Skip.
+                        continue
+                    self._stats[idx].update(obj["outcome"])
+                    replayed += 1
+        info0(logger, f"Matchmaker: replayed {replayed} attempts from {run_dir}")
+        return replayed
 
 
 class ReplayBuffer:
@@ -184,60 +334,85 @@ class ReplayBuffer:
 
 
 @dataclass
-class CollectedProof:
-    """One successful proof from a collection phase, with enough data to
-    reproduce the training transitions and inspect the search tree in the UI.
+class TheoremAttempt:
+    """One prove attempt from a collection phase.
+
+    Always recorded -- proven, unproven, and errored attempts alike --
+    because the matchmaker's stats are reconstructed from these records on
+    resume. The tree fields are populated only for ``outcome == "proven"``.
     """
 
+    dataset: str
+    id: str
     theorem: str  # BenchTheorem.source
-    name: str | None  # theorem name if any
-    num_iterations: int  # MCTS iterations run
-    full_tree: dict  # pre-prune tree (game.unsimplified_root.serialize())
-    simplified_tree: dict  # post-prune tree (game.root.serialize())
-    transitions: list[tuple[str, str, float]]  # (state, tactic, value_target)
+    num_simulations: int  # budget allocated by matchmaker
+    num_iterations: int  # MCTS iterations actually run (0 if error)
+    outcome: Outcome
+    error: str | None
+    full_tree: dict | None  # pre-prune tree (game.unsimplified_root.serialize())
+    simplified_tree: dict | None  # post-prune tree (game.root.serialize())
+    transitions: list[tuple[str, str, float]]
 
 
 class CollectedExperience:
     """Per-phase accumulator used during collection and evaluation.
 
-    Proofs and tactics are populated by worker threads during the phase:
-    :meth:`record_proof` is called once per successful proof from the prover
-    callback; :meth:`record_tactic` is wired in as the job's per-call
-    ``tactic_sink`` and fires for every attempted tactic during MCTS
-    expansion. At the end of the phase the RL loop pulls :meth:`transitions`
-    into :class:`ReplayBuffer` and calls :meth:`save` to write
-    ``collected.jsonl`` and ``generated_tactics.jsonl``.
+    Attempts and tactics are populated by worker threads during the phase:
+    :meth:`record_attempt` is called once per attempt (proven/unproven/error)
+    from the prover callback; :meth:`record_tactic` is wired in as the
+    job's per-call ``tactic_sink`` and fires for every attempted tactic
+    during MCTS expansion. At the end of the phase the RL loop pulls
+    :meth:`transitions` into :class:`ReplayBuffer` and calls :meth:`save`
+    to write ``theorems.jsonl`` and ``generated_tactics.jsonl``.
     """
 
     TRAIN_SUBSAMPLE_K = 100
 
     def __init__(self):
-        self.proofs: list[CollectedProof] = []
+        self.attempts: list[TheoremAttempt] = []
         self.tactics: list[dict] = []
         self.train_samples: list[dict] = []
         self._train_seen: int = 0
         self._train_rng = random.Random(0)
         self._lock = threading.Lock()
 
-    def record_proof(self, theorem: BenchTheorem, game) -> None:
-        """Snapshot a solved game as a :class:`CollectedProof` and append it."""
-        transitions = extract_transitions(game.root)
-        full_tree = (
-            game.unsimplified_root.serialize()
-            if getattr(game, "unsimplified_root", None)
-            else None
-        )
-        simplified_tree = game.root.serialize()
-        proof = CollectedProof(
+    def record_attempt(
+        self,
+        theorem: BenchTheorem,
+        outcome: Outcome,
+        num_simulations: int,
+        game,
+        error: str | None,
+    ) -> None:
+        """Snapshot one prove attempt and append it to ``self.attempts``."""
+        if outcome == "proven":
+            assert game is not None and game.root is not None
+            transitions = extract_transitions(game.root)
+            full_tree = (
+                game.unsimplified_root.serialize()
+                if getattr(game, "unsimplified_root", None)
+                else None
+            )
+            simplified_tree = game.root.serialize()
+        else:
+            transitions = []
+            full_tree = None
+            simplified_tree = None
+        num_iterations = game.num_iterations if game is not None else 0
+        attempt = TheoremAttempt(
+            dataset=theorem.dataset,
+            id=theorem.id,
             theorem=theorem.source,
-            name=theorem.name,
-            num_iterations=game.num_iterations,
+            num_simulations=num_simulations,
+            num_iterations=num_iterations,
+            outcome=outcome,
+            error=error,
             full_tree=full_tree,
             simplified_tree=simplified_tree,
             transitions=transitions,
         )
         with self._lock:
-            self.proofs.append(proof)
+            self.attempts.append(attempt)
 
     def record_tactic(self, state: str, tactic: str, status: str) -> None:
         """Buffer a tactic attempt. Lock-free (list.append is atomic under the GIL)."""
@@ -308,13 +483,13 @@ class CollectedExperience:
 
     def num_transitions(self) -> int:
         with self._lock:
-            return sum(len(p.transitions) for p in self.proofs)
+            return sum(len(a.transitions) for a in self.attempts)
 
     def transitions(self) -> list[tuple[str, str, float]]:
-        """All transitions across all proofs, filtered by the global state/tactic
-        length limits (matches the old :func:`ReplayBuffer.add_transitions` filter)."""
+        """All transitions across all proven attempts, filtered by the global
+        state/tactic length limits."""
         with self._lock:
-            raw = [t for p in self.proofs for t in p.transitions]
+            raw = [t for a in self.attempts for t in a.transitions]
         out: list[tuple[str, str, float]] = []
         for context, tactic, value_target in raw:
             context = context.strip()
@@ -337,16 +512,16 @@ class CollectedExperience:
         return out
 
     def save(self, phase_dir: str) -> None:
-        """Write ``collected.jsonl``, ``generated_tactics.jsonl`` and
+        """Write ``theorems.jsonl``, ``generated_tactics.jsonl`` and
         ``train_subsample.jsonl`` under ``phase_dir``.
 
         All files are always written (possibly empty) so an absent file is
         an unambiguous signal that the phase did not run.
         """
         os.makedirs(phase_dir, exist_ok=True)
-        with open(os.path.join(phase_dir, "collected.jsonl"), "w") as f:
-            for p in self.proofs:
-                f.write(json.dumps(asdict(p)) + "\n")
+        with open(os.path.join(phase_dir, THEOREMS_FILENAME), "w") as f:
+            for a in self.attempts:
+                f.write(json.dumps(asdict(a)) + "\n")
         with open(os.path.join(phase_dir, "generated_tactics.jsonl"), "w") as f:
             for t in self.tactics:
                 f.write(json.dumps(t) + "\n")

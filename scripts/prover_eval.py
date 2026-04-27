@@ -202,7 +202,8 @@ def main():
                     error_theorems = [
                         BenchTheorem(
                             source=e["theorem"],
-                            name=e.get("name"),
+                            dataset=e["dataset"],
+                            id=e["id"],
                         )
                         for e in errors
                     ]

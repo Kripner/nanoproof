@@ -42,10 +42,12 @@ from nanoproof.data.sft.leantree import leantree_transitions
 from nanoproof.data.sft.leantree_dataloader import rl_data_generator
 from nanoproof.experience_collection import (
     ReplayBuffer,
-    TheoremsSampler,
+    Matchmaker,
+    MatchmakerConfig,
     CollectedExperience,
-    collection_dir,
+    step_dir,
     eval_dir,
+    list_available_datasets,
 )
 from nanoproof.prover import ProverWorker
 from nanoproof.inference import setup_distributed_inference
@@ -64,8 +66,6 @@ from nanoproof.common import info0
 logger = logging.getLogger(__name__)
 from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
 from nanoproof.data.sft.leantree_dataloader import sft_data_generator
-
-# TODO: matchmaker
 
 # TODO: maybe log numbers of OR and AND nodes in the proof searches
 
@@ -94,7 +94,7 @@ parser.add_argument(
     "--load-buffer",
     type=str,
     default="",
-    help="path to a previous RL run dir; at startup, seed the replay buffer with every transition found in its collection_*/collected.jsonl shards (FIFO-truncated to --replay-buffer-window-size). Independent of training resumption - does not affect the step counter or model checkpoint.",
+    help="path to a previous RL run dir; at startup, seed the replay buffer with every transition found in its step_*/theorems.jsonl shards (FIFO-truncated to --replay-buffer-window-size) and replay every attempt through the matchmaker. Independent of training resumption - does not affect the step counter or model checkpoint.",
 )
 
 # Infrastructure
@@ -119,16 +119,15 @@ parser.add_argument(
 )
 
 # Search / collection
-ALL_DATASETS = ["leanworkbook", "deepseek_prover", "numinamath"]
+ALL_DATASETS = ["numinamath"]
 parser.add_argument(
     "--datasets",
     nargs="+",
     default=ALL_DATASETS,
-    choices=ALL_DATASETS,
-    help="which theorem datasets to sample from (default: all three)",
+    choices=list_available_datasets(),
+    help="which theorem datasets to sample from",
 )
 parser.add_argument("--num-sampled-tactics", type=int, default=6)
-parser.add_argument("--num-simulations-collect", type=int, default=50)
 parser.add_argument("--num-simulations-eval", type=int, default=50)
 parser.add_argument("--collect-every", type=int, default=1)
 parser.add_argument("--collect-transitions", type=int, default=100)
@@ -151,6 +150,33 @@ parser.add_argument(
     type=str,
     default=None,
     help="if set, record CUDA memory history and dump snapshot to this dir on first OOM",
+)
+
+# Matchmaker (AlphaProof Sup. Table 7 defaults; prove-only -- no disprove)
+_mm_defaults = MatchmakerConfig()
+parser.add_argument("--mm-trust-count", type=int, default=_mm_defaults.trust_count)
+parser.add_argument(
+    "--mm-trust-count-proved", type=int, default=_mm_defaults.trust_count_proved
+)
+parser.add_argument(
+    "--mm-weight-interesting", type=float, default=_mm_defaults.weight_interesting
+)
+parser.add_argument(
+    "--mm-weight-undecided", type=float, default=_mm_defaults.weight_undecided
+)
+parser.add_argument(
+    "--mm-weight-fully-proved", type=float, default=_mm_defaults.weight_fully_proved
+)
+parser.add_argument(
+    "--mm-base-simulations", type=int, default=_mm_defaults.base_simulations
+)
+parser.add_argument(
+    "--mm-failure-multiplier",
+    type=float,
+    default=_mm_defaults.failure_multiplier,
+)
+parser.add_argument(
+    "--mm-cap-simulations", type=int, default=_mm_defaults.cap_simulations
 )
 
 # Training
@@ -260,9 +286,25 @@ info0(
 replay_buffer = ReplayBuffer(window_size=args.replay_buffer_window_size, seed=rank_seed)
 if args.load_buffer:
     replay_buffer.load_from(args.load_buffer)
-theorems_sampler = TheoremsSampler(
-    seed=rank_seed, datasets=args.datasets, lean_version=lean_version
+
+matchmaker_config = MatchmakerConfig(
+    trust_count=args.mm_trust_count,
+    trust_count_proved=args.mm_trust_count_proved,
+    weight_interesting=args.mm_weight_interesting,
+    weight_undecided=args.mm_weight_undecided,
+    weight_fully_proved=args.mm_weight_fully_proved,
+    base_simulations=args.mm_base_simulations,
+    failure_multiplier=args.mm_failure_multiplier,
+    cap_simulations=args.mm_cap_simulations,
 )
+matchmaker = Matchmaker(
+    datasets=args.datasets,
+    lean_version=lean_version,
+    config=matchmaker_config,
+    seed=rank_seed,
+)
+if args.load_buffer:
+    matchmaker.reconstruct_from_run_dir(args.load_buffer)
 
 # Set up distributed inference (starts servers on worker ranks, builds balancer on master)
 balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
@@ -323,6 +365,7 @@ rl_monitor = create_monitor(num_actors=0, enabled=master_process)
 rl_monitor.set_output_dir(output_dir)
 rl_monitor.set_lean_servers(args.lean_servers)
 rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
+rl_monitor.set_matchmaker(matchmaker)
 
 # Register per-rank inference servers so the LLM profiler tab can poll
 # their timelines. Every rank runs a Flask inference server at
@@ -590,10 +633,9 @@ while True:
 
         if master_process:
             prover.collect(
-                theorems_sampler,
+                matchmaker,
                 args.collect_transitions,
                 experience,
-                num_simulations=args.num_simulations_collect,
                 tactic_sink=experience.record_tactic,
             )
 
@@ -616,7 +658,7 @@ while True:
         if master_process:
             rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
         # experience.save() is deferred until after the train phase so
-        # train_subsample.jsonl lands in the same collection_<step>/ dir.
+        # train_subsample.jsonl lands in the same step_<step>/ dir.
 
     if step % args.save_every == 0 and step > 0 and master_process:
         checkpoint_meta = {
@@ -727,6 +769,6 @@ while True:
     )
 
     if master_process and experience is not None:
-        experience.save(collection_dir(output_dir, step))
+        experience.save(step_dir(output_dir, step))
 
     step += 1
