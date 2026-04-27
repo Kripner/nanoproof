@@ -193,6 +193,42 @@ def save_eval_results_to_run_dir(output_dir: str, step: int, dataset_name: str, 
     write_eval_results_jsonl(jsonl_path, results)
 
 
+def _format_toml_value(v) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        if v != v or v in (float("inf"), float("-inf")):
+            return f'"{v}"'
+        return repr(v)
+    if isinstance(v, str):
+        escaped = v.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    raise TypeError(f"Unsupported TOML value type: {type(v).__name__}")
+
+
+def save_eval_summary_to_run_dir(output_dir: str, step: int, summary: dict):
+    """Write summary.toml in the RL run's eval directory.
+
+    ``summary`` is a dict whose top-level scalar entries become bare keys and
+    whose nested dicts become TOML tables (one level deep).
+    """
+    eval_dir = os.path.join(output_dir, "evals", f"{step:05d}")
+    os.makedirs(eval_dir, exist_ok=True)
+    toml_path = os.path.join(eval_dir, "summary.toml")
+    scalars = {k: v for k, v in summary.items() if not isinstance(v, dict)}
+    tables = {k: v for k, v in summary.items() if isinstance(v, dict)}
+    with open(toml_path, "w") as f:
+        for k, v in scalars.items():
+            f.write(f"{k} = {_format_toml_value(v)}\n")
+        for table_name, table in tables.items():
+            f.write(f"\n[{table_name}]\n")
+            for k, v in table.items():
+                f.write(f"{k} = {_format_toml_value(v)}\n")
+    logger.info(f"Saved eval summary to {toml_path}")
+
+
 def load_existing_eval_results(jsonl_path: str) -> tuple[list[dict], list[dict]]:
     """Load existing results. Returns (successful_entries, error_entries)."""
     successful, errors = [], []

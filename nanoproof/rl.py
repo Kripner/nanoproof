@@ -18,7 +18,7 @@ import leantree.augmentations
 from leantree.core.lean import LeanGoal
 
 from nanoproof.common import compute_init, compute_cleanup, get_base_dir, create_metrics_logger, add_logging_args, autodetect_device_type, SimpleTimer, flush, create_run_dirs, active_barrier, broadcast_value, enable_memory_profiling
-from nanoproof.checkpoints import load_model, save_checkpoint, save_eval_results_to_run_dir
+from nanoproof.checkpoints import load_model, save_checkpoint, save_eval_results_to_run_dir, save_eval_summary_to_run_dir
 from nanoproof.engine import Engine
 from nanoproof.data.sft.leantree import leantree_transitions
 from nanoproof.data.sft.leantree_dataloader import rl_data_generator
@@ -373,6 +373,33 @@ while True:
 
             save_eval_results_to_run_dir(output_dir, step, "minif2f", minif2f_results)
             save_eval_results_to_run_dir(output_dir, step, "proofnet", proofnet_results)
+
+            save_eval_summary_to_run_dir(output_dir, step, {
+                "step": step,
+                "minif2f": {
+                    "success_rate": minif2f_results["success_rate"],
+                    "solved": minif2f_results["solved"],
+                    "total": minif2f_results["total"],
+                    "errors": minif2f_results["errors"],
+                },
+                "proofnet": {
+                    "success_rate": proofnet_results["success_rate"],
+                    "solved": proofnet_results["solved"],
+                    "total": proofnet_results["total"],
+                    "errors": proofnet_results["errors"],
+                },
+                "tactic": {
+                    "full_acc": tactic_results["full_acc"],
+                    "first_token_acc": tactic_results["first_token_acc"],
+                    "first_token_entropy": tactic_results["first_token_entropy"],
+                    "all_tokens_entropy": tactic_results["all_tokens_entropy"],
+                },
+                "critic": {
+                    "argmax_mse": critic_results["argmax_mse"],
+                    "soft_mse": critic_results["soft_mse"],
+                    "entropy": critic_results["entropy"],
+                },
+            })
 
         # Prover eval can take many minutes; no timeout (use SIGUSR1 to debug).
         active_barrier(f"prover_eval_{step}", timeout=None)
