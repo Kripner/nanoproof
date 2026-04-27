@@ -95,23 +95,32 @@ def _load_sources() -> list[tuple[str, str]]:
     raw_uuids = table.column("uuid").to_pylist()
 
     theorems: list[tuple[str, str]] = []
+    seen_uuids = set()
     skipped = 0
     skipped_example = None
+    skipped_seen = 0
     for uuid, stmt in zip(raw_uuids, raw_statements):
+        if uuid in seen_uuids:
+            skipped_seen += 1
+            continue
+        seen_uuids.add(uuid)
+
         processed = _process_statement(stmt)
         if processed is None:
             skipped += 1
             if skipped_example is None:
                 skipped_example = stmt
             continue
+
         theorems.append((uuid, processed))
 
-    if skipped > 0 and int(os.environ.get("RANK", 0)) == 0:
-        print(
-            f"Skipped {skipped} statements that could not be parsed (no `:=`, or multiple `sorry`)"
-        )
-        if skipped_example is not None:
-            print(f"Example skipped statement:\n{skipped_example}")
+    if int(os.environ.get("RANK", 0)) == 0:
+        if skipped_seen != 0:
+            print(f"NuminaMath-LEAN: Skipped {skipped_seen} duplicate statements (expected: 74).")
+        if skipped != 0:
+            print(f"NuminaMath-LEAN: Skipped {skipped} statements that could not be parsed (no `:=`, or multiple `sorry`)")
+            if skipped_example is not None:
+                print(f"Example skipped statement:\n{skipped_example}")
     return theorems
 
 
