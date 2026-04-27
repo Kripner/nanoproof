@@ -241,9 +241,14 @@ class LeanServerStatus:
     # REPL readiness). Surfaces startup stalls when they show up as a pile
     # of "starting" that never transitions to "used".
     starting_processes: int = 0
+    # Subprocesses the janitor is currently tearing down. Transient >0 after
+    # a recycle is normal; persistently >0 means teardown is wedged.
+    stopping_processes: int = 0
+    # Pool-alive count: idle + checked_out + starting + stopping.
+    total_processes: int = 0
     # Tracked processes that haven't been touched in >60s. Leading indicator
     # of the reaper firing; growth here means clients are leaking leases.
-    inactive_processes: int = 0
+    idle_too_long_60s: int = 0
     last_update: float = field(default_factory=time.time)
     error: str = ""
 
@@ -945,8 +950,12 @@ class WebMonitor:
                             server.starting_processes = data.get(
                                 "starting_processes", 0
                             )
-                            server.inactive_processes = data.get(
-                                "inactive_processes", 0
+                            server.stopping_processes = data.get(
+                                "stopping_processes", 0
+                            )
+                            server.total_processes = data.get("total_processes", 0)
+                            server.idle_too_long_60s = data.get(
+                                "idle_too_long_60s", 0
                             )
                             server.last_update = time.time()
                             server.error = ""
@@ -1097,8 +1106,14 @@ class WebMonitor:
                         self.lean_server.starting_processes = data.get(
                             "starting_processes", 0
                         )
-                        self.lean_server.inactive_processes = data.get(
-                            "inactive_processes", 0
+                        self.lean_server.stopping_processes = data.get(
+                            "stopping_processes", 0
+                        )
+                        self.lean_server.total_processes = data.get(
+                            "total_processes", 0
+                        )
+                        self.lean_server.idle_too_long_60s = data.get(
+                            "idle_too_long_60s", 0
                         )
                         self.lean_server.last_update = time.time()
                         self.lean_server.error = ""
@@ -1724,7 +1739,9 @@ class WebMonitor:
                     "used_processes": self.lean_server.used_processes,
                     "max_processes": self.lean_server.max_processes,
                     "starting_processes": self.lean_server.starting_processes,
-                    "inactive_processes": self.lean_server.inactive_processes,
+                    "stopping_processes": self.lean_server.stopping_processes,
+                    "total_processes": self.lean_server.total_processes,
+                    "idle_too_long_60s": self.lean_server.idle_too_long_60s,
                     "cpu_percent": self.lean_server.cpu_percent,
                     "ram_percent": self.lean_server.ram_percent,
                     "ram_used_gb": self.lean_server.ram_used_gb,
@@ -1746,7 +1763,9 @@ class WebMonitor:
                         "leanserver_rss_gb": s.leanserver_rss_gb,
                         "total_branches": s.total_branches,
                         "starting_processes": s.starting_processes,
-                        "inactive_processes": s.inactive_processes,
+                        "stopping_processes": s.stopping_processes,
+                        "total_processes": s.total_processes,
+                        "idle_too_long_60s": s.idle_too_long_60s,
                         "error": s.error,
                     }
                     for s in self.lean_servers

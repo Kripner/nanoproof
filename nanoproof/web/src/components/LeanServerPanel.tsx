@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react';
 import { LeanServerStatus } from '../types';
 
 interface LeanServerPanelProps {
@@ -5,7 +6,41 @@ interface LeanServerPanelProps {
   servers?: LeanServerStatus[];
 }
 
+const STOPPING_RED_MS = 10_000;
+
+// Returns true once stopping_processes has been continuously nonzero for
+// STOPPING_RED_MS. Brief teardown spikes after a recycle stay green; only
+// a wedged janitor crosses the threshold.
+function useStoppingWedged(stopping: number): boolean {
+  const firstNonzeroRef = useRef<number | null>(null);
+  const [wedged, setWedged] = useState(false);
+
+  useEffect(() => {
+    if (stopping === 0) {
+      firstNonzeroRef.current = null;
+      setWedged(false);
+      return;
+    }
+    if (firstNonzeroRef.current === null) {
+      firstNonzeroRef.current = Date.now();
+    }
+    const elapsed = Date.now() - firstNonzeroRef.current;
+    if (elapsed >= STOPPING_RED_MS) {
+      setWedged(true);
+      return;
+    }
+    const handle = window.setTimeout(
+      () => setWedged(true),
+      STOPPING_RED_MS - elapsed,
+    );
+    return () => window.clearTimeout(handle);
+  }, [stopping]);
+
+  return wedged;
+}
+
 function SingleLeanServer({ server, compact = false }: { server: LeanServerStatus; compact?: boolean }) {
+  const stoppingWedged = useStoppingWedged(server.stopping_processes);
   // When disconnected, show minimal info
   if (!server.connected) {
     return (
@@ -43,8 +78,18 @@ function SingleLeanServer({ server, compact = false }: { server: LeanServerStatu
             <span className="lean-compact-value">{server.starting_processes}</span>
           </div>
           <div className="lean-compact-stat">
-            <span className="lean-compact-label">Idle</span>
-            <span className="lean-compact-value">{server.inactive_processes}</span>
+            <span className="lean-compact-label">Stop</span>
+            <span
+              className="lean-compact-value"
+              style={stoppingWedged ? { color: 'var(--danger, #e53935)' } : undefined}
+              title={stoppingWedged ? 'stopping_processes nonzero >10s: janitor wedged' : undefined}
+            >
+              {server.stopping_processes}
+            </span>
+          </div>
+          <div className="lean-compact-stat">
+            <span className="lean-compact-label">Idle60s</span>
+            <span className="lean-compact-value">{server.idle_too_long_60s}</span>
           </div>
           <div className="lean-compact-stat">
             <span className="lean-compact-label">CPU</span>
@@ -103,10 +148,21 @@ function SingleLeanServer({ server, compact = false }: { server: LeanServerStatu
         </div>
 
         <div className="lean-stat">
-          <div className="lean-stat-value">
-            {server.inactive_processes}
+          <div
+            className="lean-stat-value"
+            style={stoppingWedged ? { color: 'var(--danger, #e53935)' } : undefined}
+            title={stoppingWedged ? 'stopping_processes nonzero >10s: janitor wedged' : undefined}
+          >
+            {server.stopping_processes}
           </div>
-          <div className="lean-stat-label">Inactive</div>
+          <div className="lean-stat-label">Stopping</div>
+        </div>
+
+        <div className="lean-stat">
+          <div className="lean-stat-value">
+            {server.idle_too_long_60s}
+          </div>
+          <div className="lean-stat-label">Idle &gt;60s</div>
         </div>
 
         <div className="lean-stat">
