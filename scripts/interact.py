@@ -14,6 +14,9 @@ model_path = "sft/11-47-06_16-04-26_baseline-sft_v4/model_004115.pt"  # path to 
 
 if MODE == "raw_engine":
     device_type = ""  # cuda|cpu|mps (empty => autodetect)
+    batch_size = 2  # replicate the prompt into a batch of this size
+    first_token_occurrences_cap = 2
+    print(f"Batch Size: {batch_size} | First Token Occurrences Cap: {first_token_occurrences_cap}")
 
     device_type = autodetect_device_type() if device_type == "" else device_type
     device = torch.device(device_type)
@@ -27,12 +30,21 @@ if MODE == "raw_engine":
         tokens = tokenizer(
             inp_.strip() + "\n<|tactic|>", prepend=tokenizer.get_bos_token_id()
         )
-        sample_toks, masks = engine.generate_batch(
-            tokens, num_samples=6, min_tokens=1, max_tokens=64
-        )
+        num_samples = 6
+        if batch_size > 1:
+            batched = [tokens] * batch_size
+            sample_toks, masks = engine.generate_batch(
+                batched, num_samples=num_samples, min_tokens=1, max_tokens=64, first_token_occurrences_cap=first_token_occurrences_cap,
+            )
+            sample_toks = [s for row in sample_toks for s in row]
+            masks = [m for row in masks for m in row]
+        else:
+            sample_toks, masks = engine.generate_batch(
+                tokens, num_samples=num_samples, min_tokens=1, max_tokens=64, first_token_occurrences_cap=first_token_occurrences_cap,
+            )
         return [
             tokenizer.decode([t for t, m in zip(sample_toks[i], masks[i]) if m == 1])
-            for i in range(6)
+            for i in range(len(sample_toks))
         ]
 
     def predict_value_(inp_) -> float:
