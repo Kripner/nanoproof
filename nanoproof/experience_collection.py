@@ -136,42 +136,42 @@ class TheoremStats:
     """Per-theorem attempt log used by the matchmaker. Public so the web UI
     can replay the same logic over an on-disk attempt history.
 
-    Two parallel slices:
-
-    - ``raw``: every attempt's outcome in arrival order (used only for the
-      "two consecutive errors" dropout check).
-    - ``decided``: outcomes filtered to ``"proven"`` / ``"unproven"`` (used
-      for weight + budget computation).
+    ``history`` is the full arrival-order log of ``(outcome, proof_size)``
+    pairs. ``proof_size`` is the number of tactics in the linearized proof
+    when ``outcome == "proven"``, otherwise ``None``. Weight + budget
+    computation filters out errors on the fly.
     """
 
-    raw: list[Outcome] = field(default_factory=list)
-    decided: list[Outcome] = field(default_factory=list)
+    history: list[tuple[Outcome, int | None]] = field(default_factory=list)
 
-    def update(self, outcome: Outcome) -> None:
-        self.raw.append(outcome)
-        if outcome != "error":
-            self.decided.append(outcome)
-
-    def is_dropped_for_errors(self) -> bool:
-        return len(self.raw) >= 2 and self.raw[-1] == "error" and self.raw[-2] == "error"
+    def update(self, outcome: Outcome, proof_size: int | None = None) -> None:
+        self.history.append((outcome, proof_size))
 
     def weight(self, config: MatchmakerConfig) -> float:
-        if self.is_dropped_for_errors():
+        if (
+            len(self.history) >= 2
+            and self.history[-1][0] == "error"
+            and self.history[-2][0] == "error"
+        ):
             return 0.0
-        if not self.decided:
+        if any(o == "proven" and ps == 1 for o, ps in self.history):
+            return config.weight_fully_proved
+        decided = [o for o, _ in self.history if o != "error"]
+        if not decided:
             return config.weight_interesting
-        if len(self.decided) < config.trust_count:
+        if len(decided) < config.trust_count:
             return config.weight_interesting
-        proved = any(o == "proven" for o in self.decided)
+        proved = any(o == "proven" for o in decided)
         if not proved:
             return config.weight_undecided
-        recent = self.decided[-config.trust_count_proved :]
+        recent = decided[-config.trust_count_proved :]
         if len(recent) >= config.trust_count_proved and all(o == "proven" for o in recent):
             return config.weight_fully_proved
         return config.weight_interesting
 
     def num_simulations(self, config: MatchmakerConfig) -> int:
-        recent = self.decided[-config.trust_count :]
+        decided = [o for o, _ in self.history if o != "error"]
+        recent = decided[-config.trust_count :]
         num_failures = sum(1 for o in recent if o == "unproven")
         budget = config.base_simulations * (config.failure_multiplier**num_failures)
         return min(config.cap_simulations, int(budget))
@@ -225,14 +225,19 @@ class Matchmaker:
             num_sims = self._stats[idx].num_simulations(self.config)
             return theorem, num_sims
 
-    def send_result(self, theorem: BenchTheorem, outcome: Outcome) -> None:
+    def send_result(
+        self,
+        theorem: BenchTheorem,
+        outcome: Outcome,
+        proof_size: int | None = None,
+    ) -> None:
         key = (theorem.dataset, theorem.id)
         with self._lock:
             idx = self._index.get(key)
             assert idx is not None, (
                 f"Matchmaker.send_result: unknown theorem {key!r}"
             )
-            self._stats[idx].update(outcome)
+            self._stats[idx].update(outcome, proof_size)
 
     def weight_for(self, theorem: BenchTheorem) -> float:
         with self._lock:
@@ -276,7 +281,7 @@ class Matchmaker:
                         # Theorem present in the prior run but not in the
                         # current loaded list (e.g. whitelist drift). Skip.
                         continue
-                    self._stats[idx].update(obj["outcome"])
+                    self._stats[idx].update(obj["outcome"], obj.get("proof_size"))
                     replayed += 1
         info0(logger, f"Matchmaker: replayed {replayed} attempts from {run_dir}")
         return replayed
@@ -352,6 +357,7 @@ class TheoremAttempt:
     full_tree: dict | None  # pre-prune tree (game.unsimplified_root.serialize())
     simplified_tree: dict | None  # post-prune tree (game.root.serialize())
     transitions: list[tuple[str, str, float]]
+    proof_size: int | None  # number of tactics in the linearized proof; None unless proven
 
 
 class CollectedExperience:
@@ -384,6 +390,7 @@ class CollectedExperience:
         num_simulations: int,
         game,
         error: str | None,
+        proof_size: int | None = None,
     ) -> None:
         """Snapshot one prove attempt and append it to ``self.attempts``."""
         if outcome == "proven":
@@ -411,6 +418,7 @@ class CollectedExperience:
             full_tree=full_tree,
             simplified_tree=simplified_tree,
             transitions=transitions,
+            proof_size=proof_size,
         )
         with self._lock:
             self.attempts.append(attempt)

@@ -1339,7 +1339,7 @@ class WebMonitor:
                         obj = json.loads(line)
                         if obj.get("dataset") != dataset or obj.get("id") != theorem_id:
                             continue
-                        stats.update(obj["outcome"])
+                        stats.update(obj["outcome"], obj.get("proof_size"))
                         history.append(
                             {
                                 "step": step,

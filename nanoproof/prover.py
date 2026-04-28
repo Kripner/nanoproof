@@ -369,9 +369,12 @@ class ProverWorker:
 
         def on_result(theorem_id, theorem, num_simulations, game, error):
             outcome = derive_outcome(game, error)
+            proof_size = len(linearize_proof(game.root)) if outcome == "proven" else None
             transitions_before = experience.num_transitions()
-            experience.record_attempt(theorem, outcome, num_simulations, game, error)
-            matchmaker.send_result(theorem, outcome)
+            experience.record_attempt(
+                theorem, outcome, num_simulations, game, error, proof_size
+            )
+            matchmaker.send_result(theorem, outcome, proof_size)
             if outcome == "proven" and monitor is not None:
                 monitor.add_collected_samples(
                     experience.num_transitions() - transitions_before

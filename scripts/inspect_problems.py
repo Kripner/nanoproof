@@ -97,7 +97,7 @@ def main() -> None:
                 obj = json.loads(line)
                 if obj.get("dataset") != args.dataset or obj.get("id") != target_id:
                     continue
-                stats.update(obj["outcome"])
+                stats.update(obj["outcome"], obj.get("proof_size"))
                 weight = stats.weight(config)
                 num_sims = obj.get("num_simulations", 0)
                 iters = obj.get("num_iterations", 0)
