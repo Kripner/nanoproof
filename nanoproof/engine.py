@@ -123,6 +123,56 @@ def sample_next_token(logits, rng, temperature=1.0, top_k=None):
         return torch.multinomial(probs, num_samples=1, generator=rng)
 
 
+@torch.inference_mode()
+def sample_next_token_limited_replacement(logits, rng, num_samples=6, temperature=1.0, top_k=None, occurrences_cap=2):
+    """
+    Sample tokens with a per-token occurrence cap using Gumbel-Top-k.
+
+    Args:
+        logits: Tensor of shape (B, vocab_size).
+        rng: torch.Generator.
+        num_samples: Number of samples to draw per batch row.
+        temperature: Sampling temperature. Must be > 0.
+        top_k: Unsupported for now; must be None.
+        max_per_token: Maximum number of times each token may appear.
+
+    Returns:
+        Tensor of shape (B, num_samples), where each token appears at most max_per_token times per batch row.
+    """
+    assert logits.ndim == 2, "logits must have shape (B, vocab_size)"
+    assert temperature > 0.0, "temperature must be positive"
+    assert top_k is None, "top_k is not supported for capped Gumbel sampling yet"
+    assert num_samples > 0, "num_samples must be positive"
+    assert occurrences_cap > 0, "occurrences_cap must be positive"
+    assert occurrences_cap <= num_samples, "occurrences_cap should not exceed num_samples"
+
+    B, V = logits.shape
+    scores = logits / temperature  # (B, V)
+
+    # Draw one Gumbel key per latent token copy.
+    u = torch.rand(
+        B, V, occurrences_cap, device=logits.device, dtype=logits.dtype, generator=rng,
+    )  # (B, V, occurrences_cap)
+
+    eps = torch.finfo(logits.dtype).tiny
+    gumbel = -torch.log(-torch.log(u.clamp_min(eps)))
+
+    # Broadcast token scores across latent copies.
+    keys = scores.unsqueeze(-1) + gumbel  # (B, V, occurrences_cap)
+
+    # Top-k over all latent copies.
+    selected_flat = torch.topk(
+        keys.flatten(start_dim=1),
+        k=num_samples,
+        dim=-1,
+    ).indices  # (B, num_samples)
+
+    # flatten order is:
+    # token0_copy0, token0_copy1, ..., token0_copyC, token1_copy0, ...
+    selected_tokens = selected_flat // occurrences_cap
+
+    return selected_tokens
+
 # -----------------------------------------------------------------------------
 
 
@@ -155,8 +205,9 @@ class Engine:
         min_tokens=None,
         temperature=1.0,
         top_k=None,
-        seed=42,
         return_logits=False,
+        first_token_occurrences_cap=None,
+        seed=0,
     ):
         """
         Generate tokens from prompt(s). Accepts either list[int] (single prompt) or
@@ -273,7 +324,30 @@ class Engine:
                     logits[:, eos] = float("-inf")
                     logits[:, bos] = float("-inf")
                 # Sample the next token for each row
-                next_ids = sample_next_token(logits, rng, temperature, top_k)
+                if (
+                    num_generated == 0
+                    and first_token_occurrences_cap is not None
+                    and num_samples > 1
+                ):
+                    assert top_k is None, (
+                        "top_k is not supported with first_token_occurrences_cap"
+                    )
+                    assert temperature > 0.0, (
+                        "temperature must be > 0 with first_token_occurrences_cap"
+                    )
+                    # Rows for the same prompt share identical prefill logits;
+                    # sample per-prompt with the cap, then expand back to rows.
+                    prompt_logits = logits[::num_samples]  # (num_prompts, vocab)
+                    sampled = sample_next_token_limited_replacement(
+                        prompt_logits,
+                        rng,
+                        num_samples=num_samples,
+                        temperature=temperature,
+                        occurrences_cap=first_token_occurrences_cap,
+                    )  # (num_prompts, num_samples)
+                    next_ids = sampled.reshape(-1, 1)  # (total_rows, 1)
+                else:
+                    next_ids = sample_next_token(logits, rng, temperature, top_k)
                 sampled_tokens = next_ids[:, 0].tolist()
 
                 token_column = []
