@@ -29,6 +29,11 @@ def _load_flash_attention_3():
     """Try to load Flash Attention 3 (requires Hopper GPU, sm90)."""
     if not torch.cuda.is_available():
         return None
+    # ROCm/HIP also exposes torch.cuda, and gcnArch parses to (9, *) on
+    # MI200/MI300, which would falsely satisfy the major==9 check below and
+    # trigger an HF Hub fetch of NVIDIA-only kernels. Skip on AMD outright.
+    if torch.version.hip is not None:
+        return None
     try:
         major, _ = torch.cuda.get_device_capability()
         # FA3 kernels are compiled for Hopper (sm90) only
