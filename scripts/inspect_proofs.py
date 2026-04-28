@@ -454,11 +454,67 @@ def _one_line_preview(source: str, max_len: int = 120) -> str:
     return flat[:max_len] + ("..." if len(flat) > max_len else "")
 
 
-def cmd_gather_lean(args):
-    """Gather Lean theorems with proofs from evaluation steps."""
-    run_dir = Path(args.run_dir)
-    evals_dir = run_dir / "evals"
+def _write_gathered_lean(
+    jsonl_path: Path, output_path: Path, check_indent: str = ""
+) -> tuple[int, int]:
+    """Read an eval JSONL, build a single .lean file with proven proofs inlined.
 
+    Each theorem is wrapped in its own `section ... end` with its stored
+    header so opens/defs don't leak between theorems. Returns
+    (proven_count, total_count).
+    """
+    _check_eval_file(jsonl_path, indent=check_indent)
+
+    proofs = load_proofs(str(jsonl_path))
+
+    lean_blocks = []
+    proven_count = 0
+
+    for item in proofs:
+        theorem = item.get("theorem", "").strip()
+        proof_dict = item.get("proof")
+
+        if proof_dict is not None:
+            proven_count += 1
+            # Prefer the cached source written by the prover; fall
+            # back to reconstructing it for older JSONL records.
+            cached = item.get("linearized_proof")
+            if cached:
+                theorem = cached
+            else:
+                node = Node.deserialize(proof_dict)
+                tactics = linearize_proof(node)
+                theorem = construct_proof_source(theorem, tactics)
+
+        header = _record_header(item)
+        if header:
+            lean_blocks.append(f"section\n{header}\n\n{theorem}\n\nend")
+        else:
+            lean_blocks.append(f"section\n\n{theorem}\n\nend")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
+        f.write(_EXPORT_IMPORTS.strip() + "\n\n\n" + "\n\n".join(lean_blocks))
+
+    return proven_count, len(lean_blocks)
+
+
+def cmd_gather_lean(args):
+    """Gather Lean theorems with proofs from a single eval JSONL or a run dir."""
+    path = Path(args.path)
+    output_dir = Path(args.output_dir)
+
+    if path.is_file():
+        output_path = output_dir / f"{path.stem}.lean"
+        proven, total = _write_gathered_lean(path, output_path)
+        print(f"{proven}/{total} proven -> {output_path}")
+        return
+
+    if not path.is_dir():
+        print(f"Error: {path} is neither a file nor a directory")
+        return
+
+    evals_dir = path / "evals"
     if not evals_dir.exists():
         print(f"Error: evals directory not found at {evals_dir}")
         return
@@ -472,8 +528,7 @@ def cmd_gather_lean(args):
         print(f"No step directories found in {evals_dir}")
         return
 
-    # Create output directory
-    output_base = Path(args.output_dir) / run_dir.name
+    output_base = output_dir / path.name
     output_base.mkdir(parents=True, exist_ok=True)
 
     print(f"Found {len(step_dirs)} evaluation steps: {[d.name for d in step_dirs]}")
@@ -486,43 +541,12 @@ def cmd_gather_lean(args):
             if not jsonl_path.exists():
                 continue
 
-            _check_eval_file(jsonl_path, indent="  ")
-
-            proofs = load_proofs(str(jsonl_path))
-
-            # Collect theorems, each wrapped in its own `section ... end` with
-            # its stored header so opens/defs don't leak between theorems.
-            lean_blocks = []
-            proven_count = 0
-
-            for item in proofs:
-                theorem = item.get("theorem", "").strip()
-                proof_dict = item.get("proof")
-
-                if proof_dict is not None:
-                    proven_count += 1
-                    # Prefer the cached source written by the prover; fall
-                    # back to reconstructing it for older JSONL records.
-                    cached = item.get("linearized_proof")
-                    if cached:
-                        theorem = cached
-                    else:
-                        node = Node.deserialize(proof_dict)
-                        tactics = linearize_proof(node)
-                        theorem = construct_proof_source(theorem, tactics)
-
-                header = _record_header(item)
-                if header:
-                    lean_blocks.append(f"section\n{header}\n\n{theorem}\n\nend")
-                else:
-                    lean_blocks.append(f"section\n\n{theorem}\n\nend")
-
             output_path = output_base / f"{step_dir.name}-{dataset}.lean"
-            with open(output_path, "w") as f:
-                f.write(_EXPORT_IMPORTS.strip() + "\n\n\n" + "\n\n".join(lean_blocks))
-
+            proven, total = _write_gathered_lean(
+                jsonl_path, output_path, check_indent="  "
+            )
             print(
-                f"Step {step_dir.name} [{dataset}]: {proven_count}/{len(lean_blocks)} proven -> {output_path}"
+                f"Step {step_dir.name} [{dataset}]: {proven}/{total} proven -> {output_path}"
             )
 
 
@@ -640,10 +664,12 @@ def main():
 
     # Gather Lean subcommand
     gather_parser = subparsers.add_parser(
-        "gather_lean", help="Gather Lean theorems with proofs from evaluation steps"
+        "gather_lean",
+        help="Gather Lean theorems with proofs from a JSONL file or a run directory",
     )
     gather_parser.add_argument(
-        "run_dir", help="Path to the run's output directory (containing 'evals' subdir)"
+        "path",
+        help="Path to an eval JSONL file, or to a run output directory containing an 'evals' subdir",
     )
     gather_parser.add_argument(
         "--output-dir",
