@@ -70,6 +70,7 @@ class TacticModel:
     engine: Engine
     num_samples: int
     seed: int
+    first_token_occurrences_cap: int | None = None
 
     def __post_init__(self):
         self.rng = torch.Generator(device=self.network.get_device())
@@ -138,6 +139,7 @@ class TacticModel:
             num_samples=self.num_samples,
             min_tokens=1,
             max_tokens=64,
+            first_token_occurrences_cap=self.first_token_occurrences_cap,
             seed=seed,
         )
 
@@ -232,10 +234,23 @@ class TacticModel:
         pass
 
     @classmethod
-    def create(cls, num_samples: int, model_path: str, seed: int = 0) -> Self:
+    def create(
+        cls,
+        num_samples: int,
+        model_path: str,
+        seed: int = 0,
+        first_token_occurrences_cap: int | None = None,
+    ) -> Self:
         model, tokenizer, _ = load_model(model_path, torch.device("cuda"), phase="eval")
         engine = Engine(model, tokenizer)
-        return cls(model, tokenizer, engine, num_samples=num_samples, seed=seed)
+        return cls(
+            model,
+            tokenizer,
+            engine,
+            num_samples=num_samples,
+            seed=seed,
+            first_token_occurrences_cap=first_token_occurrences_cap,
+        )
 
 
 def compute_max_batch_prompt_tokens(

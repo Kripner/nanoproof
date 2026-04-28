@@ -115,6 +115,13 @@ def main():
     parser.add_argument("--max-theorems", type=int, default=None)
     parser.add_argument("--num-simulations", type=int, default=512)
     parser.add_argument("--num-sampled-tactics", type=int, default=6)
+    parser.add_argument(
+        "--first-token-occurrences-cap",
+        type=int,
+        default=None,
+        help="cap on how many sampled tactics may share the same first token "
+        "(per state). None disables the cap.",
+    )
     parser.add_argument("--batch-time-limit", type=float, default=0.5)
     parser.add_argument(
         "--batch-max-gen-samples",
@@ -237,7 +244,9 @@ def main():
         f"Loading checkpoint: {checkpoint_info.checkpoint_dir}, step={checkpoint_info.step}"
     )
     inner_tactic_model = TacticModel.create(
-        num_samples=args.num_sampled_tactics, model_path=args.model_path
+        num_samples=args.num_sampled_tactics,
+        model_path=args.model_path,
+        first_token_occurrences_cap=args.first_token_occurrences_cap,
     )
     # Defer max_gen_samples default until we know num_actors
     tactic_model = BlockingTacticModel(
