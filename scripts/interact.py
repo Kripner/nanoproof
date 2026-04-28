@@ -1,11 +1,6 @@
 import torch
 
-from nanoproof.common import (
-    compute_init,
-    compute_cleanup,
-    print0,
-    autodetect_device_type,
-)
+from nanoproof.common import autodetect_device_type
 from nanoproof.checkpoints import load_model
 from nanoproof.engine import Engine
 from nanoproof.inference import TacticModel
@@ -14,7 +9,8 @@ MODE = "raw_engine"  # raw_engine | tactic_model
 generate = None
 predict_value = None
 
-model_path = "sft/FIXME/model_005000.pt"  # path to model_NNNNNN.pt (relative to models/ or absolute)
+# model_path = "sft/FIXME/model_005000.pt"  # path to model_NNNNNN.pt (relative to models/ or absolute)
+model_path = "sft/11-47-06_16-04-26_baseline-sft_v4/model_004115.pt"  # path to model_NNNNNN.pt (relative to models/ or absolute)
 
 if MODE == "raw_engine":
     device_type = ""  # cuda|cpu|mps (empty => autodetect)
@@ -31,10 +27,13 @@ if MODE == "raw_engine":
         tokens = tokenizer(
             inp_.strip() + "\n<|tactic|>", prepend=tokenizer.get_bos_token_id()
         )
-        sample_toks, _ = engine.generate_batch(
+        sample_toks, masks = engine.generate_batch(
             tokens, num_samples=6, min_tokens=1, max_tokens=64
         )
-        return [tokenizer.decode(sample_toks[i]) for i in range(6)]
+        return [
+            tokenizer.decode([t for t, m in zip(sample_toks[i], masks[i]) if m == 1])
+            for i in range(6)
+        ]
 
     def predict_value_(inp_) -> float:
         tokens = tokenizer(
@@ -108,9 +107,9 @@ while inp.strip() not in ["q", "quit", "exit"]:
     for tactic in tactics:
         print(f"Tactic:\n--\n'{tactic}'\n--")
         print()
-    print(f"Predicting value...")
-    value = predict_value(inp)
-    print(f"Value: {value}")
+    # print(f"Predicting value...")
+    # value = predict_value(inp)
+    # print(f"Value: {value}")
     print()
     inp = get_input()
 print("Done.")
