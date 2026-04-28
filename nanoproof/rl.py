@@ -410,10 +410,9 @@ if master_process:
     )
 
 # Augmentations
-shuffle_goals_and_hypotheses = leantree.augmentations.ShuffleGoalsAndHypotheses(
-    seed=args.seed
-)
-random_rename = leantree.augmentations.RandomRename(seed=args.seed)
+augmentations_seed = args.seed + 1  # use different seed than in sft.py
+shuffle_goals_and_hypotheses = leantree.augmentations.ShuffleGoalsAndHypotheses(seed=augmentations_seed)
+random_rename = leantree.augmentations.RandomRename(seed=augmentations_seed)
 
 mathlib_train = list(
     leantree_transitions(
