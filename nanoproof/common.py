@@ -733,6 +733,33 @@ def pretty_print_tree(
     return pt(root)
 
 
+def parse_interval(spec: str) -> tuple[str, int, str]:
+    """Parse '100steps' or 'H:M:S' into (kind, value, description)."""
+    if spec.endswith("steps"):
+        n = int(spec[: -len("steps")])
+        return "steps", n, f"every {n} steps"
+    if ":" in spec:
+        h, m, s = spec.split(":")
+        seconds = int(h) * 3600 + int(m) * 60 + int(s)
+        return "time", seconds, f"every {int(h)}h{int(m):02d}m{int(s):02d}s"
+    raise ValueError(f"Interval must be 'Nsteps' or 'H:M:S', got {spec!r}")
+
+
+class IntervalTrigger:
+    def __init__(self, spec: str):
+        self.kind, self.value, self.description = parse_interval(spec)
+        self.last_fire_time = time.monotonic()
+
+    def fire(self, step: int) -> bool:
+        if self.kind == "steps":
+            return step % self.value == 0
+        now = time.monotonic()
+        if now - self.last_fire_time >= self.value:
+            self.last_fire_time = now
+            return True
+        return False
+
+
 class SimpleTimer:
     def __init__(self):
         self.times = {}

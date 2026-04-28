@@ -25,6 +25,7 @@ from nanoproof.common import (
     add_logging_args,
     autodetect_device_type,
     SimpleTimer,
+    IntervalTrigger,
     flush,
     create_run_dirs,
     active_barrier,
@@ -223,9 +224,19 @@ parser.add_argument("--weight-decay", type=float, default=0.0)
 parser.add_argument("--init-lr-frac", type=float, default=0.02)
 
 # Evaluation / checkpointing
-parser.add_argument("--eval-every", type=int, default=100)
+parser.add_argument(
+    "--eval-every",
+    type=str,
+    default="1:00:00",
+    help="how often to run eval - 'Nsteps' (e.g. '100steps') or 'H:M:S' (e.g. '2:30:00')",
+)
 parser.add_argument("--eval-start", type=int, default=0)
-parser.add_argument("--save-every", type=int, default=500)
+parser.add_argument(
+    "--save-every",
+    type=str,
+    default="1:00:00",
+    help="how often to save a checkpoint - 'Nsteps' or 'H:M:S'",
+)
 parser.add_argument(
     "--log-level",
     type=str,
@@ -480,6 +491,11 @@ for group in optimizer.param_groups:
 if ddp:
     dist.barrier()
 
+eval_trigger = IntervalTrigger(args.eval_every)
+save_trigger = IntervalTrigger(args.save_every)
+info0(logger, f"Eval interval: {eval_trigger.description} (from --eval-every {args.eval_every!r})")
+info0(logger, f"Save interval: {save_trigger.description} (from --save-every {args.save_every!r})")
+
 # Go!
 step = 0
 minif2f_results = None
@@ -503,7 +519,10 @@ atexit.register(cleanup)
 while True:
     timer = SimpleTimer()
 
-    if step % args.eval_every == 0 and step >= args.eval_start:
+    do_eval = master_process and step >= args.eval_start and eval_trigger.fire(step)
+    if ddp:
+        do_eval = broadcast_value(do_eval)
+    if do_eval:
         timer.start("eval")
         rl_monitor.record_phase_event("eval", "start")
         model.eval()
@@ -683,7 +702,7 @@ while True:
         # experience.save() is deferred until after the train phase so
         # train_subsample.jsonl lands in the same step_<step>/ dir.
 
-    if step % args.save_every == 0 and step > 0 and master_process:
+    if master_process and step > 0 and save_trigger.fire(step):
         checkpoint_meta = {
             "step": step,
             "model_config": asdict(model.config),
