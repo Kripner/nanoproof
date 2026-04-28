@@ -10,6 +10,7 @@ prints the linearized proof source (same format used by inspect_proofs.py).
 
 import argparse
 import json
+import random
 
 from nanoproof.common import construct_proof_source, linearize_proof
 from nanoproof.experience_collection import (
@@ -35,7 +36,11 @@ def main() -> None:
     )
     parser.add_argument("run_dir", help="path to the RL run directory")
     parser.add_argument("--dataset", required=True, help="dataset name")
-    parser.add_argument("--id", required=True, help="theorem id within the dataset")
+    parser.add_argument(
+        "--id",
+        default=None,
+        help="theorem id within the dataset; if omitted, a random id is picked",
+    )
     parser.add_argument(
         "--show-proofs",
         action="store_true",
@@ -43,32 +48,42 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Use the live run's matchmaker config when available so the weights
-    # printed here match what training actually used.
-    config = MatchmakerConfig()
-    args_path = f"{args.run_dir}/args.json"
-    try:
-        with open(args_path, "r") as f:
-            run_args = json.load(f)
-    except FileNotFoundError:
-        run_args = {}
-    for field in (
-        "trust_count",
-        "trust_count_proved",
-        "weight_interesting",
-        "weight_undecided",
-        "weight_fully_proved",
-        "base_simulations",
-        "failure_multiplier",
-        "cap_simulations",
-    ):
-        key = f"mm_{field}"
-        if key in run_args:
-            config = type(config)(**{**config.__dict__, field: run_args[key]})
+    # Use the live run's matchmaker config so the weights printed here match
+    # what training actually used.
+    with open(f"{args.run_dir}/args.json", "r") as f:
+        run_args = json.load(f)
+    config = MatchmakerConfig(
+        trust_count=run_args["mm_trust_count"],
+        trust_count_proved=run_args["mm_trust_count_proved"],
+        weight_interesting=run_args["mm_weight_interesting"],
+        weight_undecided=run_args["mm_weight_undecided"],
+        weight_fully_proved=run_args["mm_weight_fully_proved"],
+        base_simulations=run_args["mm_base_simulations"],
+        failure_multiplier=run_args["mm_failure_multiplier"],
+        cap_simulations=run_args["mm_cap_simulations"],
+    )
+
+    target_id = args.id
+    if target_id is None:
+        ids: set[str] = set()
+        for _step, shard_path in list_step_shards(args.run_dir):
+            with open(shard_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    obj = json.loads(line)
+                    if obj.get("dataset") == args.dataset:
+                        ids.add(obj.get("id"))
+        if not ids:
+            print(f"# (no attempts found for dataset {args.dataset})")
+            return
+        target_id = random.choice(sorted(ids))
+        print(f"# (no --id given; picked random id: {target_id})")
 
     stats = TheoremStats()
     found = 0
-    print(f"# {args.dataset}/{args.id}  (run: {args.run_dir})")
+    print(f"# {args.dataset}/{target_id}  (run: {args.run_dir})")
     print(
         f"# {'step':>6}  {'outcome':<9} {'sims':>6} {'iters':>6} {'trans':>6}  "
         f"{'weight_after':>14}  details"
@@ -80,7 +95,7 @@ def main() -> None:
                 if not line:
                     continue
                 obj = json.loads(line)
-                if obj.get("dataset") != args.dataset or obj.get("id") != args.id:
+                if obj.get("dataset") != args.dataset or obj.get("id") != target_id:
                     continue
                 stats.update(obj["outcome"])
                 weight = stats.weight(config)
@@ -105,7 +120,7 @@ def main() -> None:
                 found += 1
 
     if found == 0:
-        print(f"# (no attempts found for {args.dataset}/{args.id})")
+        print(f"# (no attempts found for {args.dataset}/{target_id})")
     else:
         print(f"# {found} attempt(s); current weight: {stats.weight(config):.6e}")
 
