@@ -143,6 +143,14 @@ def main():
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
+        "--output-suffix",
+        type=str,
+        default="",
+        help="extra suffix appended to the eval output filename, e.g. '_cap2' "
+        "produces eval_<step>_<dataset>_cap2.jsonl. Useful to keep variant "
+        "runs from colliding with the baseline file.",
+    )
+    parser.add_argument(
         "--force", action="store_true", help="overwrite existing results"
     )
     parser.add_argument(
@@ -175,6 +183,7 @@ def main():
         raise ValueError("leanworkbook does not have a test split")
 
     split_suffix = "-test" if args.split == "test" else ""
+    output_suffix = args.output_suffix
 
     # Init compute
     device_type = autodetect_device_type()
@@ -192,7 +201,9 @@ def main():
     if master_process:
         existing_results = []
         for dataset_name in datasets:
-            eval_path = checkpoint_info.get_eval_path(dataset_name + split_suffix)
+            eval_path = checkpoint_info.get_eval_path(
+                dataset_name + split_suffix + output_suffix
+            )
             if os.path.exists(eval_path):
                 if os.path.getsize(eval_path) == 0:
                     os.remove(eval_path)
@@ -379,7 +390,7 @@ def main():
             )
             save_eval_results(
                 checkpoint_info,
-                dataset_name + split_suffix,
+                dataset_name + split_suffix + output_suffix,
                 results,
                 prepend_entries=prepend,
             )
