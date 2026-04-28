@@ -150,6 +150,11 @@ parser.add_argument(
     default=0.01,
     help="weight for value (critic) samples relative to policy samples",
 )
+parser.add_argument(
+    "--no-augmentations",
+    action="store_true",
+    help="disable training-data augmentations (ShuffleGoalsAndHypotheses, RandomRename)",
+)
 args = parser.parse_args()
 user_config = vars(args).copy()
 # -----------------------------------------------------------------------------
@@ -207,10 +212,14 @@ assert args.target_examples_per_step % examples_per_step == 0, (
 grad_accum_steps = args.target_examples_per_step // examples_per_step
 print0(f"=> Setting grad accum steps: {grad_accum_steps}")
 
-augmentations = [
-    leantree.augmentations.ShuffleGoalsAndHypotheses(seed=args.seed),
-    leantree.augmentations.RandomRename(seed=args.seed),
-]
+augmentations = (
+    []
+    if args.no_augmentations
+    else [
+        leantree.augmentations.ShuffleGoalsAndHypotheses(seed=args.seed),
+        leantree.augmentations.RandomRename(seed=args.seed),
+    ]
+)
 train_ds = list(leantree_transitions(split="train", augmentations=augmentations))
 random.Random(args.seed).shuffle(train_ds)
 val_ds = list(leantree_transitions(split="valid"))
