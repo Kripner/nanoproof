@@ -319,10 +319,10 @@ export function DataPanel() {
                         {' '}{a.dataset}/{a.id}
                       </span>
                       <span className="proof-meta">
-                        {a.num_simulations} sims · {a.num_iterations} iters ·
-                        {' '}{a.num_transitions} trans
+                        {a.num_simulations} max sims
                         {a.outcome === 'proven' && (
                           <>
+                            {' · '}{a.num_iterations} sims
                             {' · '}full d{a.full_tree_depth}/s{a.full_tree_size}
                             {' · '}simp d{a.simplified_tree_depth}/s{a.simplified_tree_size}
                           </>

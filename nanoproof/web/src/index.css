@@ -1162,7 +1162,7 @@ body {
 }
 
 .proof-meta {
-  color: var(--text-muted);
+  color: var(--text-secondary);
   flex-shrink: 0;
   white-space: nowrap;
 }
