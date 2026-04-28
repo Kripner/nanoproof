@@ -57,6 +57,7 @@ interface AttemptDetail {
   full_tree: NodeDict | null;
   simplified_tree: NodeDict | null;
   transitions: [string, string, number][];
+  proof: string | null;
 }
 
 interface TrainSample {
@@ -455,6 +456,13 @@ export function DataPanel() {
               <div className="modal-label">Theorem</div>
               <div className="modal-code state">{attemptDetail.theorem}</div>
             </div>
+
+            {attemptDetail.outcome === 'proven' && attemptDetail.proof && (
+              <div className="modal-section">
+                <div className="modal-label">Linearized proof</div>
+                <div className="modal-code tactic">{attemptDetail.proof}</div>
+              </div>
+            )}
 
             {attemptDetail.outcome === 'proven' && (
               <>

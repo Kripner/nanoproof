@@ -681,7 +681,15 @@ def _serve_attempts_summary(path: str | None) -> Response:
 
 
 def _serve_attempt_entry(path: str | None, index: int) -> Response:
-    """Return the full record (trees + transitions) for one attempt."""
+    """Return the full record (trees + transitions) for one attempt.
+
+    Augments proven attempts with a ``proof`` field carrying the
+    linearized Lean source (theorem with ``sorry`` replaced by tactics)
+    so the Data tab modal can render it without re-walking the tree
+    in JS.
+    """
+    from nanoproof.common import construct_proof_source
+
     if not path or not os.path.exists(path):
         return jsonify({"error": "Not found"}), 404
     i = 0
@@ -691,7 +699,13 @@ def _serve_attempt_entry(path: str | None, index: int) -> Response:
             if not line:
                 continue
             if i == index:
-                return jsonify(json.loads(line))
+                obj = json.loads(line)
+                if obj.get("outcome") == "proven":
+                    tactics = _linearize_serialized_tree(obj.get("simplified_tree"))
+                    src = obj.get("theorem")
+                    if tactics and src and src.strip().endswith("sorry"):
+                        obj["proof"] = construct_proof_source(src, tactics)
+                return jsonify(obj)
             i += 1
     return jsonify({"error": "Index out of range"}), 404
 
