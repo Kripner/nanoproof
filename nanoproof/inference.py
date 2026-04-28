@@ -165,6 +165,9 @@ class TacticModel:
                 if tactic.strip() == "bound":
                     # `bound` tactic messes with the kernel check
                     continue
+                if tactic.strip().startswith("replace"):
+                    # Seems unnecessary and sometimes messes with the linearized proof.
+                    continue
                 tactics.append(tactic)
             tactics_results.append(tactics)
 
