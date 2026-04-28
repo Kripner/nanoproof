@@ -69,6 +69,7 @@ export interface MonitorState {
 export interface TacticAttempt {
   tactic: string;
   status: 'success' | 'error' | 'cycle';
+  count: number;
 }
 
 export interface TacticEntry {

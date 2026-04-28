@@ -348,14 +348,18 @@ export function DataPanel() {
                   <div className="replay-empty">No tactics at this step</div>
                 ) : (
                   tactics.map((entry, i) => {
-                    const successCount = entry.tactics.filter(
-                      (t) => t.status === 'success',
-                    ).length;
+                    const totalSamples = entry.tactics.reduce(
+                      (a, t) => a + t.count,
+                      0,
+                    );
+                    const successSamples = entry.tactics
+                      .filter((t) => t.status === 'success')
+                      .reduce((a, t) => a + t.count, 0);
                     return (
                       <div key={i} className="tactic-group">
                         <div className="tactic-group-state" title={entry.state}>
                           <span className="tactic-group-count">
-                            {successCount}/{entry.tactics.length}
+                            {successSamples}/{totalSamples}
                           </span>
                           {entry.state}
                         </div>
@@ -376,6 +380,11 @@ export function DataPanel() {
                             return (
                               <div key={j} className={`tactic-item ${statusClass}`}>
                                 <span className="tactic-status">{statusIcon}</span>
+                                {t.count > 1 && (
+                                  <span className="tactic-dup-count">
+                                    {t.count}x
+                                  </span>
+                                )}
                                 <span className="tactic-text">{t.tactic}</span>
                               </div>
                             );

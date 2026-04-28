@@ -1,3 +1,4 @@
+from collections import Counter
 from dataclasses import dataclass
 import enum
 import logging
@@ -420,7 +421,7 @@ def run_mcts(
     expansion_callback=None,
     abort_check=None,
     timeline: TimelineRecorder | None = None,
-    tactic_sink: Callable[[str, list[tuple[str, str]]], None] | None = None,
+    tactic_sink: Callable[[str, list[tuple[str, str, int]]], None] | None = None,
 ) -> int:
     """
     Run MCTS to find a proof.
@@ -579,9 +580,10 @@ def expand_node(
     temperature: float,
     timeline: TimelineRecorder | None = None,
     abort_check=None,
-    tactic_sink: "Callable[[str, list[tuple[str, str]]], None] | None" = None,
+    tactic_sink: "Callable[[str, list[tuple[str, str, int]]], None] | None" = None,
 ):
     node.evaluations += 1
+    counts = Counter(actions)
     policy = {
         a: math.exp(logprob / temperature)
         for a, logprob in zip(actions, action_logprobs)
@@ -591,11 +593,12 @@ def expand_node(
         str(node.state[0].state).strip() if len(node.state) == 1 else "<multi-branch>"
     )
 
-    # Collect (tactic, status) pairs for this expansion and emit once at the
-    # end so the sink sees the whole batch generated for this state together.
-    # We use try/finally so any partial results survive an abort or Lean
-    # crash mid-expansion.
-    tactic_results: list[tuple[str, str]] = []
+    # Collect (tactic, status, count) triples for this expansion and emit once
+    # at the end so the sink sees the whole batch generated for this state
+    # together. ``count`` is how many times the model sampled this tactic
+    # before dedup. We use try/finally so any partial results survive an abort
+    # or Lean crash mid-expansion.
+    tactic_results: list[tuple[str, str, int]] = []
     try:
         for action, p in policy.items():
             if abort_check is not None and abort_check():
@@ -625,13 +628,13 @@ def expand_node(
                 raise
             if not new_branches.is_success():
                 # Invalid action encountered.
-                tactic_results.append((action, "error"))
+                tactic_results.append((action, "error", counts[action]))
                 continue
             if is_cycling(node, new_branches.value):
                 # Cycle detected.
-                tactic_results.append((action, "cycle"))
+                tactic_results.append((action, "cycle", counts[action]))
                 continue
-            tactic_results.append((action, "success"))
+            tactic_results.append((action, "success", counts[action]))
             # new_branches = [b for b in new_branches.value if not b.state.is_solved()]
             new_branches = new_branches.value
             child = Node(

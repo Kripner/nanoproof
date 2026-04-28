@@ -424,17 +424,18 @@ class CollectedExperience:
             self.attempts.append(attempt)
 
     def record_tactic(
-        self, state: str, tactics_with_status: list[tuple[str, str]]
+        self, state: str, tactics_with_status: list[tuple[str, str, int]]
     ) -> None:
         """Buffer one node-expansion's worth of tactic attempts as a single
-        ``{state, tactics: [{tactic, status}, ...]}`` entry. Lock-free
-        (``list.append`` is atomic under the GIL)."""
+        ``{state, tactics: [{tactic, status, count}, ...]}`` entry. ``count``
+        is how many times the model sampled this tactic before dedup.
+        Lock-free (``list.append`` is atomic under the GIL)."""
         self.tactics.append(
             {
                 "state": state.replace("\n", "\\n"),
                 "tactics": [
-                    {"tactic": tactic, "status": status}
-                    for tactic, status in tactics_with_status
+                    {"tactic": tactic, "status": status, "count": count}
+                    for tactic, status, count in tactics_with_status
                 ],
             }
         )
