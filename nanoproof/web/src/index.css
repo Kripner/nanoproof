@@ -1091,9 +1091,10 @@ body {
 
 .data-main {
   display: grid;
-  grid-template-rows: 1fr auto 1fr 1fr;
+  grid-template-rows: minmax(0, max-content) auto minmax(0, 1fr) minmax(0, max-content);
   gap: 12px;
   min-height: 0;
+  overflow-y: auto;
 }
 
 .data-section {
