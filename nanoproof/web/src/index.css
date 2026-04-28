@@ -1378,3 +1378,125 @@ body {
   padding: 1px 0;
   border-radius: 2px;
 }
+
+/* Theorems panel */
+.theorems-panel {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: 12px;
+  padding: 12px 24px;
+  min-height: 0;
+}
+
+.theorems-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.theorems-attempts-section {
+  flex: 1;
+  min-height: 0;
+}
+
+.theorems-lookup-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.theorems-lookup-form select,
+.theorems-lookup-form input {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: var(--font-sm);
+}
+
+.theorems-lookup-form input:focus,
+.theorems-lookup-form select:focus {
+  outline: none;
+  border-color: var(--accent-cyan);
+}
+
+.theorems-lookup-form button {
+  background: var(--accent-cyan);
+  color: var(--bg-primary);
+  border: 1px solid var(--accent-cyan);
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: var(--font-sm);
+  font-family: inherit;
+  font-weight: 600;
+}
+
+.theorems-lookup-form button:disabled {
+  background: var(--bg-tertiary);
+  border-color: var(--border);
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+.theorems-main {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  min-height: 0;
+}
+
+.theorems-source-section,
+.theorems-detail-section {
+  min-height: 0;
+}
+
+.theorem-source,
+.theorem-proof,
+.theorem-error {
+  flex: 1;
+  margin: 0;
+  overflow: auto;
+  font-size: var(--font-sm);
+}
+
+.theorem-error {
+  color: var(--accent-red);
+}
+
+.proof-item.active {
+  background: var(--bg-tertiary);
+  border-left: 2px solid var(--accent-cyan);
+  padding-left: 4px;
+}
+
+.outcome-badge {
+  display: inline-block;
+  min-width: 14px;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-weight: 600;
+  text-align: center;
+  font-size: 0.9em;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.outcome-badge.outcome-proven {
+  background: var(--accent-green);
+  color: var(--bg-primary);
+}
+
+.outcome-badge.outcome-unproven {
+  background: var(--accent-yellow);
+  color: var(--bg-primary);
+}
+
+.outcome-badge.outcome-error {
+  background: var(--accent-red);
+  color: var(--bg-primary);
+}

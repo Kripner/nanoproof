@@ -14,12 +14,15 @@ interface TheoremAttempt {
   num_simulations: number;
   num_iterations: number;
   num_transitions: number;
+  proof_size: number | null;
   weight_after: number;
+  proof: string | null;
 }
 
 interface TheoremHistory {
   dataset: string;
   id: string;
+  theorem: string | null;
   history: TheoremAttempt[];
   current_weight: number;
 }
@@ -32,6 +35,7 @@ export function TheoremsPanel() {
   const [history, setHistory] = useState<TheoremHistory | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [selectedAttemptIdx, setSelectedAttemptIdx] = useState<number | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -56,11 +60,13 @@ export function TheoremsPanel() {
   useEffect(() => {
     if (!submittedQuery) {
       setHistory(null);
+      setSelectedAttemptIdx(null);
       return;
     }
     let alive = true;
     setLoading(true);
     setError(null);
+    setSelectedAttemptIdx(null);
     (async () => {
       try {
         const res = await fetch(
@@ -72,12 +78,11 @@ export function TheoremsPanel() {
           setError(`Server returned ${res.status}`);
           return;
         }
-        const data = await res.json();
+        const data: TheoremHistory = await res.json();
         if (!alive) return;
         setHistory(data);
-        if ((data.history || []).length === 0) {
-          setError('No attempts recorded for this theorem yet');
-        }
+        const provenIdx = (data.history || []).findIndex((a) => a.outcome === 'proven');
+        if (provenIdx >= 0) setSelectedAttemptIdx(provenIdx);
       } catch (e) {
         if (alive) {
           setHistory(null);
@@ -107,16 +112,18 @@ export function TheoremsPanel() {
     setSubmittedQuery({ dataset, id });
   };
 
+  const selectedAttempt =
+    selectedAttemptIdx !== null && history ? history.history[selectedAttemptIdx] : null;
+
   return (
-    <div className="data-panel">
-      <div className="data-main" style={{ flex: 1 }}>
+    <div className="theorems-panel">
+      <div className="theorems-sidebar">
         <div className="data-section">
           <div className="data-section-title">Theorem lookup</div>
-          <form onSubmit={onSubmit} style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <form onSubmit={onSubmit} className="theorems-lookup-form">
             <select
               value={dataset}
               onChange={(e) => setDataset(e.target.value)}
-              style={{ minWidth: 160 }}
             >
               {datasets.length === 0 ? (
                 <option value="">(no datasets)</option>
@@ -133,57 +140,133 @@ export function TheoremsPanel() {
               placeholder="theorem id (e.g. lean_workbook_42)"
               value={theoremId}
               onChange={(e) => setTheoremId(e.target.value)}
-              style={{ flex: 1, minWidth: 240 }}
             />
             <button type="submit" disabled={!dataset || !theoremId.trim()}>
-              Show history
+              Look up
             </button>
           </form>
         </div>
 
         {submittedQuery && (
-          <div className="data-section">
+          <div className="data-section theorems-attempts-section">
             <div className="data-section-title">
-              {submittedQuery.dataset}/{submittedQuery.id}
+              <span>Attempts</span>
               {summary && (
                 <span className="data-section-count">
-                  {summary.proven}p / {summary.unproven}u / {summary.errors}e of {summary.total}
+                  {summary.proven}p / {summary.unproven}u / {summary.errors}e
                   {history && (
                     <>
-                      {' · weight '}
-                      {history.current_weight.toExponential(2)}
+                      {' · w '}
+                      {history.current_weight.toExponential(1)}
                     </>
                   )}
                 </span>
               )}
             </div>
             {loading ? (
-              <div className="replay-loading">Loading…</div>
+              <div className="replay-loading">Loading...</div>
             ) : error && (!history || history.history.length === 0) ? (
               <div className="replay-empty">{error}</div>
             ) : history && history.history.length > 0 ? (
               <div className="replay-list">
                 {history.history.map((a, i) => (
-                  <div key={i} className="proof-item">
+                  <div
+                    key={i}
+                    className={`proof-item clickable ${i === selectedAttemptIdx ? 'active' : ''}`}
+                    onClick={() => setSelectedAttemptIdx(i)}
+                  >
                     <span className="proof-name">
-                      <span className={`outcome-badge outcome-${a.outcome}`}>{a.outcome}</span>
+                      <span className={`outcome-badge outcome-${a.outcome}`}>
+                        {a.outcome[0].toUpperCase()}
+                      </span>
                       {' '}step {a.step.toString().padStart(5, '0')}
                     </span>
                     <span className="proof-meta">
-                      {a.num_simulations} sims · {a.num_iterations} iters
-                      {a.outcome === 'proven' && a.num_transitions > 0 && (
-                        <>{' · '}{a.num_transitions} trans</>
+                      {a.num_simulations}s/{a.num_iterations}i
+                      {a.outcome === 'proven' && a.proof_size != null && (
+                        <>{' · '}{a.proof_size}t</>
                       )}
-                      {' · w='}{a.weight_after.toExponential(2)}
-                      {a.error && <>{' · '}{a.error.slice(0, 80)}</>}
                     </span>
                   </div>
                 ))}
               </div>
-            ) : null}
+            ) : (
+              <div className="replay-empty">No attempts recorded yet</div>
+            )}
           </div>
         )}
       </div>
+
+      <div className="theorems-main">
+        {!submittedQuery ? (
+          <div className="data-empty">Pick a dataset and theorem id to inspect.</div>
+        ) : loading ? (
+          <div className="replay-loading">Loading...</div>
+        ) : (
+          <>
+            <div className="data-section theorems-source-section">
+              <div className="data-section-title">
+                <span>{submittedQuery.dataset}/{submittedQuery.id}</span>
+                {history?.theorem && (
+                  <span className="data-section-count">
+                    {history.theorem.split('\n').length} lines
+                  </span>
+                )}
+              </div>
+              {history?.theorem ? (
+                <pre className="modal-code state theorem-source">{history.theorem}</pre>
+              ) : (
+                <div className="replay-empty">
+                  Theorem not found in current matchmaker.
+                </div>
+              )}
+            </div>
+
+            <div className="data-section theorems-detail-section">
+              {selectedAttempt ? (
+                <AttemptDetail attempt={selectedAttempt} />
+              ) : history && history.history.length === 0 ? (
+                <div className="replay-empty">No attempts recorded for this theorem yet.</div>
+              ) : (
+                <div className="replay-empty">Select an attempt on the left.</div>
+              )}
+            </div>
+          </>
+        )}
+      </div>
     </div>
+  );
+}
+
+function AttemptDetail({ attempt }: { attempt: TheoremAttempt }) {
+  return (
+    <>
+      <div className="data-section-title">
+        <span>
+          <span className={`outcome-badge outcome-${attempt.outcome}`}>{attempt.outcome}</span>
+          {' '}step {attempt.step.toString().padStart(5, '0')}
+        </span>
+        <span className="data-section-count">
+          {attempt.num_simulations} sims · {attempt.num_iterations} iters
+          {attempt.outcome === 'proven' && attempt.proof_size != null && (
+            <>{' · '}{attempt.proof_size} tactics</>
+          )}
+          {' · w='}{attempt.weight_after.toExponential(2)}
+        </span>
+      </div>
+      {attempt.outcome === 'proven' && attempt.proof ? (
+        <pre className="modal-code tactic theorem-proof">{attempt.proof}</pre>
+      ) : attempt.outcome === 'proven' ? (
+        <div className="replay-empty">Proof not available (older run without tree data).</div>
+      ) : attempt.error ? (
+        <pre className="modal-code state theorem-error">{attempt.error}</pre>
+      ) : (
+        <div className="replay-empty">
+          {attempt.outcome === 'unproven'
+            ? 'Search exhausted simulation budget without finding a proof.'
+            : 'No proof at this attempt.'}
+        </div>
+      )}
+    </>
   );
 }

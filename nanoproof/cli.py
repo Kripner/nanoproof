@@ -558,6 +558,39 @@ def _tree_depth_and_size(node: dict | None) -> tuple[int, int]:
     return max_child_depth + 1, size
 
 
+def _linearize_serialized_tree(node: dict | None) -> list[str] | None:
+    """Linearize a serialized solved proof tree into tactic strings.
+
+    Mirrors :func:`nanoproof.common.linearize_proof` but operates on the
+    JSON form already on disk so we don't need to rehydrate Node objects
+    just to render a proof in the web UI. ``to_play`` is 1 (OR) / 2 (AND).
+    """
+    if not node or not node.get("is_solved"):
+        return None
+    tactics: list[str] = []
+
+    def dfs(n: dict) -> None:
+        if not n.get("is_solved"):
+            return
+        to_play = n.get("to_play")
+        children = n.get("children") or {}
+        if to_play == 1:  # OR
+            if not children:
+                return  # terminal OR node
+            solved = [(a, c) for a, c in children.items() if c.get("is_solved")]
+            if not solved:
+                return
+            action, child = min(solved, key=lambda kv: len(str(kv[0])))
+            tactics.append(str(action))
+            dfs(child)
+        elif to_play == 2:  # AND
+            for _, child in children.items():
+                dfs(child)
+
+    dfs(node)
+    return tactics
+
+
 _step_stats_cache: dict[str, tuple[float, dict]] = {}
 
 
@@ -1312,12 +1345,16 @@ class WebMonitor:
             Walks every ``step_*/theorems.jsonl`` shard in step order,
             collects matching attempts, and replays them through the same
             :class:`TheoremStats` logic the matchmaker uses so the client can
-            display the running weight after each attempt.
+            display the running weight after each attempt. For each proven
+            attempt, also linearizes the simplified proof tree and renders the
+            full Lean source via :func:`construct_proof_source` so the UI can
+            show the proof directly.
             """
             from nanoproof.experience_collection import (  # local import: keeps cli.py decoupled at import time
                 TheoremStats,
                 list_step_shards,
             )
+            from nanoproof.common import construct_proof_source
 
             output_dir = self.output_dir
             if not output_dir:
@@ -1327,6 +1364,11 @@ class WebMonitor:
             if mm is None:
                 return jsonify({"error": "Matchmaker not ready"}), 503
             config = mm.config
+
+            theorem_source: str | None = None
+            idx = mm._index.get((dataset, theorem_id))
+            if idx is not None:
+                theorem_source = mm.theorems[idx].source
 
             stats = TheoremStats()
             history: list[dict] = []
@@ -1339,7 +1381,15 @@ class WebMonitor:
                         obj = json.loads(line)
                         if obj.get("dataset") != dataset or obj.get("id") != theorem_id:
                             continue
+                        if theorem_source is None:
+                            theorem_source = obj.get("theorem")
                         stats.update(obj["outcome"], obj.get("proof_size"))
+                        proof_source: str | None = None
+                        if obj.get("outcome") == "proven":
+                            tactics = _linearize_serialized_tree(obj.get("simplified_tree"))
+                            src = obj.get("theorem")
+                            if tactics and src and src.strip().endswith("sorry"):
+                                proof_source = construct_proof_source(src, tactics)
                         history.append(
                             {
                                 "step": step,
@@ -1348,15 +1398,16 @@ class WebMonitor:
                                 "num_simulations": obj.get("num_simulations", 0),
                                 "num_iterations": obj.get("num_iterations", 0),
                                 "num_transitions": len(obj.get("transitions", [])),
+                                "proof_size": obj.get("proof_size"),
                                 "weight_after": stats.weight(config),
-                                "full_tree": obj.get("full_tree"),
-                                "simplified_tree": obj.get("simplified_tree"),
+                                "proof": proof_source,
                             }
                         )
             return jsonify(
                 {
                     "dataset": dataset,
                     "id": theorem_id,
+                    "theorem": theorem_source,
                     "history": history,
                     "current_weight": stats.weight(config),
                 }
