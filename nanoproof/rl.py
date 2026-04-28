@@ -120,11 +120,10 @@ parser.add_argument(
 )
 
 # Search / collection
-ALL_DATASETS = ["numinamath"]
 parser.add_argument(
     "--datasets",
     nargs="+",
-    default=ALL_DATASETS,
+    default=["numinamath"],
     choices=list_available_datasets(),
     help="which theorem datasets to sample from",
 )
@@ -132,7 +131,7 @@ parser.add_argument("--num-sampled-tactics", type=int, default=6)
 parser.add_argument(
     "--first-token-occurrences-cap",
     type=int,
-    default=None,
+    default=2,
     help="cap on how many sampled tactics may share the same first token "
     "(per state). None disables the cap.",
 )
@@ -527,7 +526,11 @@ atexit.register(cleanup)
 while True:
     timer = SimpleTimer()
 
-    do_eval = master_process and step >= args.eval_start and eval_trigger.fire(step)
+    # Always eval at step 0; time-based triggers don't fire on the first call
+    # since no time has elapsed since construction.
+    do_eval = master_process and step >= args.eval_start and (
+        step == 0 or eval_trigger.fire(step)
+    )
     if ddp:
         do_eval = broadcast_value(do_eval)
     if do_eval:
