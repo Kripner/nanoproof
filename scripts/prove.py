@@ -112,6 +112,10 @@ def prove_one(
         print(game.root.pp_tree())
     else:
         print(f"UNPROVEN (iters={iters})")
+        if game and game.root:
+            print()
+            print("=== Proof tree ===")
+            print(game.root.pp_tree())
     return is_solved
 
 
