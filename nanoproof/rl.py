@@ -682,9 +682,11 @@ while True:
         rl_monitor.record_phase_event("collect", "start")
         experience = CollectedExperience()
         model.eval()
+        rl_monitor.set_phase("collecting")
         rl_monitor.set_step(step)
 
         if master_process:
+            rl_monitor.start_collection(args.collect_transitions, prover.num_actors)
             prover.collect(
                 matchmaker,
                 args.collect_transitions,
