@@ -32,7 +32,8 @@ from nanoproof.common import (
     GLOBAL_CONFIG,
     get_lr_multiplier,
 )
-from nanoproof.tokenizer import get_token_bytes
+from nanoproof.model import Transformer, NetworkConfig
+from nanoproof.tokenizer import get_token_bytes, get_tokenizer
 from nanoproof.checkpoints import save_checkpoint
 from nanoproof.cli import configure_logging, set_ddp_info
 from nanoproof.loss_eval import evaluate_bpb
@@ -52,8 +53,24 @@ parser.add_argument(
 parser.add_argument(
     "--model-path",
     type=str,
-    required=True,
-    help="path to model_NNNNNN.pt to load from (relative to models/ or absolute)",
+    default=None,
+    help="path to model_NNNNNN.pt to load from (relative to models/ or absolute); if omitted, the model is initialized from scratch",
+)
+# Model architecture (only used when --model-path is not provided)
+parser.add_argument(
+    "--depth", type=int, default=26, help="depth of the Transformer model"
+)
+parser.add_argument(
+    "--aspect-ratio", type=int, default=64, help="model_dim = depth * aspect_ratio"
+)
+parser.add_argument(
+    "--head-dim", type=int, default=128, help="target head dimension for attention"
+)
+parser.add_argument(
+    "--window-pattern",
+    type=str,
+    default="SSSL",
+    help="sliding window pattern: L=full, S=short context",
 )
 # Training
 parser.add_argument(
@@ -166,7 +183,29 @@ run_log = create_metrics_logger(
 )
 
 # Load the model and tokenizer
-model, tokenizer, meta = load_model(args.model_path, device, phase="train")
+if args.model_path is not None:
+    model, tokenizer, meta = load_model(args.model_path, device, phase="train")
+else:
+    print0("WARNING: --model-path not provided, initializing model from scratch")
+    tokenizer = get_tokenizer()
+    vocab_size = tokenizer.get_vocab_size()
+    base_dim = args.depth * args.aspect_ratio
+    model_dim = ((base_dim + args.head_dim - 1) // args.head_dim) * args.head_dim
+    num_heads = model_dim // args.head_dim
+    config = NetworkConfig(
+        sequence_len=args.max_seq_len,
+        vocab_size=vocab_size,
+        n_layer=args.depth,
+        n_head=num_heads,
+        n_kv_head=num_heads,
+        n_embd=model_dim,
+        window_pattern=args.window_pattern,
+    )
+    with torch.device("meta"):
+        model = Transformer(config)
+    model.to_empty(device=device)
+    model.init_weights()
+    meta = {}
 pretrain_batch_size = meta.get("device_batch_size", None)
 if pretrain_batch_size is not None and args.device_batch_size > pretrain_batch_size:
     print0(

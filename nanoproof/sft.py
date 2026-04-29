@@ -30,7 +30,10 @@ from nanoproof.common import (
     autodetect_device_type,
     create_run_dirs,
     get_lr_multiplier,
+    GLOBAL_CONFIG,
 )
+from nanoproof.model import Transformer, NetworkConfig
+from nanoproof.tokenizer import get_tokenizer
 from nanoproof.checkpoints import load_model, save_checkpoint
 from nanoproof.cli import configure_logging, set_ddp_info
 from nanoproof.engine import Engine
@@ -51,14 +54,24 @@ parser.add_argument("--seed", type=int, default=0, help="random seed")
 parser.add_argument(
     "--model-path",
     type=str,
-    required=True,
-    help="path to model_NNNNNN.pt to load from (relative to models/ or absolute)",
+    default=None,
+    help="path to model_NNNNNN.pt to load from (relative to models/ or absolute); if omitted, the model is initialized from scratch",
+)
+# Model architecture (only used when --model-path is not provided)
+parser.add_argument(
+    "--depth", type=int, default=26, help="depth of the Transformer model"
 )
 parser.add_argument(
-    "--resume-from",
+    "--aspect-ratio", type=int, default=64, help="model_dim = depth * aspect_ratio"
+)
+parser.add_argument(
+    "--head-dim", type=int, default=128, help="target head dimension for attention"
+)
+parser.add_argument(
+    "--window-pattern",
     type=str,
-    default=None,
-    help="path to model_NNNNNN.pt to resume SFT from (overrides --model-path)",
+    default="SSSL",
+    help="sliding window pattern: L=full, S=short context",
 )
 # Runtime
 parser.add_argument(
@@ -72,7 +85,7 @@ parser.add_argument(
 )
 # Optimization
 parser.add_argument(
-    "--num-epochs", type=int, default=5, help="number of training epochs"
+    "--num-epochs", type=int, default=1, help="number of training epochs"
 )
 parser.add_argument(
     "--num-iterations",
@@ -182,15 +195,29 @@ run_log = create_metrics_logger(
 )
 
 # Load the model and tokenizer
-if args.resume_from is not None:
-    # Resume from an SFT checkpoint
-    model, tokenizer, meta = load_model(args.resume_from, device, phase="train")
-    start_step = meta.get("step", 0)
-    print0(f"Resuming from SFT checkpoint at step {start_step}")
-else:
-    # Start fresh from base/mid checkpoint
+if args.model_path is not None:
     model, tokenizer, meta = load_model(args.model_path, device, phase="train")
-    start_step = 0
+else:
+    print0("WARNING: --model-path not provided, initializing model from scratch")
+    tokenizer = get_tokenizer()
+    vocab_size = tokenizer.get_vocab_size()
+    base_dim = args.depth * args.aspect_ratio
+    model_dim = ((base_dim + args.head_dim - 1) // args.head_dim) * args.head_dim
+    num_heads = model_dim // args.head_dim
+    config = NetworkConfig(
+        sequence_len=GLOBAL_CONFIG.max_seq_len,
+        vocab_size=vocab_size,
+        n_layer=args.depth,
+        n_head=num_heads,
+        n_kv_head=num_heads,
+        n_embd=model_dim,
+        window_pattern=args.window_pattern,
+    )
+    with torch.device("meta"):
+        model = Transformer(config)
+    model.to_empty(device=device)
+    model.init_weights()
+    meta = {}
 orig_model = model  # original, uncompiled model
 # model = torch.compile(model, dynamic=True) # doesn't work super well because of variable lengths of inputs
 engine = Engine(model, tokenizer)  # will be used for inline model evaluation only
@@ -249,7 +276,7 @@ for group in optimizer.param_groups:
 
 # Go!
 progress = 0  # will go from 0 to 1 over the course of the epoch
-step = start_step
+step = 0
 epoch = 0
 x, y, approx_progress, last_step = next(
     train_loader
