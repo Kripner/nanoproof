@@ -155,9 +155,9 @@ def main():
         "--output-suffix",
         type=str,
         default="",
-        help="extra suffix appended to the eval output filename, e.g. '_cap2' "
-        "produces eval_<step>_<dataset>_cap2.jsonl. Useful to keep variant "
-        "runs from colliding with the baseline file.",
+        help="extra suffix appended to the eval output directory name, e.g. "
+        "'_cap2' produces eval_<step>_<dataset>_cap2/. Useful to keep variant "
+        "runs from colliding with the baseline directory.",
     )
     parser.add_argument(
         "--force", action="store_true", help="overwrite existing results"
