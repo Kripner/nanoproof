@@ -118,7 +118,7 @@ def main():
     parser.add_argument(
         "--first-token-occurrences-cap",
         type=int,
-        default=None,
+        default=2,
         help="cap on how many sampled tactics may share the same first token "
         "(per state). None disables the cap.",
     )
