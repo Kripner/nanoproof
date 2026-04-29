@@ -273,6 +273,17 @@ class Matchmaker:
             idx = self._index[(theorem.dataset, theorem.id)]
             return self._stats[idx].weight(self.config)
 
+    def proven_counts_by_dataset(self) -> dict[str, int]:
+        """Per-dataset count of theorems with at least one ``proven`` outcome
+        in their history. Datasets with zero proven theorems still appear
+        (mapped to 0) so downstream metric series stay stable."""
+        counts: dict[str, int] = {name: 0 for name in self.datasets}
+        with self._lock:
+            for theorem, stats in zip(self.theorems, self._stats):
+                if any(o == "proven" for o, _ in stats.history):
+                    counts[theorem.dataset] += 1
+        return counts
+
     def reconstruct_from_run_dir(self, run_dir: str) -> int:
         """Replay every saved attempt under ``run_dir/step_*/theorems.jsonl``
         through :meth:`send_result`. Returns the number of attempts replayed.

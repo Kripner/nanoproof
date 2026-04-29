@@ -775,6 +775,10 @@ while True:
             "replay_buffer_size": len(replay_buffer.buffer),
             **{f"time/{k}": v for k, v in timer.get_times().items()},
             **rl_monitor.lean_server_metrics(),
+            **{
+                f"proven_at_least_once/{ds}": cnt
+                for ds, cnt in matchmaker.proven_counts_by_dataset().items()
+            },
         }
     )
 
