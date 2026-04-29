@@ -45,8 +45,8 @@ class SearchConfig:
             "pb_c_init": 0.001,
             "value_discount": 0.99,
             "prior_temperature": 200.0,
-            "no_legal_actions_value": -40.0,
-            "ps_c": 0.01,
+            "no_legal_actions_value": -5.0,
+            "ps_c": 0.1,
             "ps_alpha": 0.6,
             "verify_timeout": 5000,
         }
@@ -73,7 +73,7 @@ class Node:
     is_solved: bool = False
 
     visit_count: int = 0
-    evaluations: int = 0
+    evaluations: int = 0  # number of times this node was expanded
     value_sum: float = 0
     children: dict[Action, Self] | None = None
 
@@ -529,9 +529,9 @@ def run_mcts(
             solved_note = " SOLVED" if root.is_solved else ""
             logger.log(
                 TRACE,
-                f"d={len(search_path) - 1} "
+                f"i={i} d={len(search_path)} "
                 f"{_trace_format_path(search_path, pre_bp_path, diffs)} -> "
-                f"gen {n_success}/{n_unique}({n_error}err,{n_cycle}cyc)"
+                f"gen={n_success}/{n_unique}({n_error}err,{n_cycle}cyc) val={value}"
                 f"{no_legal_note}{solved_note}"
             )
 
@@ -730,7 +730,7 @@ def backpropagate(
     """Propagate the evaluation up the tree. Returns the per-node value
     diff (post.value() - pre.value()) for each node in *search_path*."""
     pre_values = [n.value() for n in search_path]
-    
+
     if len(search_path[-1].children) == 0:
         value = config.no_legal_actions_value
     is_solved = False
