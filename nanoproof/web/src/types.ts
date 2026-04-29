@@ -79,7 +79,7 @@ export interface TacticEntry {
 
 export interface LocalActor {
   id: number;
-  state: 'idle' | 'running' | 'blocked' | 'error';
+  state: 'idle' | 'running' | 'blocked' | 'retry' | 'error';
   games_played: number;
   games_solved: number;
   current_theorem: string;

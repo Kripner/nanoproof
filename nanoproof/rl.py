@@ -525,6 +525,8 @@ atexit.register(cleanup)
 
 while True:
     timer = SimpleTimer()
+    rl_monitor.set_step(step)
+    rl_monitor.set_phase("idle")
 
     # Always eval at step 0; time-based triggers don't fire on the first call
     # since no time has elapsed since construction.
@@ -683,7 +685,6 @@ while True:
         experience = CollectedExperience()
         model.eval()
         rl_monitor.set_phase("collecting")
-        rl_monitor.set_step(step)
 
         if master_process:
             rl_monitor.start_collection(args.collect_transitions, prover.num_actors)

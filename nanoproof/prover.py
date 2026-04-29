@@ -375,9 +375,10 @@ class ProverWorker:
                 theorem, outcome, num_simulations, game, error, proof_size
             )
             matchmaker.send_result(theorem, outcome, proof_size)
-            if outcome == "proven" and monitor is not None:
-                monitor.add_collected_samples(
-                    experience.num_transitions() - transitions_before
+            if monitor is not None and outcome != "error":
+                monitor.record_proof_attempt(
+                    successful=outcome == "proven",
+                    transitions=experience.num_transitions() - transitions_before,
                 )
 
         def done_check():

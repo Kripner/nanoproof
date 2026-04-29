@@ -189,7 +189,7 @@ class LocalActorStatus:
     """Status of a local actor thread."""
 
     id: int
-    state: Literal["idle", "running", "error"] = "idle"
+    state: Literal["idle", "running", "blocked", "retry", "error"] = "idle"
     games_played: int = 0
     games_solved: int = 0
     current_theorem: str = ""
@@ -537,8 +537,12 @@ def _serve_jsonl_slice(path: str | None, args, key: str) -> Response:
             line = line.strip()
             if not line:
                 continue
+            try:
+                obj = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
             if offset <= total and (limit == 0 or len(items) < limit):
-                items.append(json.loads(line))
+                items.append(obj)
             total += 1
     return jsonify({key: items, "total": total})
 
@@ -667,7 +671,10 @@ def _serve_attempts_summary(path: str | None) -> Response:
             line = line.strip()
             if not line:
                 continue
-            obj = json.loads(line)
+            try:
+                obj = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
             row = _attempt_summary_row(obj)
             total_transitions += row["num_transitions"]
             attempts.append(row)
@@ -699,7 +706,10 @@ def _serve_attempt_entry(path: str | None, index: int) -> Response:
             if not line:
                 continue
             if i == index:
-                obj = json.loads(line)
+                try:
+                    obj = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    return jsonify({"error": "Index out of range"}), 404
                 if obj.get("outcome") == "proven":
                     tactics = _linearize_serialized_tree(obj.get("simplified_tree"))
                     src = obj.get("theorem")
@@ -732,7 +742,10 @@ def _serve_step_transitions(path: str | None, args) -> Response:
             line = line.strip()
             if not line:
                 continue
-            obj = json.loads(line)
+            try:
+                obj = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
             theorem_id = obj.get("id")
             for t in obj.get("transitions", []):
                 if offset <= total and (limit == 0 or len(items) < limit):
@@ -811,7 +824,7 @@ class WebMonitor:
         # Timeline instrumentation
         self.actor_timelines: dict[int, deque] = {}  # actor_id -> deque of event dicts
         self.actor_outcomes: dict[int, deque] = {}  # actor_id -> deque of outcome dicts
-        self.phase_events: list[dict] = []  # global phase start/end markers
+        self.phase_events: deque[dict] = deque(maxlen=10000)  # global phase start/end markers
 
         # LLM profiler instrumentation (per GPU rank). Populated by a
         # background thread that polls each rank's Flask inference server's
@@ -1392,7 +1405,10 @@ class WebMonitor:
                         line = line.strip()
                         if not line:
                             continue
-                        obj = json.loads(line)
+                        try:
+                            obj = json.loads(line)
+                        except (json.JSONDecodeError, ValueError):
+                            continue
                         if obj.get("dataset") != dataset or obj.get("id") != theorem_id:
                             continue
                         if theorem_source is None:
@@ -2066,8 +2082,6 @@ class WebMonitor:
                     errors=errors,
                 )
             )
-            # Clear eval progress when recording final result
-            self.eval_progress = EvalProgress()
 
     def start_eval(self, dataset: str, total: int):
         """Start tracking evaluation progress."""

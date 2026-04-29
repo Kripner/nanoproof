@@ -248,6 +248,7 @@ body {
 .thread-running { background: var(--accent-green); }
 .thread-idle { background: var(--text-muted); }
 .thread-blocked { background: var(--accent-orange); }
+.thread-retry { background: var(--accent-orange); }
 .thread-error { background: var(--accent-red); }
 
 .thread.clickable {
