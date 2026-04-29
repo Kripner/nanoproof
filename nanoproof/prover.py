@@ -59,6 +59,15 @@ class LeanPoolTimeoutError(Exception):
     """
 
 
+class ProofInitError(Exception):
+    """Raised when ``proof_from_sorry`` cannot initialize a proof.
+
+    The Lean process rejected the theorem before any search ran, so the
+    attempt should be recorded as an error rather than a silent
+    "unsolved".
+    """
+
+
 def _flush_timeline(
     actor_id: int,
     timeline: TimelineRecorder,
@@ -140,10 +149,9 @@ class Prover:
                     if hasattr(init_branch, "error")
                     else "unknown error"
                 )
-                logger.warning(
-                    f"FAILED: Could not initialize proof - {err}\nLean code:\n{example}"
+                raise ProofInitError(
+                    f"Could not initialize proof - {err}\nLean code:\n{example}"
                 )
-                return None
             init_branch = init_branch.value
 
             game = Game(theorem.source, num_simulations)
@@ -656,6 +664,23 @@ class ProverWorker:
                         log_actionable_error(
                             "Prover",
                             str(e),
+                            actor=actor_id,
+                            lean=f"{lean_address}:{lean_port}",
+                        )
+                        break
+                    except ProofInitError as e:
+                        # proof_from_sorry rejected the theorem before
+                        # search ran. Record as an error (not silent
+                        # "unsolved") so --continue can retry it.
+                        error = str(e)
+                        consecutive_errors += 1
+                        short_err = str(e).split("\n", 1)[0]
+                        logger.warning(
+                            f"[Actor {actor_id}] {short_err} (lean={lean_address}:{lean_port})"
+                        )
+                        log_actionable_error(
+                            "Prover",
+                            short_err,
                             actor=actor_id,
                             lean=f"{lean_address}:{lean_port}",
                         )
