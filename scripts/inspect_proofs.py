@@ -221,6 +221,33 @@ def cmd_stats(args):
     print(f"Proven: {len(proven):,} ({100 * len(proven) / len(proofs):.1f}%)")
     print(f"Errors: {len(errors):,}")
 
+    # Success rate by simulation budget (mirrors prover_eval.print_results).
+    # Use the max num_iterations seen as the implicit cap, since unproven runs
+    # typically exhaust the simulation budget.
+    iterations_seen = [
+        p["num_iterations"] for p in proofs if p.get("num_iterations") is not None
+    ]
+    if iterations_seen:
+        max_iters = max(iterations_seen)
+        thresholds = [
+            t for t in [8, 16, 32, 64, 128, 256, 512, 1024, 2048] if t <= max_iters
+        ]
+        if thresholds:
+            total = len(proofs)
+            rates = []
+            for t in thresholds:
+                solved_at_t = sum(
+                    1
+                    for p in proofs
+                    if p.get("proof") is not None
+                    and p.get("num_iterations", 0) <= t
+                )
+                rate = solved_at_t / total if total > 0 else 0.0
+                rates.append(f"{t:>4}: {rate:.2%}")
+            print()
+            print("Success rate by simulation budget:")
+            print("  " + "  |  ".join(rates))
+
     if not proven:
         return
 
