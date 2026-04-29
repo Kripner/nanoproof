@@ -120,8 +120,7 @@ class ColoredFormatter(logging.Formatter):
             )
         # Display the leaf logger name (e.g., "prover" instead of "nanoproof.prover").
         # Internal name is unchanged so logging.getLogger("nanoproof").setLevel(...) still works.
-        if record.name.startswith("nanoproof."):
-            record.name = record.name[len("nanoproof.") :]
+        record.name = record.name.rsplit(".", 1)[-1]
         # Format the message
         message = super().format(record)
         # Add color to specific parts of the message
@@ -147,7 +146,10 @@ logging.addLevelName(TRACE, "TRACE")
 def setup_default_logging():
     handler = logging.StreamHandler()
     handler.setFormatter(
-        ColoredFormatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        ColoredFormatter(
+            "%(asctime)s.%(msecs)03d - %(name)s - %(levelname)s - %(message)s",
+            datefmt="%H:%M:%S",
+        )
     )
     logging.basicConfig(level=logging.INFO, handlers=[handler])
 
