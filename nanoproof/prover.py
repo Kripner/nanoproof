@@ -51,6 +51,14 @@ from nanoproof.inference import InferenceBalancer
 logger = logging.getLogger(__name__)
 
 
+class LeanPoolTimeoutError(Exception):
+    """Raised when waiting on the Lean process pool exceeds the deadline.
+
+    Surfaced as an attempt-level error (not "unsolved") so eval results
+    distinguish "we tried and failed" from "we never got to try".
+    """
+
+
 def _flush_timeline(
     actor_id: int,
     timeline: TimelineRecorder,
@@ -114,11 +122,12 @@ class Prover:
         process, reason = self._get_process_interruptible(client, abort_check)
         if process is None:
             # "aborted" is the eval-release path (ProverWorker sets the
-            # release event so mid-proof actors drop their Lean leases);
-            # only surface true pool-saturation timeouts.
+            # release event so mid-proof actors drop their Lean leases).
+            # Pool-saturation timeouts are real failures: raise so the
+            # actor records them as errors instead of silent "unsolved".
             if reason == "timeout":
-                logger.warning(
-                    "FAILED: Could not get Lean process for theorem (300s pool timeout)"
+                raise LeanPoolTimeoutError(
+                    "Could not get Lean process for theorem (300s pool timeout)"
                 )
             return None
 
@@ -634,6 +643,22 @@ class ProverWorker:
                             tactic_sink=job.tactic_sink,
                         )
                         consecutive_errors = 0
+                        break
+                    except LeanPoolTimeoutError as e:
+                        # Pool saturation: don't retry (each attempt would
+                        # block another 300s). Record as an error so the
+                        # theorem can be retried later via --continue.
+                        error = str(e)
+                        consecutive_errors += 1
+                        logger.warning(
+                            f"[Actor {actor_id}] {e} (lean={lean_address}:{lean_port})"
+                        )
+                        log_actionable_error(
+                            "Prover",
+                            str(e),
+                            actor=actor_id,
+                            lean=f"{lean_address}:{lean_port}",
+                        )
                         break
                     except (
                         ConnectionError,
