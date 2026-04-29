@@ -54,31 +54,40 @@ from nanoproof.inference import setup_distributed_inference
 # TODO: during verification, maybe set 'set_option maxHeartbeats 0\nset_option maxRecDepth 100000'
 
 
-def print_results(results, name, num_simulations):
+def compute_success_rate_by_simulations(results, num_simulations):
+    """Return ``{threshold: success_rate}`` for thresholds <= num_simulations.
+
+    A theorem counts as solved at threshold ``t`` iff it has a proof tree and
+    was solved within ``t`` iterations.
+    """
+    detailed = results.get("detailed_results", [])
+    if not detailed:
+        return {}
+    total = len(detailed)
+    thresholds = [
+        t for t in [8, 16, 32, 64, 128, 256, 512, 1024, 2048] if t <= num_simulations
+    ]
+    breakdown = {}
+    for t in thresholds:
+        solved_at_t = sum(
+            1
+            for item in detailed
+            if item.get("proof_tree") is not None
+            and item.get("num_iterations", 0) <= t
+        )
+        breakdown[t] = solved_at_t / total if total > 0 else 0.0
+    return breakdown
+
+
+def print_results(results, name, breakdown):
     print0("-" * 80)
     print0(f"Evaluation results for {name}")
     print0(f"Success rate: {results['success_rate']:.4%}")
     print0(f"Solved: {results['solved']}/{results['total']}")
     print0(f"Errors: {results['errors']}/{results['total']}")
 
-    detailed = results.get("detailed_results", [])
-    if detailed:
-        total = len(detailed)
-        thresholds = [
-            t
-            for t in [8, 16, 32, 64, 128, 256, 512, 1024, 2048]
-            if t <= num_simulations
-        ]
-        rates = []
-        for t in thresholds:
-            solved_at_t = sum(
-                1
-                for item in detailed
-                if item.get("proof_tree") is not None
-                and item.get("num_iterations", 0) <= t
-            )
-            rate = solved_at_t / total if total > 0 else 0.0
-            rates.append(f"{t:>3}: {rate:.2%}")
+    if breakdown:
+        rates = [f"{t:>3}: {rate:.2%}" for t, rate in breakdown.items()]
         print0("Success rate by simulation budget:")
         print0("  " + "  |  ".join(rates))
 
@@ -166,6 +175,7 @@ def main():
         help="enable debug logging for inference and proving",
     )
     args = parser.parse_args()
+    args_dict = vars(args).copy()
 
     if args.verbose:
         logging.getLogger("nanoproof").setLevel(logging.DEBUG)
@@ -201,22 +211,23 @@ def main():
     if master_process:
         existing_results = []
         for dataset_name in datasets:
-            eval_path = checkpoint_info.get_eval_path(
+            eval_dir = checkpoint_info.get_eval_dir(
                 dataset_name + split_suffix + output_suffix
             )
-            if os.path.exists(eval_path):
-                if os.path.getsize(eval_path) == 0:
-                    os.remove(eval_path)
+            theorems_path = os.path.join(eval_dir, "theorems.jsonl")
+            if os.path.exists(theorems_path):
+                if os.path.getsize(theorems_path) == 0:
+                    os.remove(theorems_path)
                 else:
-                    existing_results.append((dataset_name, eval_path))
+                    existing_results.append((dataset_name, eval_dir, theorems_path))
 
         if args.continue_eval:
             if not existing_results:
                 print0("Error: --continue requires existing results")
                 should_exit = True
             else:
-                for dataset_name, eval_path in existing_results:
-                    successful, errors = load_existing_eval_results(eval_path)
+                for dataset_name, _, theorems_path in existing_results:
+                    successful, errors = load_existing_eval_results(theorems_path)
                     error_theorems = [
                         BenchTheorem(
                             source=e["theorem"],
@@ -232,8 +243,8 @@ def main():
                         )
         elif existing_results and not args.force:
             print0("Evaluation results already exist:")
-            for _, path in existing_results:
-                print0(f"  {path}")
+            for _, eval_dir, _ in existing_results:
+                print0(f"  {eval_dir}")
             print0("\nUse --force to overwrite, or --continue to retry errors.")
             should_exit = True
 
@@ -380,7 +391,10 @@ def main():
             done.set()
             printer.join()
             all_results[dataset_name] = results
-            print_results(results, dataset_name, args.num_simulations)
+            breakdown = compute_success_rate_by_simulations(
+                results, args.num_simulations
+            )
+            print_results(results, dataset_name, breakdown)
             print0(f"Time for {dataset_name}: {dataset_elapsed:.1f}s")
 
             prepend = (
@@ -388,10 +402,23 @@ def main():
                 if args.continue_eval
                 else None
             )
+            summary = {
+                "dataset": dataset_name,
+                "split": args.split,
+                "num_simulations": args.num_simulations,
+                "total": results["total"],
+                "solved": results["solved"],
+                "errors": results["errors"],
+                "success_rate": results["success_rate"],
+                "elapsed_seconds": dataset_elapsed,
+                "success_rate_by_simulations": breakdown,
+            }
             save_eval_results(
                 checkpoint_info,
                 dataset_name + split_suffix + output_suffix,
                 results,
+                summary,
+                args_dict,
                 prepend_entries=prepend,
             )
 

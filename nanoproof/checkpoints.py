@@ -159,11 +159,11 @@ class CheckpointInfo:
     step: int
     seed: int = 0
 
-    def get_eval_path(self, dataset_name: str) -> str:
+    def get_eval_dir(self, dataset_name: str) -> str:
         seed_suffix = f"-{self.seed}" if self.seed != 0 else ""
         return os.path.join(
             self.checkpoint_dir,
-            f"eval_{self.step:06d}_{dataset_name}{seed_suffix}.jsonl",
+            f"eval_{self.step:06d}_{dataset_name}{seed_suffix}",
         )
 
 
@@ -206,11 +206,24 @@ def save_eval_results(
     checkpoint_info: CheckpointInfo,
     dataset_name: str,
     results: dict,
+    summary: dict,
+    args_dict: dict,
     prepend_entries: list[dict] = None,
 ):
-    """Save evaluation results alongside the checkpoint."""
-    jsonl_path = checkpoint_info.get_eval_path(dataset_name)
-    write_eval_results_jsonl(jsonl_path, results, prepend_entries=prepend_entries)
+    """Save evaluation results alongside the checkpoint.
+
+    Writes a directory containing theorems.jsonl, summary.toml, and args.json.
+    """
+    eval_dir = checkpoint_info.get_eval_dir(dataset_name)
+    os.makedirs(eval_dir, exist_ok=True)
+    write_eval_results_jsonl(
+        os.path.join(eval_dir, "theorems.jsonl"),
+        results,
+        prepend_entries=prepend_entries,
+    )
+    write_summary_toml(os.path.join(eval_dir, "summary.toml"), summary)
+    with open(os.path.join(eval_dir, "args.json"), "w") as f:
+        json.dump(args_dict, f, indent=2)
 
 
 def save_eval_results_to_run_dir(
@@ -238,15 +251,12 @@ def _format_toml_value(v) -> str:
     raise TypeError(f"Unsupported TOML value type: {type(v).__name__}")
 
 
-def save_eval_summary_to_run_dir(output_dir: str, step: int, summary: dict):
-    """Write summary.toml in the RL run's eval directory.
+def write_summary_toml(toml_path: str, summary: dict):
+    """Write a summary dict as TOML.
 
-    ``summary`` is a dict whose top-level scalar entries become bare keys and
-    whose nested dicts become TOML tables (one level deep).
+    Top-level scalar entries become bare keys; nested dicts become TOML
+    tables (one level deep).
     """
-    eval_dir = os.path.join(output_dir, "evals", f"{step:05d}")
-    os.makedirs(eval_dir, exist_ok=True)
-    toml_path = os.path.join(eval_dir, "summary.toml")
     scalars = {k: v for k, v in summary.items() if not isinstance(v, dict)}
     tables = {k: v for k, v in summary.items() if isinstance(v, dict)}
     with open(toml_path, "w") as f:
@@ -257,6 +267,13 @@ def save_eval_summary_to_run_dir(output_dir: str, step: int, summary: dict):
             for k, v in table.items():
                 f.write(f"{k} = {_format_toml_value(v)}\n")
     logger.info(f"Saved eval summary to {toml_path}")
+
+
+def save_eval_summary_to_run_dir(output_dir: str, step: int, summary: dict):
+    """Write summary.toml in the RL run's eval directory."""
+    eval_dir = os.path.join(output_dir, "evals", f"{step:05d}")
+    os.makedirs(eval_dir, exist_ok=True)
+    write_summary_toml(os.path.join(eval_dir, "summary.toml"), summary)
 
 
 def load_existing_eval_results(jsonl_path: str) -> tuple[list[dict], list[dict]]:
