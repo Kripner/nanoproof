@@ -48,6 +48,7 @@ from nanoproof.experience_collection import (
     Matchmaker,
     MatchmakerConfig,
     CollectedExperience,
+    CollectExperienceHolder,
     step_dir,
     eval_dir,
     list_available_datasets,
@@ -303,6 +304,8 @@ if args.load_buffer:
 balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
 if balancer:
     prover = ProverWorker(balancer, args.lean_servers)
+    collect_holder = CollectExperienceHolder()
+    prover.install_collect(matchmaker, collect_holder, search_config)
     # With the busy-aware balancer, actors concentrate on one GPU at a time;
     # that GPU flips busy once its queue hits max_gen_samples, then the
     # pointer moves on. To actually spread load across GPUs we size this
@@ -317,6 +320,7 @@ if balancer:
     )
 else:
     prover = None
+    collect_holder = None
 
 # Broadcast max_gen_samples from master to worker ranks (workers don't have
 # a ProverWorker to compute it from).
@@ -630,24 +634,17 @@ while True:
         rl_monitor.record_phase_event("eval", "end")
         flush()
 
-    experience: CollectedExperience | None = None
-    if step % args.collect_every == 0:
+    is_collect_step = step % args.collect_every == 0
+    if is_collect_step:
         # Collect proofs (rank 0 only, worker ranks serve inference)
         timer.start("collect")
         rl_monitor.record_phase_event("collect", "start")
-        experience = CollectedExperience()
         model.eval()
         rl_monitor.set_phase("collecting")
 
         if master_process:
             rl_monitor.start_collection(args.collect_transitions, prover.num_actors)
-            prover.collect(
-                matchmaker,
-                args.collect_transitions,
-                experience,
-                search_config=search_config,
-                tactic_sink=experience.record_tactic,
-            )
+            prover.collect(args.collect_transitions)
 
         model.train()
         timer.end("collect")
@@ -660,14 +657,14 @@ while True:
         # and trip the 10-min watchdog if collect ever takes longer.
         active_barrier(f"collect_{step}", timeout=None)
 
-        # Rank 0 contributes its experience's transitions; workers pass [].
+        # Rank 0 contributes its holder's transitions; workers pass [].
         replay_buffer.extend_and_sync(
-            experience.transitions() if master_process else []
+            collect_holder.transitions() if master_process else []
         )
 
         if master_process:
             rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
-        # experience.save() is deferred until after the train phase so
+        # holder.rotate().save() is deferred until after the train phase so
         # train_subsample.jsonl lands in the same step_<step>/ dir.
 
     if master_process and step > 0 and save_trigger.fire(step):
@@ -716,8 +713,8 @@ while True:
             )  # (B*T,)
             per_token_loss = per_token_loss.view(train_inputs.shape)  # (B, T)
 
-            if master_process and experience is not None:
-                experience.record_train_samples(
+            if master_process and is_collect_step:
+                collect_holder.record_train_samples(
                     train_inputs, train_targets, per_token_loss, batch_sources
                 )
 
@@ -782,7 +779,7 @@ while True:
         }
     )
 
-    if master_process and experience is not None:
-        experience.save(step_dir(output_dir, step))
+    if master_process and is_collect_step:
+        collect_holder.rotate().save(step_dir(output_dir, step))
 
     step += 1

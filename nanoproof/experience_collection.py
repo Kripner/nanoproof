@@ -586,6 +586,54 @@ class CollectedExperience:
                 f.write(json.dumps(s) + "\n")
 
 
+class CollectExperienceHolder:
+    """Persistent, swappable wrapper around a :class:`CollectedExperience`.
+
+    Collect actors record into the *current* inner experience. The master
+    rotates the inner at step-save time: :meth:`rotate` atomically swaps in a
+    fresh ``CollectedExperience`` and returns the old one for serialization.
+
+    Without this indirection, an actor whose proof crosses a step boundary
+    appends to a ``CollectedExperience`` whose ``save()`` already ran, so the
+    record is silently lost (while the paired ``Matchmaker.send_result``
+    persists, leaving the matchmaker ahead of disk). The holder lock
+    serializes record/rotate so a record can never land in an instance that
+    has already been returned for save.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._inner = CollectedExperience()
+
+    def record_attempt(self, *args, **kwargs) -> None:
+        with self._lock:
+            self._inner.record_attempt(*args, **kwargs)
+
+    def record_tactic(self, *args, **kwargs) -> None:
+        with self._lock:
+            self._inner.record_tactic(*args, **kwargs)
+
+    def record_train_samples(self, *args, **kwargs) -> None:
+        with self._lock:
+            self._inner.record_train_samples(*args, **kwargs)
+
+    def num_transitions(self) -> int:
+        with self._lock:
+            return self._inner.num_transitions()
+
+    def transitions(self) -> list[tuple[str, str, float]]:
+        with self._lock:
+            return self._inner.transitions()
+
+    def rotate(self) -> CollectedExperience:
+        """Atomically replace the inner with a fresh experience; return the old."""
+        new_inner = CollectedExperience()
+        with self._lock:
+            old = self._inner
+            self._inner = new_inner
+        return old
+
+
 def compute_value_target(node: Node) -> float:
     """Computes the actual value for a node, to be used as a target in learning."""
     assert node.is_solved, (

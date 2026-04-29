@@ -12,7 +12,6 @@ import faulthandler
 import logging
 import threading
 import time
-from dataclasses import dataclass
 from typing import Callable, Literal, Optional
 import json as json_mod
 from urllib.request import urlopen
@@ -32,9 +31,9 @@ from nanoproof.common import (
 from nanoproof.cli import get_monitor, log_actionable_error
 from nanoproof.data.bench.common import BenchTheorem
 from nanoproof.experience_collection import (
+    CollectExperienceHolder,
     Matchmaker,
     Outcome,
-    CollectedExperience,
     compute_value_target,
     prune_redundant_nodes,
 )
@@ -233,50 +232,29 @@ class Prover:
                 return process, "ok"
 
 
-@dataclass
-class _Job:
-    """One unit of work delivered to the actor pool.
-
-    Each actor captures the job at theorem-issue time and uses it for the
-    full lifecycle (``get_theorem`` -> prove -> ``on_result`` /
-    ``tactic_sink``). A late-completing straggler from a finished job thus
-    keeps reporting back to that job, never to whatever job is current
-    now.
-
-    ``get_theorem`` returns ``(theorem_id, theorem, num_simulations)``;
-    ``on_result`` is invoked with the same ``num_simulations`` so the
-    callback can persist the budget alongside the outcome.
-    """
-
-    get_theorem: Callable[[], Optional[tuple[str, BenchTheorem, int]]]
-    on_result: Callable[[str, BenchTheorem, int, Optional[Game], Optional[str]], None]
-    done_check: Callable[[], bool]
-    poll_callback: Optional[Callable[[list[str]], None]]
-    record_timeline: bool
-    prover: Prover
-    tactic_sink: Optional[Callable[[str, list[tuple[str, str, int]]], None]] = None
-
-
 class ProverWorker:
     """Long-lived actor pool that parallelises MCTS proof search across
     Lean servers.
 
     The pool is created once in ``__init__`` and runs until ``close()``.
-    Callers drive it with ``collect()`` and ``evaluate()``; the two differ
-    only in how they park actors on exit:
+    Callers drive it with two modes:
 
-    - ``collect()`` parks with a *pause*: the installed job stays live, so
-      an actor blocked deep inside MCTS (waiting on paused inference
-      during a training step) resumes its proof on the same tree when
-      inference resumes.
-    - ``evaluate()`` parks with a *release*: the release event is raised
-      so mid-proof actors abort, dropping their Lean leases and the
-      partially-built MCTS trees, then the job is cleared.
+    - **Collect** is persistent: ``install_collect()`` is called once at
+      startup with the matchmaker, the experience holder, and the search
+      config. Actors then sample theorems from the matchmaker, write
+      attempts and tactics into the holder, and feed outcomes back to
+      the matchmaker. ``collect(target_transitions)`` is just a wait
+      barrier on the holder's transition counter.
+    - **Evaluate** is a temporary interrupt: ``evaluate()`` drains
+      in-flight collect actors, swaps to eval state, runs to completion,
+      drains again, and restores collect. Eval bookkeeping (per-call
+      results list and theorem iterator) lives on the worker only for
+      the duration of the call.
 
-    Actors carry a single abort signal (``_release_event``) and a single
-    blocking point (paused inference inside ``sample_tactic``). There is
-    no per-call stop flag and no "model paused for training" fast-fail
-    path: paused inference simply blocks the caller until resume.
+    Actors carry a single abort signal (``_release_event``) used by
+    ``evaluate`` to drop in-flight Lean leases at the boundaries; collect
+    never sets it. ``_shutdown_event`` is set in :meth:`close` and wakes
+    every waiting actor so they can exit.
     """
 
     def __init__(
@@ -288,20 +266,36 @@ class ProverWorker:
         self.lean_servers = self._query_lean_servers(lean_addrs)
         self.num_actors = len(self.lean_servers)
 
-        # Pool state. ``_current_job`` is the single source of truth for
-        # what actors do; it is swapped under ``_lock`` and actors wait on
-        # ``_job_cv`` when it is None. ``_release_event`` is the only abort
-        # signal seen by Prover.prove. ``_shutdown_event`` is set in close()
-        # and wakes every waiting actor so they can exit.
         self._lock = threading.Lock()
-        self._job_cv = threading.Condition(self._lock)
-        self._current_job: Optional[_Job] = None
+        self._mode_cv = threading.Condition(self._lock)
+        self._mode: Literal["idle", "collect", "eval"] = "idle"
         self._release_event = threading.Event()
         self._shutdown_event = threading.Event()
         self._actors_mid_proof = 0
         self._thread_states: dict[int, str] = {
             i: "idle" for i in range(self.num_actors)
         }
+
+        # Persistent collect state. Set once via install_collect().
+        self._matchmaker: Optional[Matchmaker] = None
+        self._collect_holder: Optional[CollectExperienceHolder] = None
+        self._collect_prover: Optional[Prover] = None
+        self._collect_tactic_sink: Optional[
+            Callable[[str, list[tuple[str, str, int]]], None]
+        ] = None
+        self._collect_theorem_counter = 0
+
+        # Per-call eval state. Set/cleared inside evaluate().
+        self._eval_get_theorem: Optional[
+            Callable[[], Optional[tuple[str, BenchTheorem, int]]]
+        ] = None
+        self._eval_on_result: Optional[
+            Callable[[str, BenchTheorem, int, Optional[Game], Optional[str]], None]
+        ] = None
+        self._eval_prover: Optional[Prover] = None
+        self._eval_tactic_sink: Optional[
+            Callable[[str, list[tuple[str, str, int]]], None]
+        ] = None
 
         self._threads: list[threading.Thread] = []
         for actor_id in range(self.num_actors):
@@ -338,10 +332,10 @@ class ProverWorker:
     def close(self):
         """Signal shutdown and join actor threads. Called at process teardown."""
         self._shutdown_event.set()
-        with self._lock:
+        with self._mode_cv:
             self._release_event.set()
-            self._current_job = None
-            self._job_cv.notify_all()
+            self._mode = "idle"
+            self._mode_cv.notify_all()
         deadline = time.time() + 60.0
         for t in self._threads:
             t.join(timeout=max(0.0, deadline - time.time()))
@@ -352,85 +346,69 @@ class ProverWorker:
             )
             faulthandler.dump_traceback()
 
-    @torch.no_grad()
-    def collect(
+    def install_collect(
         self,
         matchmaker: Matchmaker,
-        target_transitions: int,
-        experience: CollectedExperience,
+        holder: CollectExperienceHolder,
         search_config: SearchConfig,
-        tactic_sink: Callable[[str, list[tuple[str, str, int]]], None] | None = None,
-    ) -> int:
-        """Drive the actor pool until ``experience`` accumulates
-        ``target_transitions`` transitions. Records every attempt
-        (proven/unproven/error), feeds outcomes back to the matchmaker, and
-        parks with *pause* on exit."""
+    ) -> None:
+        """Configure persistent collect mode. Must be called once before
+        the first :meth:`collect`. Actors begin sampling from the matchmaker
+        and writing into ``holder`` immediately; ``collect()`` is just a
+        wait-for-target barrier on top of that."""
+        prover = Prover(search_config, self.tactic_model)
+        with self._mode_cv:
+            assert self._matchmaker is None, "install_collect called twice"
+            self._matchmaker = matchmaker
+            self._collect_holder = holder
+            self._collect_prover = prover
+            self._collect_tactic_sink = holder.record_tactic
+            self._mode = "collect"
+            self._release_event.clear()
+            self._mode_cv.notify_all()
+
+    @torch.no_grad()
+    def collect(self, target_transitions: int) -> int:
+        """Wait until the installed holder accumulates ``target_transitions``
+        new transitions beyond its current count. Returns the delta.
+
+        Collect mode runs continuously between calls (actors keep proving
+        during train), so this is just a barrier; actor results land in
+        whichever inner experience the holder has at report time."""
+        assert self._collect_holder is not None, (
+            "collect() before install_collect()"
+        )
         monitor = get_monitor()
+        holder = self._collect_holder
 
+        baseline = holder.num_transitions()
+        target_total = baseline + target_transitions
         logger.info(
-            f"Starting collection with {self.num_actors} actors, target={target_transitions} transitions"
+            f"Starting collection with {self.num_actors} actors, target=+{target_transitions} transitions (from {baseline})"
         )
 
-        theorem_counter = [0]
-
-        def get_theorem():
-            theorem, num_sims = matchmaker.next_assignment()
-            theorem_counter[0] += 1
-            return (f"collect_{theorem_counter[0]}", theorem, num_sims)
-
-        def derive_outcome(game, error) -> Outcome:
-            if error is not None:
-                return "error"
-            if game is not None and game.root is not None and game.root.is_solved:
-                return "proven"
-            return "unproven"
-
-        def on_result(theorem_id, theorem, num_simulations, game, error):
-            outcome = derive_outcome(game, error)
-            proof_size = len(linearize_proof(game.root)) if outcome == "proven" else None
-            transitions_before = experience.num_transitions()
-            experience.record_attempt(
-                theorem, outcome, num_simulations, game, error, proof_size
-            )
-            matchmaker.send_result(theorem, outcome, proof_size)
-            if monitor is not None and outcome != "error":
-                monitor.record_proof_attempt(
-                    successful=outcome == "proven",
-                    transitions=experience.num_transitions() - transitions_before,
-                )
-
-        def done_check():
-            return experience.num_transitions() >= target_transitions
-
-        loop_count = [0]
-
-        def poll_callback(thread_states):
+        loop_count = 0
+        while not self._shutdown_event.is_set():
+            now = holder.num_transitions()
+            if now >= target_total:
+                break
             if monitor is not None:
-                for i, state in enumerate(thread_states):
+                states = self._snapshot_thread_states()
+                for i, state in enumerate(states):
                     monitor.update_local_actor(i, state=state)
-            loop_count[0] += 1
-            if loop_count[0] % 100 == 0:
+            loop_count += 1
+            if loop_count % 100 == 0:
                 logger.info(
-                    f"Progress: {experience.num_transitions()}/{target_transitions} transitions"
+                    f"Progress: {now - baseline}/{target_transitions} transitions"
                 )
-
-        job = _Job(
-            get_theorem=get_theorem,
-            on_result=on_result,
-            done_check=done_check,
-            poll_callback=poll_callback,
-            record_timeline=True,
-            prover=Prover(search_config, self.tactic_model),
-            tactic_sink=tactic_sink,
-        )
-        self._run_job(job, park="pause")
+            time.sleep(0.1)
 
         if monitor is not None:
             monitor.clear_local_actors()
 
-        total = experience.num_transitions()
-        logger.info(f"Collection complete: {total} transitions")
-        return total
+        delta = holder.num_transitions() - baseline
+        logger.info(f"Collection complete: {delta} new transitions")
+        return delta
 
     @torch.no_grad()
     def evaluate(
@@ -442,9 +420,10 @@ class ProverWorker:
         progress_callback: Callable[[int, int, int, int], None] | None = None,
         tactic_sink: Callable[[str, list[tuple[str, str, int]]], None] | None = None,
     ) -> dict:
-        """Evaluate theorems using MCTS. Returns metrics dict. Parks with
-        *release* on exit so eval state does not leak into the next job
-        and Lean leases are returned.
+        """Evaluate theorems using MCTS. Drains in-flight collect actors at
+        entry and exit so eval state cannot leak into collect (or vice
+        versa) and Lean leases held by mid-proof collect actors are
+        returned before eval starts.
 
         *progress_callback*, if given, is called as
         ``progress_callback(started, finished, solved, errors)`` whenever a
@@ -519,20 +498,16 @@ class ProverWorker:
                         started = index[0]
                     progress_callback(started, n, solved, errors)
 
-        def done_check():
-            with results_lock:
-                return len(results) >= len(theorems)
-
-        job = _Job(
-            get_theorem=get_theorem,
-            on_result=on_result,
-            done_check=done_check,
-            poll_callback=None,
-            record_timeline=True,
-            prover=Prover(search_config, self.tactic_model),
-            tactic_sink=tactic_sink,
-        )
-        self._run_job(job, park="release")
+        eval_prover = Prover(search_config, self.tactic_model)
+        self._switch_to_eval(get_theorem, on_result, eval_prover, tactic_sink)
+        try:
+            while not self._shutdown_event.is_set():
+                with results_lock:
+                    if len(results) >= len(theorems):
+                        break
+                time.sleep(0.1)
+        finally:
+            self._switch_back_from_eval()
 
         total = len(results)
         solved = sum(1 for r in results if r["is_solved"])
@@ -545,38 +520,42 @@ class ProverWorker:
             "detailed_results": results,
         }
 
-    def _run_job(self, job: _Job, *, park: Literal["pause", "release"]):
-        """Install *job*, drive the done-check loop, then park the pool.
-
-        ``park == "pause"`` leaves the job installed on exit. Mid-proof
-        actors keep working and report back to the same job when they
-        finish (issuing-job attribution).
-
-        ``park == "release"`` raises the release event so mid-proof
-        actors abort, waits for them to drain, then clears the job.
-        Used by eval to free Lean leases that would otherwise sit
-        idle tied to eval theorems that will never be resumed.
-        """
-        if park == "release":
-            self._release_and_idle()
-
-        with self._lock:
-            self._current_job = job
+    def _switch_to_eval(
+        self,
+        get_theorem_fn,
+        on_result_fn,
+        eval_prover: "Prover",
+        tactic_sink: Optional[Callable[[str, list[tuple[str, str, int]]], None]],
+    ) -> None:
+        """Drain in-flight actors, then atomically install eval state and
+        flip mode to "eval"."""
+        self._drain_actors(target_label="eval")
+        with self._mode_cv:
+            self._eval_get_theorem = get_theorem_fn
+            self._eval_on_result = on_result_fn
+            self._eval_prover = eval_prover
+            self._eval_tactic_sink = tactic_sink
+            self._mode = "eval"
             self._release_event.clear()
-            self._job_cv.notify_all()
+            self._mode_cv.notify_all()
 
-        while not self._shutdown_event.is_set():
-            if job.done_check():
-                break
-            if job.poll_callback is not None:
-                job.poll_callback(self._snapshot_thread_states())
-            time.sleep(0.1)
+    def _switch_back_from_eval(self) -> None:
+        """Drain in-flight eval actors, clear eval state, restore collect
+        mode (or "idle" if no collect was installed)."""
+        self._drain_actors(target_label="post-eval")
+        with self._mode_cv:
+            self._eval_get_theorem = None
+            self._eval_on_result = None
+            self._eval_prover = None
+            self._eval_tactic_sink = None
+            self._mode = "collect" if self._matchmaker is not None else "idle"
+            self._release_event.clear()
+            self._mode_cv.notify_all()
 
-        if park == "release":
-            self._release_and_idle()
-
-    def _release_and_idle(self):
-        """Abort mid-proof actors, wait for leases to drop, then clear the job."""
+    def _drain_actors(self, *, target_label: str) -> None:
+        """Set ``_release_event`` so actors abort/finish and drop Lean
+        leases, then poll ``_actors_mid_proof`` until it reaches zero
+        (or 60s timeout)."""
         with self._lock:
             self._release_event.set()
         deadline = time.time() + 60.0
@@ -587,13 +566,10 @@ class ProverWorker:
                 break
             if time.time() > deadline:
                 logger.warning(
-                    f"release timed out with {mid} actors still mid-proof"
+                    f"drain ({target_label}) timed out with {mid} actors still mid-proof"
                 )
                 break
             time.sleep(0.05)
-        with self._lock:
-            self._current_job = None
-            self._release_event.clear()
 
     def _set_thread_state(self, actor_id: int, state: str):
         with self._lock:
@@ -615,40 +591,76 @@ class ProverWorker:
         max_retries = 3
 
         while not self._shutdown_event.is_set():
-            with self._job_cv:
-                while self._current_job is None and not self._shutdown_event.is_set():
-                    self._job_cv.wait()
+            # Snapshot mode and the mode-specific dispatch state under the
+            # condition lock. The increment of ``_actors_mid_proof`` happens
+            # later (only once we have a theorem in hand) so the drain in
+            # ``_drain_actors`` does not have to wait for actors that ended
+            # up idling on a None get_theorem.
+            with self._mode_cv:
+                while self._mode == "idle" and not self._shutdown_event.is_set():
+                    self._mode_cv.wait()
                 if self._shutdown_event.is_set():
                     break
-                job = self._current_job
+                mode = self._mode
+                if mode == "collect":
+                    matchmaker = self._matchmaker
+                    holder = self._collect_holder
+                    prover = self._collect_prover
+                    tactic_sink = self._collect_tactic_sink
+                    self._collect_theorem_counter += 1
+                    collect_theorem_id = (
+                        f"collect_{self._collect_theorem_counter}"
+                    )
+                    eval_get_theorem = None
+                    eval_on_result = None
+                else:  # "eval"
+                    matchmaker = None
+                    holder = None
+                    prover = self._eval_prover
+                    tactic_sink = self._eval_tactic_sink
+                    collect_theorem_id = None
+                    eval_get_theorem = self._eval_get_theorem
+                    eval_on_result = self._eval_on_result
 
-            theorem_data = job.get_theorem()
-            if theorem_data is None:
+            try:
+                if mode == "collect":
+                    theorem, num_simulations = matchmaker.next_assignment()
+                    theorem_id = collect_theorem_id
+                else:
+                    theorem_data = eval_get_theorem()
+                    if theorem_data is None:
+                        self._set_thread_state(actor_id, "idle")
+                        time.sleep(0.5)
+                        continue
+                    theorem_id, theorem, num_simulations = theorem_data
+            except Exception as e:
+                logger.exception(
+                    f"[Actor {actor_id}] get_theorem failed: {e}"
+                )
                 self._set_thread_state(actor_id, "idle")
                 time.sleep(0.5)
                 continue
 
-            theorem_id, theorem, num_simulations = theorem_data
             self._set_thread_state(actor_id, "running")
 
             game = None
             error = None
             skip_report = False
             interrupted = False
-            timeline = TimelineRecorder() if job.record_timeline else None
+            timeline = TimelineRecorder()
 
             with self._lock:
                 self._actors_mid_proof += 1
             try:
                 for attempt in range(max_retries):
                     try:
-                        game = job.prover.prove(
+                        game = prover.prove(
                             client,
                             theorem,
                             num_simulations=num_simulations,
                             abort_check=self._release_event.is_set,
                             timeline=timeline,
-                            tactic_sink=job.tactic_sink,
+                            tactic_sink=tactic_sink,
                         )
                         consecutive_errors = 0
                         break
@@ -729,15 +741,10 @@ class ProverWorker:
                         )
                         break
 
-                # Report directly to the job that issued this theorem - NOT to
-                # whatever happens to be current now. Routing to "the current
-                # job" is racy: a collect-cycle actor whose proof finishes just
-                # as eval is installing its job would have its result appended
-                # to eval's results list, contaminating the eval JSONL with
-                # training-set theorems. The decrement below is in the same
-                # finally as the increment, so a concurrent _release_and_idle
-                # cannot complete (and thus eval cannot install its job) until
-                # this on_result call has finished.
+                # Route by the mode captured at iteration start. Cross-mode
+                # boundaries are handled by ``_drain_actors``: by the time
+                # ``_mode`` flips, ``_actors_mid_proof`` is zero, so no
+                # in-flight actor can route to the wrong sink.
                 if not skip_report:
                     is_solved = bool(game and game.root and game.root.is_solved)
                     logger.debug(
@@ -749,7 +756,14 @@ class ProverWorker:
                         )
                     if error is not None:
                         self._set_thread_state(actor_id, "error")
-                    job.on_result(theorem_id, theorem, num_simulations, game, error)
+                    if mode == "collect":
+                        self._report_collect(
+                            matchmaker, holder, theorem, num_simulations, game, error
+                        )
+                    else:
+                        eval_on_result(
+                            theorem_id, theorem, num_simulations, game, error
+                        )
             finally:
                 with self._lock:
                     self._actors_mid_proof -= 1
@@ -758,10 +772,9 @@ class ProverWorker:
             # the LLM/Lean work they did belongs on the profiler, and
             # the outcome marker classifies what the "productive only"
             # toggle hides.
-            if timeline is not None:
-                _flush_timeline(
-                    actor_id, timeline, game=game, error=error, interrupted=interrupted
-                )
+            _flush_timeline(
+                actor_id, timeline, game=game, error=error, interrupted=interrupted
+            )
 
             if consecutive_errors >= max_consecutive_errors:
                 logger.warning(
@@ -773,3 +786,36 @@ class ProverWorker:
             self._set_thread_state(actor_id, "idle")
 
         self._set_thread_state(actor_id, "idle")
+
+    def _report_collect(
+        self,
+        matchmaker: Matchmaker,
+        holder: CollectExperienceHolder,
+        theorem: BenchTheorem,
+        num_simulations: int,
+        game: "Game | None",
+        error: Optional[str],
+    ) -> None:
+        outcome = self._derive_outcome(game, error)
+        proof_size = (
+            len(linearize_proof(game.root)) if outcome == "proven" else None
+        )
+        transitions_before = holder.num_transitions()
+        holder.record_attempt(
+            theorem, outcome, num_simulations, game, error, proof_size
+        )
+        matchmaker.send_result(theorem, outcome, proof_size)
+        monitor = get_monitor()
+        if monitor is not None and outcome != "error":
+            monitor.record_proof_attempt(
+                successful=outcome == "proven",
+                transitions=holder.num_transitions() - transitions_before,
+            )
+
+    @staticmethod
+    def _derive_outcome(game, error) -> Outcome:
+        if error is not None:
+            return "error"
+        if game is not None and game.root is not None and game.root.is_solved:
+            return "proven"
+        return "unproven"
