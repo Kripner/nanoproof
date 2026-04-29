@@ -514,7 +514,7 @@ def run_mcts(
         if logger.isEnabledFor(TRACE):
             pre_bp_path = [(n.value(), n.visit_count) for n in search_path]
 
-        backpropagate(
+        diffs = backpropagate(
             search_path,
             value,
             config,
@@ -522,21 +522,17 @@ def run_mcts(
 
         if pre_bp_path is not None:
             n_unique = len(tactic_results)
-            n_total = sum(c for _, _, c in tactic_results)
             n_success = sum(1 for _, s, _ in tactic_results if s == "success")
             n_error = sum(1 for _, s, _ in tactic_results if s == "error")
             n_cycle = sum(1 for _, s, _ in tactic_results if s == "cycle")
-            no_legal = n_success == 0
-            bp_value = config.no_legal_actions_value if no_legal else value
-            bp_note = " NO_LEGAL" if no_legal else ""
+            no_legal_note = " NO_LEGAL" if n_success == 0 else ""
+            solved_note = " SOLVED" if root.is_solved else ""
             logger.log(
                 TRACE,
-                f"d={len(search_path) - 1} | "
-                f"{_trace_format_path(search_path, pre_bp_path)} | "
-                f"exp[{n_total}->{n_unique}->{n_success}({n_error}err,{n_cycle}cyc)] | "
-                f"v_bp={bp_value:.2f}{bp_note} | "
-                f"root[v={root.value():.2f},n={root.visit_count}]"
-                f"{' SOLVED' if root.is_solved else ''}"
+                f"d={len(search_path) - 1} "
+                f"{_trace_format_path(search_path, pre_bp_path, diffs)} -> "
+                f"gen {n_success}/{n_unique}({n_error}err,{n_cycle}cyc)"
+                f"{no_legal_note}{solved_note}"
             )
 
         if root.is_solved:
@@ -702,22 +698,26 @@ def expand_node(
 
 
 def _trace_format_path(
-    search_path: list[Node], pre_bp: list[tuple[float, int]]
+    search_path: list[Node],
+    pre_bp: list[tuple[float, int]],
+    diffs: list[float],
 ) -> str:
-    """Render the selected path with pre-backprop (v, n) snapshots."""
+    """Render the selected path with pre-backprop (v, n) snapshots and the
+    per-node value diff produced by this iteration's backpropagation."""
     parts = []
     for i, node in enumerate(search_path):
         v, n = pre_bp[i]
+        d = diffs[i]
         if i == 0:
-            parts.append(f"[{v:.1f}/{n}]")
+            parts.append(f"[{v:.1f}({d:+.2f})/{n}]")
         else:
             tag = ""
             if node.is_solved:
                 tag = ",SOL"
             elif node.is_terminal:
                 tag = ",TERM"
-            parts.append(f"->[{v:.1f}/{n}{tag}]")
-    return " ".join(parts)
+            parts.append(f"-[{v:.1f}({d:+.2f})/{n}{tag}]")
+    return "".join(parts)
 
 
 # At the end of a simulation, we propagate the evaluation all the way up the
@@ -726,7 +726,11 @@ def backpropagate(
     search_path: list[Node],
     value: float,
     config: SearchConfig,
-):
+) -> list[float]:
+    """Propagate the evaluation up the tree. Returns the per-node value
+    diff (post.value() - pre.value()) for each node in *search_path*."""
+    pre_values = [n.value() for n in search_path]
+    
     if len(search_path[-1].children) == 0:
         value = config.no_legal_actions_value
     is_solved = False
@@ -744,6 +748,7 @@ def backpropagate(
                 value = backprop_value_towards_min(search_path[ix - 1])
             else:
                 value = node.reward + value
+    return [n.value() - pv for n, pv in zip(search_path, pre_values)]
 
 
 def backprop_value_towards_min(node):
