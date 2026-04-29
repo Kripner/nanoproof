@@ -341,6 +341,7 @@ class ProverWorker:
         matchmaker: Matchmaker,
         target_transitions: int,
         experience: CollectedExperience,
+        search_config: SearchConfig,
         tactic_sink: Callable[[str, list[tuple[str, str, int]]], None] | None = None,
     ) -> int:
         """Drive the actor pool until ``experience`` accumulates
@@ -402,7 +403,7 @@ class ProverWorker:
             done_check=done_check,
             poll_callback=poll_callback,
             record_timeline=True,
-            prover=Prover(SearchConfig(), self.tactic_model),
+            prover=Prover(search_config, self.tactic_model),
             tactic_sink=tactic_sink,
         )
         self._run_job(job, park="pause")
@@ -420,8 +421,8 @@ class ProverWorker:
         theorems: list[BenchTheorem],
         dataset_name: str,
         num_simulations: int,
+        search_config: SearchConfig,
         progress_callback: Callable[[int, int, int, int], None] | None = None,
-        verify_timeout: int = 5000,
         tactic_sink: Callable[[str, list[tuple[str, str, int]]], None] | None = None,
     ) -> dict:
         """Evaluate theorems using MCTS. Returns metrics dict. Parks with
@@ -511,9 +512,7 @@ class ProverWorker:
             done_check=done_check,
             poll_callback=None,
             record_timeline=True,
-            prover=Prover(
-                SearchConfig(verify_timeout=verify_timeout), self.tactic_model
-            ),
+            prover=Prover(search_config, self.tactic_model),
             tactic_sink=tactic_sink,
         )
         self._run_job(job, park="release")

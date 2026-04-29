@@ -32,10 +32,12 @@ from nanoproof.checkpoints import (
 )
 from nanoproof.common import (
     active_barrier,
+    add_dataclass_args,
     autodetect_device_type,
     broadcast_value,
     compute_cleanup,
     compute_init,
+    dataclass_from_args,
     enable_memory_profiling,
     print0,
 )
@@ -49,6 +51,7 @@ from nanoproof.inference import (
     compute_max_batch_prompt_tokens,
 )
 from nanoproof.prover import ProverWorker
+from nanoproof.search import SearchConfig
 from nanoproof.inference import setup_distributed_inference
 
 # TODO: during verification, maybe set 'set_option maxHeartbeats 0\nset_option maxRecDepth 100000'
@@ -174,11 +177,18 @@ def main():
         action="store_true",
         help="enable debug logging for inference and proving",
     )
+    # Search hyperparameters. Eval theorems are harder to verify than
+    # collection theorems, so we override verify_timeout to 30s here.
+    add_dataclass_args(
+        parser, SearchConfig, prefix="search_", overrides={"verify_timeout": 30000}
+    )
     args = parser.parse_args()
     args_dict = vars(args).copy()
 
     if args.verbose:
         logging.getLogger("nanoproof").setLevel(logging.DEBUG)
+
+    search_config = dataclass_from_args(SearchConfig, args, prefix="search_")
 
     if args.force and args.continue_eval:
         parser.error("--force and --continue are mutually exclusive")
@@ -384,8 +394,8 @@ def main():
                 theorems,
                 dataset_name=dataset_name,
                 num_simulations=args.num_simulations,
+                search_config=search_config,
                 progress_callback=progress_callback,
-                verify_timeout=30000,
             )
             dataset_elapsed = time.monotonic() - dataset_start
             done.set()

@@ -1,18 +1,16 @@
 from collections import Counter
 from dataclasses import dataclass
-import enum
 import logging
 from typing import Callable, Self
 import math
 import uuid
 
-from leantree.repl_adapter.server import LeanProofBranch, LeanClient
+from leantree.repl_adapter.server import LeanProofBranch
 from leantree.repl_adapter.interaction import LeanProcess, LeanProcessException
 from leantree.utils import RemoteException
 
 from nanoproof.common import (
     pretty_print_tree,
-    ValueOrError,
     theorem_to_example,
     Player,
     TimelineRecorder,
@@ -25,28 +23,41 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SearchConfig:
-    # ``num_simulations`` is passed per-call to :meth:`Prover.prove` (the
-    # matchmaker assigns adaptive per-theorem budgets) and stored on the
-    # :class:`Game` itself; nothing about MCTS hyperparameters varies with it.
-    pb_c_base: int = 3200
-    pb_c_init: float = 0.001
-    value_discount: float = 0.99
-    prior_temperature: float = 200
-    no_legal_actions_value: float = -40.0
-    ps_c: float = 0.01
-    ps_alpha: float = 0.6
-    verify_timeout: int = 5000  # ms timeout for tactic re-check in verify_node
+    """MCTS search hyperparameters. All fields are required; use
+    :meth:`defaults` and :func:`nanoproof.common.add_dataclass_args` to
+    expose them as CLI flags.
+    """
+
+    pb_c_base: int  # MCTS UCB exploration base
+    pb_c_init: float  # MCTS UCB exploration init
+    value_discount: float  # discount applied to values during backprop
+    prior_temperature: float  # softmax temperature applied to action logprobs at expansion
+    no_legal_actions_value: float  # fallback value when MCTS reaches a node with no legal actions
+    ps_c: float  # progressive sampling coefficient
+    ps_alpha: float  # progressive sampling exponent
+    verify_timeout: int  # ms timeout for tactic re-check in verify_node
+
+    @classmethod
+    def defaults(cls) -> dict:
+        return {
+            "pb_c_base": 3200,
+            "pb_c_init": 0.001,
+            "value_discount": 0.99,
+            "prior_temperature": 200.0,
+            "no_legal_actions_value": -40.0,
+            "ps_c": 0.01,
+            "ps_alpha": 0.6,
+            "verify_timeout": 5000,
+        }
 
 
 Action = str | int
-
 State = list[LeanProofBranch]
 
 
 @dataclass
 class Node:
     """Node in the search tree."""
-
     parent: Self | None  # Not serialized.
     # Action that was taken to reach this node.
     action: Action | None

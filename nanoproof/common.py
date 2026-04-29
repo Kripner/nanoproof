@@ -13,7 +13,7 @@ import urllib.request
 import gc
 import faulthandler
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime
 from collections import Counter
 from filelock import FileLock
@@ -523,6 +523,39 @@ class MetricsLogger:
             self._wandb_run.finish()
         if self._goodseed_run is not None:
             self._goodseed_run.close()
+
+
+def add_dataclass_args(parser, cls, prefix: str = "", overrides: dict | None = None):
+    """Add a CLI argument for each field of dataclass ``cls`` to ``parser``.
+
+    Defaults come from ``cls.defaults()`` (with ``overrides`` taking
+    precedence). The argparse ``type`` is the field's annotated type.
+
+    ``prefix`` is applied as-is to the attribute namespace (use underscores)
+    and dashed in the CLI flag, so ``prefix="mm_"`` produces
+    ``--mm-trust-count`` and ``args.mm_trust_count``.
+    """
+    overrides = overrides or {}
+    defaults = {**cls.defaults(), **overrides}
+    arg_prefix = prefix.replace("_", "-")
+    for f in fields(cls):
+        parser.add_argument(
+            "--" + arg_prefix + f.name.replace("_", "-"),
+            type=f.type,
+            default=defaults[f.name],
+        )
+
+
+def dataclass_from_args(cls, args, prefix: str = ""):
+    """Build a ``cls`` instance from parsed argparse args, reading attributes
+    with the given underscore prefix."""
+    return cls(**{f.name: getattr(args, prefix + f.name) for f in fields(cls)})
+
+
+def dataclass_from_dict(cls, d: dict, prefix: str = ""):
+    """Build a ``cls`` instance from a flat dict (e.g. loaded args.json),
+    reading keys with the given underscore prefix."""
+    return cls(**{f.name: d[prefix + f.name] for f in fields(cls)})
 
 
 def add_logging_args(parser):

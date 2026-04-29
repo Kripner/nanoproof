@@ -22,8 +22,10 @@ from nanoproof.common import (
     compute_cleanup,
     get_base_dir,
     create_metrics_logger,
+    add_dataclass_args,
     add_logging_args,
     autodetect_device_type,
+    dataclass_from_args,
     SimpleTimer,
     IntervalTrigger,
     flush,
@@ -51,6 +53,7 @@ from nanoproof.experience_collection import (
     list_available_datasets,
 )
 from nanoproof.prover import ProverWorker
+from nanoproof.search import SearchConfig
 from nanoproof.inference import setup_distributed_inference
 from nanoproof.inference import (
     TacticModel,
@@ -160,54 +163,10 @@ parser.add_argument(
 )
 
 # Matchmaker
-parser.add_argument(
-    "--mm-trust-count",
-    type=int,
-    default=4,
-    help="window size (in decided proven/unproven outcomes) used for weight tier classification and per-attempt simulation budget",
-)
-parser.add_argument(
-    "--mm-trust-count-proved",
-    type=int,
-    default=6,
-    help="number of recent consecutive proven outcomes that demote a theorem to the fully-proved (low) weight tier",
-)
-parser.add_argument(
-    "--mm-weight-interesting",
-    type=float,
-    default=1.0,
-    help="sampling weight for theorems still in the interesting tier (unseen, under-trusted, or recently mixed)",
-)
-parser.add_argument(
-    "--mm-weight-undecided",
-    type=float,
-    default=0.1,
-    help="sampling weight for theorems with no proofs in the trust window (look unprovable for now)",
-)
-parser.add_argument(
-    "--mm-weight-fully-proved",
-    type=float,
-    default=1e-3,
-    help="sampling weight for theorems consistently proven over the last trust_count_proved attempts",
-)
-parser.add_argument(
-    "--mm-base-simulations",
-    type=int,
-    default=64,
-    help="baseline per-attempt simulation budget before failure-based scaling",
-)
-parser.add_argument(
-    "--mm-failure-multiplier",
-    type=float,
-    default=1.5,
-    help="simulation budget multiplier applied per unproven outcome in the trust window",
-)
-parser.add_argument(
-    "--mm-cap-simulations",
-    type=int,
-    default=1024,
-    help="hard upper bound on the per-attempt simulation budget after failure scaling",
-)
+add_dataclass_args(parser, MatchmakerConfig, prefix="mm_")
+
+# Search
+add_dataclass_args(parser, SearchConfig, prefix="search_")
 
 # Training
 parser.add_argument("--device-batch-size", type=int, default=8)
@@ -329,16 +288,8 @@ replay_buffer = ReplayBuffer(window_size=args.replay_buffer_window_size, seed=ra
 if args.load_buffer:
     replay_buffer.load_from(args.load_buffer)
 
-matchmaker_config = MatchmakerConfig(
-    trust_count=args.mm_trust_count,
-    trust_count_proved=args.mm_trust_count_proved,
-    weight_interesting=args.mm_weight_interesting,
-    weight_undecided=args.mm_weight_undecided,
-    weight_fully_proved=args.mm_weight_fully_proved,
-    base_simulations=args.mm_base_simulations,
-    failure_multiplier=args.mm_failure_multiplier,
-    cap_simulations=args.mm_cap_simulations,
-)
+matchmaker_config = dataclass_from_args(MatchmakerConfig, args, prefix="mm_")
+search_config = dataclass_from_args(SearchConfig, args, prefix="search_")
 matchmaker = Matchmaker(
     datasets=args.datasets,
     lean_version=lean_version,
@@ -581,6 +532,7 @@ while True:
                 minif2f_theorems,
                 dataset_name="MiniF2F",
                 num_simulations=args.num_simulations_eval,
+                search_config=search_config,
                 tactic_sink=eval_experience.record_tactic,
             )
             logger.info(
@@ -590,6 +542,7 @@ while True:
                 proofnet_theorems,
                 dataset_name="ProofNet",
                 num_simulations=args.num_simulations_eval,
+                search_config=search_config,
                 tactic_sink=eval_experience.record_tactic,
             )
 
@@ -692,6 +645,7 @@ while True:
                 matchmaker,
                 args.collect_transitions,
                 experience,
+                search_config=search_config,
                 tactic_sink=experience.record_tactic,
             )
 

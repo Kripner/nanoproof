@@ -119,16 +119,45 @@ class MatchmakerConfig:
     proven/unproven outcomes; errors are filtered out -- with one exception
     handled inside :class:`Matchmaker`: two consecutive raw error outcomes
     drop the theorem permanently.
+
+    All fields are required; use :meth:`defaults` and
+    :func:`nanoproof.common.add_dataclass_args` to expose them as CLI flags.
     """
 
+    # window size (in decided proven/unproven outcomes) used for weight tier
+    # classification and per-attempt simulation budget
     trust_count: int
+    # number of recent consecutive proven outcomes that demote a theorem to
+    # the fully-proved (low) weight tier
     trust_count_proved: int
+    # sampling weight for theorems still in the interesting tier
+    # (unseen, under-trusted, or recently mixed)
     weight_interesting: float
+    # sampling weight for theorems with no proofs in the trust window
+    # (look unprovable for now)
     weight_undecided: float
+    # sampling weight for theorems consistently proven over the last
+    # trust_count_proved attempts
     weight_fully_proved: float
+    # baseline per-attempt simulation budget before failure-based scaling
     base_simulations: int
+    # simulation budget multiplier applied per unproven outcome in the trust window
     failure_multiplier: float
+    # hard upper bound on the per-attempt simulation budget after failure scaling
     cap_simulations: int
+
+    @classmethod
+    def defaults(cls) -> dict:
+        return {
+            "trust_count": 4,
+            "trust_count_proved": 6,
+            "weight_interesting": 1.0,
+            "weight_undecided": 0.1,
+            "weight_fully_proved": 1e-3,
+            "base_simulations": 64,
+            "failure_multiplier": 1.5,
+            "cap_simulations": 1024,
+        }
 
 
 @dataclass

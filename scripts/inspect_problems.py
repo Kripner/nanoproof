@@ -12,7 +12,7 @@ import argparse
 import json
 import random
 
-from nanoproof.common import construct_proof_source, linearize_proof
+from nanoproof.common import construct_proof_source, dataclass_from_dict, linearize_proof
 from nanoproof.experience_collection import (
     MatchmakerConfig,
     TheoremStats,
@@ -52,16 +52,7 @@ def main() -> None:
     # what training actually used.
     with open(f"{args.run_dir}/args.json", "r") as f:
         run_args = json.load(f)
-    config = MatchmakerConfig(
-        trust_count=run_args["mm_trust_count"],
-        trust_count_proved=run_args["mm_trust_count_proved"],
-        weight_interesting=run_args["mm_weight_interesting"],
-        weight_undecided=run_args["mm_weight_undecided"],
-        weight_fully_proved=run_args["mm_weight_fully_proved"],
-        base_simulations=run_args["mm_base_simulations"],
-        failure_multiplier=run_args["mm_failure_multiplier"],
-        cap_simulations=run_args["mm_cap_simulations"],
-    )
+    config = dataclass_from_dict(MatchmakerConfig, run_args, prefix="mm_")
 
     target_id = args.id
     if target_id is None:
