@@ -140,6 +140,10 @@ class ColoredFormatter(logging.Formatter):
         return message
 
 
+TRACE = 5
+logging.addLevelName(TRACE, "TRACE")
+
+
 def setup_default_logging():
     handler = logging.StreamHandler()
     handler.setFormatter(

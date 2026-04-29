@@ -54,8 +54,8 @@ def parse_args():
     parser.add_argument(
         "--log-level",
         type=str,
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="TRACE",
+        choices=["TRACE", "DEBUG", "INFO", "WARNING", "ERROR"],
         help="log level for the nanoproof package logger",
     )
     add_dataclass_args(parser, SearchConfig, prefix="search_")

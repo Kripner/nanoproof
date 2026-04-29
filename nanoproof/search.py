@@ -10,6 +10,7 @@ from leantree.repl_adapter.interaction import LeanProcess, LeanProcessException
 from leantree.utils import RemoteException
 
 from nanoproof.common import (
+    TRACE,
     pretty_print_tree,
     theorem_to_example,
     Player,
@@ -408,7 +409,6 @@ def revive_tree_states(root: Node, theorem_str: str, lean_process: LeanProcess):
 
 class Game:
     """A single episode of interaction with the environment."""
-
     def __init__(self, theorem: str, num_simulations: int | None = None):
         self.theorem = theorem
         # Number of simulations to run.
@@ -421,7 +421,6 @@ class Game:
 
 class MCTSAbortedError(Exception):
     """Raised when MCTS is aborted early (e.g., prover paused during evaluation)."""
-
     pass
 
 
@@ -494,7 +493,7 @@ def run_mcts(
         )  # TODO (!): use the actual action logprobs
         value = -value  # convert to MCTS value scale (negative proof depth)
 
-        expand_node(
+        tactic_results = expand_node(
             node,
             tactics,
             tactic_logprobs,
@@ -511,11 +510,34 @@ def run_mcts(
         if expansion_callback is not None:
             expansion_callback()
 
+        pre_bp_path: list[tuple[float, int]] | None = None
+        if logger.isEnabledFor(TRACE):
+            pre_bp_path = [(n.value(), n.visit_count) for n in search_path]
+
         backpropagate(
             search_path,
             value,
             config,
         )
+
+        if pre_bp_path is not None:
+            n_unique = len(tactic_results)
+            n_total = sum(c for _, _, c in tactic_results)
+            n_success = sum(1 for _, s, _ in tactic_results if s == "success")
+            n_error = sum(1 for _, s, _ in tactic_results if s == "error")
+            n_cycle = sum(1 for _, s, _ in tactic_results if s == "cycle")
+            no_legal = n_success == 0
+            bp_value = config.no_legal_actions_value if no_legal else value
+            bp_note = " NO_LEGAL" if no_legal else ""
+            logger.log(
+                TRACE,
+                f"d={len(search_path) - 1} | "
+                f"{_trace_format_path(search_path, pre_bp_path)} | "
+                f"exp[{n_total}->{n_unique}->{n_success}({n_error}err,{n_cycle}cyc)] | "
+                f"v_bp={bp_value:.2f}{bp_note} | "
+                f"root[v={root.value():.2f},n={root.visit_count}]"
+                f"{' SOLVED' if root.is_solved else ''}"
+            )
 
         if root.is_solved:
             break
@@ -592,7 +614,7 @@ def expand_node(
     timeline: TimelineRecorder | None = None,
     abort_check=None,
     tactic_sink: "Callable[[str, list[tuple[str, str, int]]], None] | None" = None,
-):
+) -> list[tuple[str, str, int]]:
     node.evaluations += 1
     counts = Counter(actions)
     policy = {
@@ -676,6 +698,26 @@ def expand_node(
     finally:
         if tactic_sink is not None and tactic_results:
             tactic_sink(state_str, tactic_results)
+    return tactic_results
+
+
+def _trace_format_path(
+    search_path: list[Node], pre_bp: list[tuple[float, int]]
+) -> str:
+    """Render the selected path with pre-backprop (v, n) snapshots."""
+    parts = []
+    for i, node in enumerate(search_path):
+        v, n = pre_bp[i]
+        if i == 0:
+            parts.append(f"[{v:.1f}/{n}]")
+        else:
+            tag = ""
+            if node.is_solved:
+                tag = ",SOL"
+            elif node.is_terminal:
+                tag = ",TERM"
+            parts.append(f"->[{v:.1f}/{n}{tag}]")
+    return " ".join(parts)
 
 
 # At the end of a simulation, we propagate the evaluation all the way up the
