@@ -527,9 +527,8 @@ class ProverWorker:
         eval_prover: "Prover",
         tactic_sink: Optional[Callable[[str, list[tuple[str, str, int]]], None]],
     ) -> None:
-        """Drain in-flight actors, then atomically install eval state and
-        flip mode to "eval"."""
-        self._drain_actors(target_label="eval")
+        """Park actors, drain in-flight proofs, then install eval state."""
+        self._park_and_drain(target_label="eval")
         with self._mode_cv:
             self._eval_get_theorem = get_theorem_fn
             self._eval_on_result = on_result_fn
@@ -540,9 +539,9 @@ class ProverWorker:
             self._mode_cv.notify_all()
 
     def _switch_back_from_eval(self) -> None:
-        """Drain in-flight eval actors, clear eval state, restore collect
-        mode (or "idle" if no collect was installed)."""
-        self._drain_actors(target_label="post-eval")
+        """Park actors, drain in-flight eval proofs, clear eval state, and
+        restore collect mode (or stay in "idle" if no collect was installed)."""
+        self._park_and_drain(target_label="post-eval")
         with self._mode_cv:
             self._eval_get_theorem = None
             self._eval_on_result = None
@@ -552,11 +551,20 @@ class ProverWorker:
             self._release_event.clear()
             self._mode_cv.notify_all()
 
-    def _drain_actors(self, *, target_label: str) -> None:
-        """Set ``_release_event`` so actors abort/finish and drop Lean
-        leases, then poll ``_actors_mid_proof`` until it reaches zero
-        (or 60s timeout)."""
-        with self._lock:
+    def _park_and_drain(self, *, target_label: str) -> None:
+        """Flip mode to "idle" so actors looping back will park on the cv,
+        signal in-flight proofs to abort via ``_release_event``, then poll
+        ``_actors_mid_proof`` until it reaches zero (or 60s timeout).
+
+        Without the "idle" flip the drain races against actors: each
+        aborted proof decrements the counter, but the actor immediately
+        re-enters the cv block, sees the still-active mode, takes a
+        fresh theorem, and increments the counter again. With many
+        actors this tight oscillation keeps the counter above zero
+        indefinitely. Parking the mode first lets the counter actually
+        reach zero."""
+        with self._mode_cv:
+            self._mode = "idle"
             self._release_event.set()
         deadline = time.time() + 60.0
         while True:
