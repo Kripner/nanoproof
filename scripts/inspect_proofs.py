@@ -415,19 +415,27 @@ _BENCH_LOADERS = {
 }
 
 
-def _check_eval_file(path: Path, indent: str = "") -> bool:
+def _check_eval_file(
+    path: Path, indent: str = "", dataset: str | None = None
+) -> bool:
     """Compare an eval JSONL against its benchmark; prints findings.
 
     Returns True iff the file contains exactly the benchmark theorems
-    (no duplicates, no missing, no extras). Returns True without checking
-    if the dataset can't be inferred from the filename, after printing a
-    note - so callers can use this as a soft pre-flight.
+    (no duplicates, no missing, no extras). If ``dataset`` is None, it is
+    inferred from the filename; if inference fails, returns True without
+    checking after printing a note - so callers can use this as a soft
+    pre-flight.
     """
-    stem = path.stem.lower()
-    dataset = next((name for name in _BENCH_LOADERS if name in stem), None)
+    if dataset is None:
+        stem = path.stem.lower()
+        dataset = next((name for name in _BENCH_LOADERS if name in stem), None)
     if dataset is None:
         print(f"{indent}Skipping check: cannot infer dataset from {path.name}")
         return True
+    if dataset not in _BENCH_LOADERS:
+        raise ValueError(
+            f"Unknown dataset {dataset!r}; expected one of {list(_BENCH_LOADERS)}"
+        )
 
     bench_theorems = _BENCH_LOADERS[dataset]()
     proofs = load_proofs(str(path))
@@ -468,7 +476,7 @@ def _check_eval_file(path: Path, indent: str = "") -> bool:
 
 def cmd_check(args):
     """Check that an eval JSONL file contains exactly the benchmark theorems."""
-    _check_eval_file(Path(args.path))
+    _check_eval_file(Path(args.path), dataset=args.dataset)
 
 
 def _one_line_preview(source: str, max_len: int = 120) -> str:
@@ -482,7 +490,10 @@ def _one_line_preview(source: str, max_len: int = 120) -> str:
 
 
 def _write_gathered_lean(
-    jsonl_path: Path, output_path: Path, check_indent: str = ""
+    jsonl_path: Path,
+    output_path: Path,
+    check_indent: str = "",
+    dataset: str | None = None,
 ) -> tuple[int, int]:
     """Read an eval JSONL, build a single .lean file with proven proofs inlined.
 
@@ -490,7 +501,7 @@ def _write_gathered_lean(
     header so opens/defs don't leak between theorems. Returns
     (proven_count, total_count).
     """
-    _check_eval_file(jsonl_path, indent=check_indent)
+    _check_eval_file(jsonl_path, indent=check_indent, dataset=dataset)
 
     proofs = load_proofs(str(jsonl_path))
 
@@ -533,12 +544,19 @@ def cmd_gather_lean(args):
 
     if path.is_file():
         output_path = output_dir / f"{path.stem}.lean"
-        proven, total = _write_gathered_lean(path, output_path)
+        proven, total = _write_gathered_lean(path, output_path, dataset=args.dataset)
         print(f"{proven}/{total} proven -> {output_path}")
         return
 
     if not path.is_dir():
         print(f"Error: {path} is neither a file nor a directory")
+        return
+
+    if args.dataset is not None:
+        print(
+            f"Error: --dataset is only supported for single-file inputs; "
+            f"{path} is a run directory and iterates over all eval datasets"
+        )
         return
 
     evals_dir = path / "evals"
@@ -570,7 +588,7 @@ def cmd_gather_lean(args):
 
             output_path = output_base / f"{step_dir.name}-{dataset}.lean"
             proven, total = _write_gathered_lean(
-                jsonl_path, output_path, check_indent="  "
+                jsonl_path, output_path, check_indent="  ", dataset=dataset
             )
             print(
                 f"Step {step_dir.name} [{dataset}]: {proven}/{total} proven -> {output_path}"
@@ -627,6 +645,13 @@ def main():
         help="Verify the eval JSONL contains exactly the benchmark theorems",
     )
     check_parser.add_argument("path", help="Path to the evaluation results JSONL file")
+    check_parser.add_argument(
+        "--dataset",
+        "-d",
+        choices=sorted(_BENCH_LOADERS),
+        default=None,
+        help="Benchmark to compare against. If omitted, inferred from filename.",
+    )
     check_parser.set_defaults(func=cmd_check)
 
     # List subcommand
@@ -704,6 +729,16 @@ def main():
         type=str,
         default=".",
         help="Output directory for Lean files (default: current directory)",
+    )
+    gather_parser.add_argument(
+        "--dataset",
+        "-d",
+        choices=sorted(_BENCH_LOADERS),
+        default=None,
+        help=(
+            "Benchmark to compare against (single-file mode only). "
+            "If omitted, inferred from filename."
+        ),
     )
     gather_parser.set_defaults(func=cmd_gather_lean)
 
