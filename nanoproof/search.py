@@ -41,7 +41,7 @@ class SearchConfig:
     @classmethod
     def defaults(cls) -> dict:
         return {
-            "pb_c_base": 3200,
+            "pb_c_base": 200,
             "pb_c_init": 0.001,
             "value_discount": 0.98,
             "prior_temperature": 200.0,
