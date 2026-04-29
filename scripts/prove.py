@@ -51,6 +51,13 @@ def parse_args():
         default=None,
         help="If given, run once on this source; otherwise REPL",
     )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="log level for the nanoproof package logger",
+    )
     add_dataclass_args(parser, SearchConfig, prefix="search_")
     return parser.parse_args()
 
@@ -110,11 +117,9 @@ def prove_one(
 
 def main():
     args = parse_args()
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        stream=sys.stderr,
-    )
+    log_level = args.log_level.upper()
+    logging.getLogger("nanoproof").setLevel(log_level)
+    logger.setLevel(log_level)
 
     logger.info(f"Loading model: {args.model_path}")
     tactic_model = TacticModel.create(
@@ -139,15 +144,15 @@ def main():
         if not source.strip():
             continue
         try:
-            print("Starting proof search.")
+            logger.info("Starting proof search.")
             prove_one(prover, client, source, args.num_simulations)
         except KeyboardInterrupt:
-            print("\n[interrupted; staying in REPL]")
+            logger.warning("Interrupted; staying in REPL.")
         except AssertionError as e:
-            print(f"[error] AssertionError: {e}")
-        except Exception as e:
-            print(f"[error] {type(e).__name__}: {e}")
-    print("Done.")
+            logger.error(f"AssertionError: {e}")
+        except Exception:
+            logger.exception("Proof search failed")
+    logger.info("Done.")
 
 
 if __name__ == "__main__":
