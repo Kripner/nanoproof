@@ -43,7 +43,7 @@ class SearchConfig:
         return {
             "pb_c_base": 3200,
             "pb_c_init": 0.001,
-            "value_discount": 0.99,
+            "value_discount": 0.98,
             "prior_temperature": 200.0,
             "no_legal_actions_value": -5.0,
             "ps_c": 0.1,
