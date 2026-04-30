@@ -29,7 +29,7 @@ import os
 import random
 import threading
 from dataclasses import dataclass, asdict, field
-from typing import Literal
+from typing import Iterable, Literal
 
 import torch.distributed as dist
 
@@ -50,6 +50,37 @@ _STEP_PREFIX = "step_"
 THEOREMS_FILENAME = "theorems.jsonl"
 
 Outcome = Literal["proven", "unproven", "error"]
+
+
+def _clean_transitions(
+    raw: Iterable[tuple[str, str, float]],
+) -> list[tuple[str, str, float]]:
+    """Single canonical pass that prepares raw transitions for training:
+    strip whitespace, drop entries that exceed the global state/tactic length
+    caps, and assert basic invariants. Used on both the live collect path
+    (:meth:`CollectedExperience.transitions`) and the resume-from-disk path
+    (:meth:`ReplayBuffer.load_from`) so the buffer never sees over-length rows
+    regardless of how it was populated."""
+    out: list[tuple[str, str, float]] = []
+    for context, tactic, value_target in raw:
+        context = context.strip()
+        tactic = tactic.strip()
+        if (
+            len(context) > GLOBAL_CONFIG.state_max_len
+            or len(tactic) > GLOBAL_CONFIG.tactic_max_len
+        ):
+            continue
+        assert context, (
+            f"Empty context in transition: tactic={tactic}, value_target={value_target}"
+        )
+        assert tactic, (
+            f"Empty tactic in transition: context={context}, value_target={value_target}"
+        )
+        assert value_target is not None, (
+            f"None value_target in transition: context={context}, tactic={tactic}"
+        )
+        out.append((context, tactic, value_target))
+    return out
 
 
 def step_dir(run_dir: str, step: int) -> str:
@@ -359,11 +390,12 @@ class ReplayBuffer:
         """Repopulate ``self.buffer`` from every collection shard in ``run_dir``.
 
         Each rank reads the same files independently, so no broadcast is
-        needed. FIFO-truncates to ``window_size`` to match the eviction
-        policy of the live buffer.
+        needed. Transitions are cleaned by :func:`_clean_transitions` so a
+        resumed buffer holds the same shape as a live one. FIFO-truncates to
+        ``window_size`` to match the eviction policy of the live buffer.
         """
         info0(logger, f"Loading replay buffer from {run_dir}")
-        transitions = load_collected_transitions(run_dir)
+        transitions = _clean_transitions(load_collected_transitions(run_dir))
         if len(transitions) > self.window_size:
             transitions = transitions[-self.window_size :]
         self.buffer = transitions
@@ -538,34 +570,17 @@ class CollectedExperience:
         self._train_seen += 1
 
     def num_transitions(self) -> int:
-        with self._lock:
-            return sum(len(a.transitions) for a in self.attempts)
+        """Count transitions that will actually flow into the replay buffer
+        (i.e. post length-cap filtering). The prover's collect barrier polls
+        this, so it must agree with :meth:`transitions`."""
+        return len(self.transitions())
 
     def transitions(self) -> list[tuple[str, str, float]]:
-        """All transitions across all proven attempts, filtered by the global
-        state/tactic length limits."""
+        """All transitions across all proven attempts, cleaned + filtered by
+        the global state/tactic length limits."""
         with self._lock:
             raw = [t for a in self.attempts for t in a.transitions]
-        out: list[tuple[str, str, float]] = []
-        for context, tactic, value_target in raw:
-            context = context.strip()
-            tactic = tactic.strip()
-            if (
-                len(context) > GLOBAL_CONFIG.state_max_len
-                or len(tactic) > GLOBAL_CONFIG.tactic_max_len
-            ):
-                continue
-            assert len(context) != 0, (
-                f"Empty context in transition: tactic={tactic}, value_target={value_target}"
-            )
-            assert len(tactic) != 0, (
-                f"Empty tactic in transition: context={context}, value_target={value_target}"
-            )
-            assert value_target is not None, (
-                f"None value_target in transition: context={context}, tactic={tactic}"
-            )
-            out.append((context, tactic, value_target))
-        return out
+        return _clean_transitions(raw)
 
     def save(self, phase_dir: str) -> None:
         """Write ``theorems.jsonl``, ``generated_tactics.jsonl`` and
