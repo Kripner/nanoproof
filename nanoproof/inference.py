@@ -71,6 +71,8 @@ class TacticModel:
     num_samples: int
     seed: int
     first_token_occurrences_cap: int | None = None
+    max_prompt_len: int = 512
+    max_gen_tokens: int = 24
 
     def __post_init__(self):
         self.rng = torch.Generator(device=self.network.get_device())
@@ -87,28 +89,32 @@ class TacticModel:
         """Sample tactics and predict value for a state string. Returns (tactics, value)."""
         return self.sample_tactic_from_str_batch([state_str])[0]
 
-    def _max_prompt_len(self) -> int:
-        """Maximum tokenized prompt length the model accepts.
-
-        RoPE tables are allocated for sequence_len * 10; we cap prompts at * 9
-        to leave headroom for up to ~64 generated tokens.
-        """
-        return self.network.config.sequence_len * 9
-
-    def prepare_tactic_prompt(self, state_str: str) -> tuple[list[int], bool]:
+    def prepare_tactic_prompt(self, state_str: str) -> list[int]:
         """Tokenize a state string for tactic generation.
 
-        Returns (prompt_tokens, is_too_long). When too_long, prompt_tokens is a
-        single-token dummy and the caller is expected to surface an error for
-        that index. Single source of truth for the tactic-prompt format and the
-        oversized-prompt substitution; reused by BlockingTacticModel for its
-        KV-cache budget.
+        When the tokenized prompt exceeds ``self.max_prompt_len``, the state
+        suffix is dropped and the trailing ``\\n<|tactic|>`` marker is
+        re-attached so the model still knows it's generating a tactic. Single
+        source of truth for the tactic-prompt format and the truncation rule;
+        reused by BlockingTacticModel for its KV-cache budget.
         """
+        return self._prepare_prompt(state_str, "\n<|tactic|>")
+
+    def _prepare_prompt(self, state_str: str, suffix: str) -> list[int]:
+        """Tokenize ``state_str + suffix`` with BOS, truncating the state
+        portion when the result exceeds ``self.max_prompt_len``. The suffix
+        marker is always preserved at the tail of the returned token list."""
         bos = self.tokenizer.get_bos_token_id()
-        tokens = self.tokenizer(state_str + "\n<|tactic|>", prepend=bos)
-        if len(tokens) > self._max_prompt_len():
-            return [bos], True
-        return tokens, False
+        tokens = self.tokenizer(state_str + suffix, prepend=bos)
+        if len(tokens) <= self.max_prompt_len:
+            return tokens
+        # Re-tokenize the suffix in isolation so we can re-attach it after
+        # dropping the state tail. The boundary token between state and
+        # suffix may differ slightly from the joint tokenization, but this
+        # path only fires for the long-prompt tail.
+        suffix_tokens = self.tokenizer(suffix)
+        prefix_budget = self.max_prompt_len - len(suffix_tokens)
+        return tokens[:prefix_budget] + suffix_tokens
 
     def sample_tactic_from_str_batch(
         self, state_strs: list[str]
@@ -122,13 +128,7 @@ class TacticModel:
         assert device.type == "cuda"
 
         # Prepare tokenized prompts for tactic generation
-        tactic_prompts = []
-        too_long_indices = set()
-        for idx, state_str in enumerate(state_strs):
-            tokens, too_long = self.prepare_tactic_prompt(state_str)
-            tactic_prompts.append(tokens)
-            if too_long:
-                too_long_indices.add(idx)
+        tactic_prompts = [self.prepare_tactic_prompt(s) for s in state_strs]
 
         # Generate tactics
         seed = torch.randint(
@@ -138,7 +138,7 @@ class TacticModel:
             tactic_prompts,
             num_samples=self.num_samples,
             min_tokens=1,
-            max_tokens=64,
+            max_tokens=self.max_gen_tokens,
             first_token_occurrences_cap=self.first_token_occurrences_cap,
             seed=seed,
         )
@@ -146,9 +146,6 @@ class TacticModel:
         # Decode tactics
         tactics_results = []
         for prompt_idx in range(len(state_strs)):
-            if prompt_idx in too_long_indices:
-                tactics_results.append([])
-                continue
             tactics = []
             for sample_idx in range(self.num_samples):
                 tactic_toks = [
@@ -176,21 +173,9 @@ class TacticModel:
         gc.collect()
         torch.cuda.empty_cache()
 
-        # Prepare prompts for value prediction
-        value_delim_tok = self.tokenizer.encode_special("<|value|>")
+        # Prepare prompts for value prediction (truncated like tactic prompts)
         bin_token_ids = self.tokenizer.get_value_token_ids()
-
-        value_prompts = []
-        for idx, state_str in enumerate(state_strs):
-            if idx in too_long_indices:
-                value_prompts.append(
-                    [self.tokenizer.get_bos_token_id(), value_delim_tok]
-                )
-            else:
-                tokens = self.tokenizer(
-                    state_str + "\n<|value|>", prepend=self.tokenizer.get_bos_token_id()
-                )
-                value_prompts.append(tokens)
+        value_prompts = [self._prepare_prompt(s, "\n<|value|>") for s in state_strs]
 
         # Predict values
         _, _, value_logits = self.engine.generate_batch(
@@ -212,17 +197,10 @@ class TacticModel:
         values_list = values.tolist()
 
         # Combine results
-        results = []
-        for idx in range(len(state_strs)):
-            if idx in too_long_indices:
-                results.append(
-                    ValueOrError.from_error("State too long for model's rotary cache")
-                )
-            else:
-                results.append(
-                    ValueOrError.from_success((tactics_results[idx], values_list[idx]))
-                )
-        return results
+        return [
+            ValueOrError.from_success((tactics_results[idx], values_list[idx]))
+            for idx in range(len(state_strs))
+        ]
 
     def shutdown(self):
         """No-op for non-batched model. Exists for API compatibility with BlockingTacticModel."""
@@ -243,6 +221,8 @@ class TacticModel:
         model_path: str,
         seed: int = 0,
         first_token_occurrences_cap: int | None = None,
+        max_prompt_len: int = 512,
+        max_gen_tokens: int = 24,
     ) -> Self:
         model, tokenizer, _ = load_model(model_path, torch.device("cuda"), phase="eval")
         engine = Engine(model, tokenizer)
@@ -253,6 +233,8 @@ class TacticModel:
             num_samples=num_samples,
             seed=seed,
             first_token_occurrences_cap=first_token_occurrences_cap,
+            max_prompt_len=max_prompt_len,
+            max_gen_tokens=max_gen_tokens,
         )
 
 
@@ -356,8 +338,7 @@ class BlockingTacticModel:
         actual prompt that will be fed to Engine.generate, including the
         single-token dummy substitution for oversized prompts.
         """
-        tokens, _ = self.inner_model.prepare_tactic_prompt(state_str)
-        return len(tokens)
+        return len(self.inner_model.prepare_tactic_prompt(state_str))
 
     def _pending_gen_samples(self) -> int:
         """Number of generation samples if pending items were batched now."""

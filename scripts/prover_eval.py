@@ -134,6 +134,12 @@ def main():
         help="cap on how many sampled tactics may share the same first token "
         "(per state). None disables the cap.",
     )
+    parser.add_argument(
+        "--max-gen-tokens",
+        type=int,
+        default=24,
+        help="hard cap on tokens generated per tactic sample.",
+    )
     parser.add_argument("--batch-time-limit", type=float, default=0.5)
     parser.add_argument(
         "--batch-max-gen-samples",
@@ -279,6 +285,7 @@ def main():
         num_samples=args.num_sampled_tactics,
         model_path=args.model_path,
         first_token_occurrences_cap=args.first_token_occurrences_cap,
+        max_gen_tokens=args.max_gen_tokens,
     )
     # Defer max_gen_samples default until we know num_actors
     tactic_model = BlockingTacticModel(

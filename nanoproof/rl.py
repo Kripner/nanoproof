@@ -139,6 +139,12 @@ parser.add_argument(
     help="cap on how many sampled tactics may share the same first token "
     "(per state). None disables the cap.",
 )
+parser.add_argument(
+    "--max-gen-tokens",
+    type=int,
+    default=24,
+    help="hard cap on tokens generated per tactic sample.",
+)
 parser.add_argument("--num-simulations-eval", type=int, default=64)
 parser.add_argument("--collect-every", type=int, default=1)
 parser.add_argument("--collect-transitions", type=int, default=100)
@@ -251,6 +257,7 @@ inner_tactic_model = TacticModel.create(
     num_samples=args.num_sampled_tactics,
     model_path=args.model_path,
     first_token_occurrences_cap=args.first_token_occurrences_cap,
+    max_gen_tokens=args.max_gen_tokens,
 )
 tactic_model = BlockingTacticModel(
     inner_model=inner_tactic_model,

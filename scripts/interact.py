@@ -34,13 +34,13 @@ if MODE == "raw_engine":
         if batch_size > 1:
             batched = [tokens] * batch_size
             sample_toks, masks = engine.generate_batch(
-                batched, num_samples=num_samples, min_tokens=1, max_tokens=64, first_token_occurrences_cap=first_token_occurrences_cap,
+                batched, num_samples=num_samples, min_tokens=1, max_tokens=24, first_token_occurrences_cap=first_token_occurrences_cap,
             )
             sample_toks = [s for row in sample_toks for s in row]
             masks = [m for row in masks for m in row]
         else:
             sample_toks, masks = engine.generate_batch(
-                tokens, num_samples=num_samples, min_tokens=1, max_tokens=64, first_token_occurrences_cap=first_token_occurrences_cap,
+                tokens, num_samples=num_samples, min_tokens=1, max_tokens=24, first_token_occurrences_cap=first_token_occurrences_cap,
             )
         return [
             tokenizer.decode([t for t, m in zip(sample_toks[i], masks[i]) if m == 1])
