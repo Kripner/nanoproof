@@ -34,6 +34,8 @@ class SearchConfig:
     value_discount: float  # discount applied to values during backprop
     prior_temperature: float  # softmax temperature applied to action logprobs at expansion
     no_legal_actions_value: float  # fallback value when MCTS reaches a node with no legal actions
+    c_and: float  # AND-node prior multiplier (cAND in AlphaProof)
+    unvisited_value_penalty: float  # subtracted from parent value to estimate V for unvisited children
     ps_c: float  # progressive sampling coefficient
     ps_alpha: float  # progressive sampling exponent
     verify_timeout: int  # ms timeout for tactic re-check in verify_node
@@ -46,6 +48,8 @@ class SearchConfig:
             "value_discount": 0.98,
             "prior_temperature": 200.0,
             "no_legal_actions_value": -5.0,
+            "c_and": 64.0,
+            "unvisited_value_penalty": 16.0,
             "ps_c": 0.1,
             "ps_alpha": 0.6,
             "verify_timeout": 5000,
@@ -569,14 +573,17 @@ def ucb_score(config: SearchConfig, parent: Node, child: Node) -> float:
         + config.pb_c_init
     )
     pb_c *= math.sqrt(parent.visit_count) / (child.visit_count + 1)
+    if parent.to_play == Player.AND:
+        pb_c *= config.c_and
 
     # Due to progressive sampling, we normalise priors here.
     prior_score = pb_c * child.prior / parent.prior_sum()
     if child.visit_count > 0:
         value = child.reward + child.value()
-        value_score = config.value_discount ** (-1 - value)
     else:
-        value_score = 0  # TODO: this is from the official pseudocode, but probably could be improved
+        # Unvisited children: V(s,a) = V(parent) - penalty (AlphaProof paper).
+        value = parent.value() - config.unvisited_value_penalty
+    value_score = config.value_discount ** (-1 - value)
 
     if parent.to_play == Player.AND:
         # Invert value score for AND nodes.
