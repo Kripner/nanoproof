@@ -410,6 +410,25 @@ class ProverWorker:
         logger.info(f"Collection complete: {delta} new transitions")
         return delta
 
+    def pause_actors(self) -> None:
+        """Park all actors at the mode condvar and drain in-flight proofs.
+
+        Used to free the GIL on the master rank before phases where the
+        main thread needs uncontested model access (policy eval, training).
+        Without this, the 126 actor threads keep POST'ing to the inference
+        balancer; the resulting GIL pressure can starve the main thread's
+        forward pass long enough for the NCCL watchdog to fire on workers
+        waiting at the next collective."""
+        self._park_and_drain(target_label="pause")
+
+    def resume_actors(self) -> None:
+        """Restore the actor mode set by the last :meth:`install_collect`
+        (or stay parked in idle if collect was never installed)."""
+        with self._mode_cv:
+            self._mode = "collect" if self._matchmaker is not None else "idle"
+            self._release_event.clear()
+            self._mode_cv.notify_all()
+
     @torch.no_grad()
     def evaluate(
         self,

@@ -504,6 +504,15 @@ while True:
         rl_monitor.set_phase("evaluating")
         eval_experience = CollectedExperience()
 
+        # Park actors on master before policy eval. Otherwise 126 actor
+        # threads keep POST'ing tactics to the inference balancer; the
+        # GIL+CUDA-stream contention starves master's eval forward and the
+        # workers' NCCL allreduce at the end of eval_tactic_accuracy times
+        # out. prover.evaluate() below does its own switch_to_eval, so we
+        # don't need to resume between policy eval and prover eval.
+        if master_process and prover is not None:
+            prover.pause_actors()
+
         # Policy evaluation (all ranks, uses DDP collectives internally)
         eval_steps = 200
         build_val_loader = lambda: sft_data_generator(
