@@ -16,8 +16,8 @@ function formatMs(ms: number): string {
 }
 
 export function StatsPanel({ collection, training, phase, replayBufferSize, evalProgress, evalHistory }: StatsPanelProps) {
-  const expansionsPerSecond = collection.total_elapsed > 0 
-    ? collection.expansions / collection.total_elapsed 
+  const expansionsPerSecond = collection.elapsed > 0
+    ? collection.expansions / collection.elapsed
     : 0;
 
   return (
