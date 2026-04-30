@@ -55,6 +55,12 @@ def main():
         default=8,
         help="Static batch size (number of prompts per batch)",
     )
+    parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=6,
+        help="Number of tactic samples generated per prompt",
+    )
     parser.add_argument("--warmup-seconds", type=float, default=5.0)
     parser.add_argument("--benchmark-seconds", type=float, default=30.0)
     parser.add_argument(
@@ -78,7 +84,7 @@ def main():
 
     print(f"Loading model from {args.model_path}")
     model = TacticModel.create(
-        num_samples=1, model_path=args.model_path, seed=args.seed
+        num_samples=args.num_samples, model_path=args.model_path, seed=args.seed
     )
 
     # Pre-tokenize every state once; drop ones that exceed the prompt budget.
@@ -102,7 +108,7 @@ def main():
     def run_one_batch(batch_prompts, seed):
         results, masks = model.engine.generate_batch(
             batch_prompts,
-            num_samples=1,
+            num_samples=args.num_samples,
             min_tokens=args.gen_tokens,
             max_tokens=args.gen_tokens,
             temperature=args.temperature,
@@ -111,7 +117,8 @@ def main():
         # results[prompt_idx][sample_idx] is the prompt + generated tokens (minus eos/bos).
         generated = 0
         for i, p in enumerate(batch_prompts):
-            generated += len(results[i][0]) - len(p)
+            for s in range(args.num_samples):
+                generated += len(results[i][s]) - len(p)
         return generated
 
     def run_phase(duration_s, label, cursor, seed_base):
@@ -136,7 +143,7 @@ def main():
             latencies.append(t1 - t0)
             n_batches += 1
             n_generated += gen
-            n_samples += args.batch_size
+            n_samples += args.batch_size * args.num_samples
         elapsed = time.perf_counter() - phase_start
         print(
             f"[{label}] {elapsed:.2f}s elapsed, {n_batches} batches, "
@@ -145,8 +152,8 @@ def main():
         return cursor, n_batches, n_samples, n_generated, latencies, elapsed
 
     print(
-        f"\nBatch size: {args.batch_size}, gen_tokens: {args.gen_tokens}, "
-        f"temperature: {args.temperature}"
+        f"\nBatch size: {args.batch_size}, num_samples: {args.num_samples}, "
+        f"gen_tokens: {args.gen_tokens}, temperature: {args.temperature}"
     )
     print(f"Warmup: {args.warmup_seconds}s, benchmark: {args.benchmark_seconds}s\n")
 
