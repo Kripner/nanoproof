@@ -65,27 +65,97 @@ def _tee_fd(target_fd: int, log_path: str, line_prefix: bytes) -> None:
     that flows through to ``log_path`` and echoes it to the original fd so the
     terminal still shows live output. With a non-empty ``line_prefix``, the
     prefix is prepended to every line written to the file (terminal echo
-    inherits the prefix too, which is fine - it disambiguates rank > 0)."""
+    inherits the prefix too, which is fine - it disambiguates rank > 0).
+
+    The reader survives transient I/O failures on either sink: a single failed
+    write is logged once to /tmp and the sink is dropped, but the other keeps
+    going. If the reader cannot continue at all (e.g. an unexpected exception
+    on the read path), it restores ``saved_fd`` over ``target_fd`` and closes
+    the pipe before exiting, so subsequent writes from the main thread either
+    succeed against the original fd or raise BrokenPipeError - never silently
+    deadlock on pipe_write to a pipe nobody is draining."""
     saved_fd = os.dup(target_fd)
     r, w = os.pipe()
     os.dup2(w, target_fd)
     os.close(w)
 
+    def _emergency_log(msg: str) -> None:
+        try:
+            with open("/tmp/nanoproof-tee-crash.log", "a") as crash:
+                crash.write(f"[{datetime.now().isoformat(timespec='seconds')}] {msg}\n")
+        except Exception:
+            pass
+
+    def _write_all(fd: int, data: bytes) -> None:
+        view = memoryview(data)
+        while view:
+            n = os.write(fd, view)
+            view = view[n:]
+
     def _reader():
-        f = open(log_path, "ab", buffering=0)
+        f: Any = None
+        echo_alive = True
+        try:
+            f = open(log_path, "ab", buffering=0)
+        except Exception as e:
+            _emergency_log(f"tee-fd{target_fd}: open({log_path}) failed: {e!r}")
         buf = b""
-        while True:
-            chunk = os.read(r, 65536)
-            if not chunk:
-                break
-            os.write(saved_fd, chunk)
-            if line_prefix:
-                buf += chunk
-                while b"\n" in buf:
-                    line, _, buf = buf.partition(b"\n")
-                    f.write(line_prefix + line + b"\n")
-            else:
-                f.write(chunk)
+        try:
+            while True:
+                chunk = os.read(r, 65536)
+                if not chunk:
+                    break
+                if echo_alive:
+                    try:
+                        _write_all(saved_fd, chunk)
+                    except Exception as e:
+                        echo_alive = False
+                        _emergency_log(
+                            f"tee-fd{target_fd}: terminal echo disabled: {e!r}"
+                        )
+                if f is not None:
+                    try:
+                        if line_prefix:
+                            buf += chunk
+                            while b"\n" in buf:
+                                line, _, buf = buf.partition(b"\n")
+                                f.write(line_prefix + line + b"\n")
+                        else:
+                            f.write(chunk)
+                    except Exception as e:
+                        _emergency_log(
+                            f"tee-fd{target_fd}: log write to {log_path} failed: {e!r}"
+                        )
+                        try:
+                            f.close()
+                        except Exception:
+                            pass
+                        f = None
+                if not echo_alive and f is None:
+                    _emergency_log(
+                        f"tee-fd{target_fd}: both sinks dead, restoring saved_fd"
+                    )
+                    break
+        except BaseException as e:
+            _emergency_log(f"tee-fd{target_fd}: reader crashed: {type(e).__name__}: {e}")
+        finally:
+            # Restore the original fd so future writes from the main thread go
+            # straight to the saved terminal/log, then close the pipe read end
+            # so any writer currently blocked in pipe_write wakes with EPIPE
+            # instead of hanging forever.
+            try:
+                os.dup2(saved_fd, target_fd)
+            except Exception:
+                pass
+            try:
+                os.close(r)
+            except Exception:
+                pass
+            if f is not None:
+                try:
+                    f.close()
+                except Exception:
+                    pass
 
     threading.Thread(target=_reader, daemon=True, name=f"tee-fd{target_fd}").start()
 
