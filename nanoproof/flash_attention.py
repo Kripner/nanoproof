@@ -76,6 +76,39 @@ USE_FA3 = _resolve_use_fa3()
 # =============================================================================
 # SDPA helpers
 # =============================================================================
+def _detect_enable_gqa_support():
+    """Probe whether F.scaled_dot_product_attention accepts enable_gqa.
+    ROCm builds and some older CUDA builds reject the kwarg."""
+    if not torch.cuda.is_available():
+        device = "cpu"
+    else:
+        device = "cuda"
+    try:
+        q = torch.zeros(1, 2, 1, 8, device=device)
+        k = torch.zeros(1, 1, 1, 8, device=device)
+        v = torch.zeros(1, 1, 1, 8, device=device)
+        F.scaled_dot_product_attention(q, k, v, enable_gqa=True)
+        return True
+    except (TypeError, RuntimeError):
+        return False
+
+
+_SUPPORTS_ENABLE_GQA = _detect_enable_gqa_support()
+
+
+def _sdpa(q, k, v, enable_gqa=False, **kwargs):
+    """SDPA wrapper that emulates enable_gqa via head expansion when unsupported."""
+    if enable_gqa and not _SUPPORTS_ENABLE_GQA:
+        Hq, Hk = q.size(1), k.size(1)
+        assert Hq % Hk == 0, f"GQA requires Hq ({Hq}) divisible by Hk ({Hk})"
+        repeats = Hq // Hk
+        k = k.repeat_interleave(repeats, dim=1)
+        v = v.repeat_interleave(repeats, dim=1)
+    elif _SUPPORTS_ENABLE_GQA:
+        kwargs["enable_gqa"] = enable_gqa
+    return F.scaled_dot_product_attention(q, k, v, **kwargs)
+
+
 def _sdpa_attention(q, k, v, window_size, enable_gqa):
     """
     SDPA attention with sliding window support.
@@ -87,9 +120,7 @@ def _sdpa_attention(q, k, v, window_size, enable_gqa):
 
     # Full context, same length
     if (window < 0 or window >= Tq) and Tq == Tk:
-        return F.scaled_dot_product_attention(
-            q, k, v, is_causal=True, enable_gqa=enable_gqa
-        )
+        return _sdpa(q, k, v, is_causal=True, enable_gqa=enable_gqa)
 
     # Single token generation
     if Tq == 1:
@@ -98,9 +129,7 @@ def _sdpa_attention(q, k, v, window_size, enable_gqa):
             start = max(0, Tk - (window + 1))
             k = k[:, :, start:, :]
             v = v[:, :, start:, :]
-        return F.scaled_dot_product_attention(
-            q, k, v, is_causal=False, enable_gqa=enable_gqa
-        )
+        return _sdpa(q, k, v, is_causal=False, enable_gqa=enable_gqa)
 
     # Need explicit mask for sliding window/chunk inference
     device = q.device
@@ -113,9 +142,7 @@ def _sdpa_attention(q, k, v, window_size, enable_gqa):
     if window >= 0 and window < Tk:
         mask = mask & ((row_idx - col_idx) <= window)
 
-    return F.scaled_dot_product_attention(
-        q, k, v, attn_mask=mask, enable_gqa=enable_gqa
-    )
+    return _sdpa(q, k, v, attn_mask=mask, enable_gqa=enable_gqa)
 
 
 # =============================================================================
@@ -230,7 +257,7 @@ def flash_attn_with_kvcache(
     k_sdpa = k_cache[:, :end_pos, :, :].transpose(1, 2)
     v_sdpa = v_cache[:, :end_pos, :, :].transpose(1, 2)
     enable_gqa = q_sdpa.size(1) != k_sdpa.size(1)
-    y_sdpa = F.scaled_dot_product_attention(
+    y_sdpa = _sdpa(
         q_sdpa, k_sdpa, v_sdpa, attn_mask=mask.unsqueeze(1), enable_gqa=enable_gqa
     )
     return y_sdpa.transpose(1, 2)
