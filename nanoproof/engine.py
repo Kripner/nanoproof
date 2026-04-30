@@ -7,15 +7,17 @@ KV Cache designed for Flash Attention 3's flash_attn_with_kvcache API:
 - Position tracked per batch element via cache_seqlens tensor
 
 Engine supports batched generation with variable-length prompts:
-- Each prompt is prefilled individually (batch=1), avoiding padding/masking
-- After prefill, KV caches are combined and decode proceeds in a single batch
-- For equal-length prompts, batched prefill is used (single forward pass)
+- Single fused B=num_prompts prefill at T=max_prompt_len (right-padded with BOS)
+- K/V copied into the decode cache and replicated num_samples times per prompt
+- Per-row cache_seqlens=real_lens[i] keeps padded slots invisible to decode
+- Decode then runs as a normal B=total_rows loop with FA3 / SDPA per-row positions
 """
 
 import torch
 import torch.nn.functional as F
 
 from nanoproof.common import COMPUTE_DTYPE, maybe_dump_memory_snapshot
+from nanoproof.model import norm
 
 
 class KVCache:
@@ -69,38 +71,13 @@ class KVCache:
         self.cache_seqlens.zero_()
         self.prev_embedding = None
 
-    def get_pos(self):
-        """Get current position (assumes all batch elements at same position)."""
-        return self.cache_seqlens[0].item()
-
     def get_layer_cache(self, layer_idx):
         """Return (k_cache, v_cache) views for a specific layer."""
         return self.k_cache[layer_idx], self.v_cache[layer_idx]
 
     def advance(self, num_tokens):
-        """Advance the cache position by num_tokens."""
+        """Advance the cache position by num_tokens (per-row)."""
         self.cache_seqlens += num_tokens
-
-    def prefill(self, other):
-        """
-        Copy cached KV from another cache into this one.
-        Used when we do batch=1 prefill and then want to generate multiple samples in parallel.
-        """
-        assert self.get_pos() == 0, "Cannot prefill a non-empty KV cache"
-        assert (
-            self.n_layers == other.n_layers
-            and self.n_heads == other.n_heads
-            and self.head_dim == other.head_dim
-        )
-        assert self.max_seq_len >= other.max_seq_len
-        other_pos = other.get_pos()
-        self.k_cache[:, :, :other_pos, :, :] = other.k_cache[:, :, :other_pos, :, :]
-        self.v_cache[:, :, :other_pos, :, :] = other.v_cache[:, :, :other_pos, :, :]
-        self.cache_seqlens.fill_(other_pos)
-        if other.prev_embedding is not None:
-            self.prev_embedding = other.prev_embedding.expand(
-                self.batch_size, -1, -1
-            ).clone()
 
 
 # -----------------------------------------------------------------------------
@@ -247,11 +224,12 @@ class Engine:
 
         kv_kwargs = self._kv_model_kwargs()
 
-        # 1) Prefill: process each prompt individually, collect logits
+        # 1) Batched padded prefill: one fused B=num_prompts forward pass.
         prompt_lengths = [len(p) for p in prompts]
         max_prompt_len = max(prompt_lengths)
+        real_lens = torch.tensor(prompt_lengths, dtype=torch.int32, device=device)
 
-        # Determine decode cache size
+        # Decode cache size: max prompt + space for generated tokens.
         kv_length_hint = (
             (max_prompt_len + max_tokens)
             if max_tokens is not None
@@ -259,11 +237,39 @@ class Engine:
         )
 
         kv_cache_decode = None
+        kv_cache_prefill = None
         try:
-            # Prefill each prompt individually, then copy into the shared
-            # decode cache.  This avoids allocating a separate prefill KV
-            # cache for the whole batch (which would coexist with the decode
-            # cache and double peak memory).
+            # Right-pad all prompts to max_prompt_len with BOS for the fused
+            # forward. Pad slots are written as gibberish K/V in the prefill
+            # cache but are never read during decode (cache_seqlens[i] keeps
+            # row i's effective length at real_lens[i]).
+            ids = torch.full(
+                (num_prompts, max_prompt_len), bos, dtype=torch.long, device=device
+            )
+            for i, prompt in enumerate(prompts):
+                ids[i, : len(prompt)] = torch.tensor(
+                    prompt, dtype=torch.long, device=device
+                )
+
+            kv_cache_prefill = KVCache(
+                batch_size=num_prompts,
+                seq_len=max_prompt_len,
+                device=device,
+                dtype=dtype,
+                **kv_kwargs,
+            )
+            prefill_logits = self.model.forward(ids, kv_cache=kv_cache_prefill)
+            # (num_prompts, max_prompt_len, vocab); read each row's last real position
+            gathered = prefill_logits[
+                torch.arange(num_prompts, device=device), real_lens.long() - 1, :
+            ].clone()  # (num_prompts, vocab) - clone releases the full prefill_logits
+            del prefill_logits
+            logits = gathered.repeat_interleave(num_samples, dim=0)  # (total_rows, vocab)
+
+            # Allocate decode cache and copy prefill K/V over with num_samples
+            # replication. We copy the entire 0..max_prompt_len slab; per-row
+            # cache_seqlens below ensures pad slots beyond real_lens[i] are
+            # ignored at decode time.
             kv_cache_decode = KVCache(
                 batch_size=total_rows,
                 seq_len=kv_length_hint,
@@ -271,45 +277,30 @@ class Engine:
                 dtype=dtype,
                 **kv_kwargs,
             )
-            all_logits = []
-            for i, prompt in enumerate(prompts):
-                ids = torch.tensor([prompt], dtype=torch.long, device=device)
-                kv_single = KVCache(
-                    batch_size=1,
-                    seq_len=len(prompt),
-                    device=device,
-                    dtype=dtype,
-                    **kv_kwargs,
+            kv_cache_decode.k_cache[:, :, :max_prompt_len, :, :] = (
+                kv_cache_prefill.k_cache.repeat_interleave(num_samples, dim=1)
+            )
+            kv_cache_decode.v_cache[:, :, :max_prompt_len, :, :] = (
+                kv_cache_prefill.v_cache.repeat_interleave(num_samples, dim=1)
+            )
+            kv_cache_decode.cache_seqlens = real_lens.repeat_interleave(num_samples)
+
+            # Patch prev_embedding for smear: the prefill stored x[:, -1, :]
+            # which is the PAD position's embedding for short rows. Replace
+            # per-row with each prompt's real-last-token post-norm embedding.
+            if kv_cache_prefill.prev_embedding is not None:
+                last_token_ids = torch.tensor(
+                    [p[-1] for p in prompts], dtype=torch.long, device=device
                 )
-                prompt_logits = self.model.forward(ids, kv_cache=kv_single)
-                # .clone() to release the full (1, prompt_len, vocab) tensor.
-                prompt_logits = prompt_logits[:, -1, :].clone()  # (1, vocab_size)
-                pos = kv_single.get_pos()
-                # Copy into decode cache for each sample
-                for j in range(num_samples):
-                    row_idx = i * num_samples + j
-                    kv_cache_decode.k_cache[:, row_idx : row_idx + 1, :pos, :, :] = (
-                        kv_single.k_cache[:, :, :pos, :, :]
-                    )
-                    kv_cache_decode.v_cache[:, row_idx : row_idx + 1, :pos, :, :] = (
-                        kv_single.v_cache[:, :, :pos, :, :]
-                    )
-                    kv_cache_decode.cache_seqlens[row_idx] = pos
-                    if kv_single.prev_embedding is not None:
-                        if kv_cache_decode.prev_embedding is None:
-                            kv_cache_decode.prev_embedding = torch.zeros(
-                                total_rows,
-                                1,
-                                self.model.config.n_embd,
-                                device=device,
-                                dtype=dtype,
-                            )
-                        kv_cache_decode.prev_embedding[row_idx] = (
-                            kv_single.prev_embedding[0]
-                        )
-                all_logits.append(prompt_logits.expand(num_samples, -1))
-                del kv_single
-            logits = torch.cat(all_logits, dim=0)  # (total_rows, vocab_size)
+                last_emb = norm(
+                    self.model.transformer.wte(last_token_ids).to(dtype)
+                )  # (num_prompts, n_embd)
+                kv_cache_decode.prev_embedding = (
+                    last_emb.repeat_interleave(num_samples, dim=0).unsqueeze(1)
+                )
+
+            del kv_cache_prefill
+            kv_cache_prefill = None
 
             # 2) Decode loop
             row_states = [
@@ -399,9 +390,13 @@ class Engine:
             )
             raise
         finally:
-            # Explicitly free the KV cache. @torch.inference_mode() on a generator
-            # can prevent proper frame teardown on GeneratorExit, leaving the huge
-            # KV cache tensors alive. The finally block guarantees cleanup.
+            # Explicitly free the KV caches. @torch.inference_mode() on a
+            # generator can prevent proper frame teardown on GeneratorExit,
+            # leaving the huge KV cache tensors alive. This finally block
+            # guarantees cleanup of both prefill and decode caches.
+            if kv_cache_prefill is not None:
+                del kv_cache_prefill.k_cache, kv_cache_prefill.v_cache
+                del kv_cache_prefill
             if kv_cache_decode is not None:
                 del kv_cache_decode.k_cache, kv_cache_decode.v_cache
                 del kv_cache_decode

@@ -183,29 +183,57 @@ def flash_attn_with_kvcache(
             window_size=window_size,
         )
 
-    # SDPA fallback: manually manage KV cache
+    # SDPA fallback: manually manage KV cache. When cache_seqlens is uniform
+    # we use the standard fast path (slice write + _sdpa_attention with
+    # native is_causal / window-trim shortcuts). When it's heterogeneous
+    # (variable-length prefill), we fall back to per-row writes and an
+    # explicit per-row attention mask.
     B, T_new, H, D = q.shape
-    pos = cache_seqlens[0].item()  # assume uniform position across batch
+    device = q.device
+    is_uniform = bool((cache_seqlens == cache_seqlens[0]).all().item())
 
-    # Insert new k, v into cache (in-place, matching FA3 behavior)
+    if is_uniform:
+        pos = cache_seqlens[0].item()
+        if k is not None and v is not None:
+            k_cache[:, pos : pos + T_new, :, :] = k
+            v_cache[:, pos : pos + T_new, :, :] = v
+        end_pos = pos + T_new
+        q_sdpa = q.transpose(1, 2)
+        k_sdpa = k_cache[:, :end_pos, :, :].transpose(1, 2)
+        v_sdpa = v_cache[:, :end_pos, :, :].transpose(1, 2)
+        enable_gqa = q_sdpa.size(1) != k_sdpa.size(1)
+        y_sdpa = _sdpa_attention(q_sdpa, k_sdpa, v_sdpa, window_size, enable_gqa)
+        return y_sdpa.transpose(1, 2)
+
+    # Heterogeneous: per-row write (vectorized for T_new=1 to avoid B
+    # GPU<->CPU syncs from .item() inside a Python loop).
     if k is not None and v is not None:
-        k_cache[:, pos : pos + T_new, :, :] = k
-        v_cache[:, pos : pos + T_new, :, :] = v
+        if T_new == 1:
+            b_idx = torch.arange(B, device=device)
+            k_cache[b_idx, cache_seqlens.long(), :, :] = k[:, 0, :, :]
+            v_cache[b_idx, cache_seqlens.long(), :, :] = v[:, 0, :, :]
+        else:
+            for b in range(B):
+                p = cache_seqlens[b].item()
+                k_cache[b, p : p + T_new, :, :] = k[b]
+                v_cache[b, p : p + T_new, :, :] = v[b]
 
-    # Get full cache up to current position + new tokens
-    end_pos = pos + T_new
-    k_full = k_cache[:, :end_pos, :, :]
-    v_full = v_cache[:, :end_pos, :, :]
+    end_pos = int((cache_seqlens + T_new).max().item())
+    q_pos = cache_seqlens.long().unsqueeze(1) + torch.arange(T_new, device=device).unsqueeze(0)
+    k_pos = torch.arange(end_pos, device=device)
+    mask = k_pos[None, None, :] <= q_pos[:, :, None]  # (B, T_new, end_pos)
+    window = window_size[0]
+    if 0 <= window < end_pos:
+        mask = mask & ((q_pos[:, :, None] - k_pos[None, None, :]) <= window)
 
-    # Transpose to SDPA layout: (B, T, H, D) -> (B, H, T, D)
     q_sdpa = q.transpose(1, 2)
-    k_sdpa = k_full.transpose(1, 2)
-    v_sdpa = v_full.transpose(1, 2)
-
+    k_sdpa = k_cache[:, :end_pos, :, :].transpose(1, 2)
+    v_sdpa = v_cache[:, :end_pos, :, :].transpose(1, 2)
     enable_gqa = q_sdpa.size(1) != k_sdpa.size(1)
-    y_sdpa = _sdpa_attention(q_sdpa, k_sdpa, v_sdpa, window_size, enable_gqa)
-
-    return y_sdpa.transpose(1, 2)  # back to (B, T, H, D)
+    y_sdpa = F.scaled_dot_product_attention(
+        q_sdpa, k_sdpa, v_sdpa, attn_mask=mask.unsqueeze(1), enable_gqa=enable_gqa
+    )
+    return y_sdpa.transpose(1, 2)
 
 
 # =============================================================================

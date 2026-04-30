@@ -415,8 +415,20 @@ class Transformer(nn.Module):
         assert self.cos.dtype == COMPUTE_DTYPE, (
             f"Rotary embeddings must be in {COMPUTE_DTYPE}, got {self.cos.dtype}"
         )
-        T0 = 0 if kv_cache is None else kv_cache.get_pos()
-        cos_sin = self.cos[:, T0 : T0 + T], self.sin[:, T0 : T0 + T]
+        # Per-row RoPE: each batch row may be at a different cache position
+        # during decode after a variable-length prefill, so we cannot use a
+        # single uniform slice of self.cos / self.sin.
+        if kv_cache is None:
+            positions = torch.arange(T, device=idx.device).unsqueeze(0)  # (1, T) -> broadcasts
+        else:
+            positions = kv_cache.cache_seqlens.long().unsqueeze(1) + torch.arange(
+                T, device=idx.device
+            ).unsqueeze(0)  # (B, T)
+        # self.cos / self.sin have shape (1, rotary_seq_len, 1, D/2); index along
+        # the seq dim with per-row positions to get (B, T, 1, D/2).
+        cos = self.cos.squeeze(0).squeeze(1)[positions].unsqueeze(2)
+        sin = self.sin.squeeze(0).squeeze(1)[positions].unsqueeze(2)
+        cos_sin = (cos, sin)
 
         # Embed the tokens
         x = self.transformer.wte(idx)

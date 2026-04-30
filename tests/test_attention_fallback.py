@@ -315,7 +315,7 @@ class TestSDPAOnly:
         )
         cache.advance(T_prefill)
         assert y.shape == (B, T_prefill, H, D)
-        assert cache.get_pos() == T_prefill
+        assert cache.cache_seqlens[0].item() == T_prefill
 
         # Generate single token
         q_single = torch.randn(B, 1, H, D, device=self.DEVICE, dtype=self.DTYPE)
@@ -333,7 +333,7 @@ class TestSDPAOnly:
         )
         cache.advance(1)
         assert y_single.shape == (B, 1, H, D)
-        assert cache.get_pos() == T_prefill + 1
+        assert cache.cache_seqlens[0].item() == T_prefill + 1
         set_impl(None)
 
 

@@ -113,31 +113,11 @@ def test_kv_cache_basic():
     """Test basic KVCache operations."""
     B, H, T, D, L = 2, 4, 64, 16, 2
     cache = KVCache(batch_size=B, num_heads=H, seq_len=T, head_dim=D, num_layers=L)
-    assert cache.get_pos() == 0
+    assert cache.cache_seqlens.tolist() == [0, 0]
     cache.advance(10)
-    assert cache.get_pos() == 10
+    assert cache.cache_seqlens.tolist() == [10, 10]
     cache.reset()
-    assert cache.get_pos() == 0
-
-
-def test_kv_cache_prefill():
-    """Test KVCache prefill from batch=1 to batch=N."""
-    B_src, B_dst = 1, 4
-    H, T, D, L = 4, 32, 16, 2
-    src = KVCache(batch_size=B_src, num_heads=H, seq_len=T, head_dim=D, num_layers=L)
-    # Simulate a prefill
-    src.k_cache[:, :, :8, :, :] = torch.randn(L, B_src, 8, H, D)
-    src.v_cache[:, :, :8, :, :] = torch.randn(L, B_src, 8, H, D)
-    src.advance(8)
-    src.prev_embedding = torch.randn(1, 1, 64)
-
-    dst = KVCache(batch_size=B_dst, num_heads=H, seq_len=T, head_dim=D, num_layers=L)
-    dst.prefill(src)
-    assert dst.get_pos() == 8
-    assert dst.prev_embedding.shape == (B_dst, 1, 64)
-    # Check data was copied
-    for b in range(B_dst):
-        assert torch.equal(dst.k_cache[:, b, :8, :, :], src.k_cache[:, 0, :8, :, :])
+    assert cache.cache_seqlens.tolist() == [0, 0]
 
 
 def test_kv_cache_get_layer_cache():
