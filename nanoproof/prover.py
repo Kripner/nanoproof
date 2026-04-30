@@ -422,8 +422,9 @@ class ProverWorker:
         self._park_and_drain(target_label="pause")
 
     def resume_actors(self) -> None:
-        """Restore the actor mode set by the last :meth:`install_collect`
-        (or stay parked in idle if collect was never installed)."""
+        """Restart actors in collect mode. Required after :meth:`pause_actors`
+        and after :meth:`evaluate` (which always returns in idle), if the
+        caller wants collect to resume. No-op if collect was never installed."""
         with self._mode_cv:
             self._mode = "collect" if self._matchmaker is not None else "idle"
             self._release_event.clear()
@@ -558,15 +559,20 @@ class ProverWorker:
             self._mode_cv.notify_all()
 
     def _switch_back_from_eval(self) -> None:
-        """Park actors, drain in-flight eval proofs, clear eval state, and
-        restore collect mode (or stay in "idle" if no collect was installed)."""
+        """Park actors, drain in-flight eval proofs, and clear eval state.
+
+        Always returns mode to "idle". Caller is responsible for calling
+        :meth:`resume_actors` if they want collect to restart; this keeps
+        back-to-back evaluate() calls from transiently flipping to collect
+        between them, and matches the explicit pause/resume contract used
+        by the rl loop."""
         self._park_and_drain(target_label="post-eval")
         with self._mode_cv:
             self._eval_get_theorem = None
             self._eval_on_result = None
             self._eval_prover = None
             self._eval_tactic_sink = None
-            self._mode = "collect" if self._matchmaker is not None else "idle"
+            self._mode = "idle"
             self._release_event.clear()
             self._mode_cv.notify_all()
 

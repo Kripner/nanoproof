@@ -508,8 +508,10 @@ while True:
         # threads keep POST'ing tactics to the inference balancer; the
         # GIL+CUDA-stream contention starves master's eval forward and the
         # workers' NCCL allreduce at the end of eval_tactic_accuracy times
-        # out. prover.evaluate() below does its own switch_to_eval, so we
-        # don't need to resume between policy eval and prover eval.
+        # out. _switch_back_from_eval inside each prover.evaluate() leaves
+        # mode=idle, so consecutive evaluate calls don't transiently drop
+        # into collect between them; resume_actors() at the bottom of the
+        # eval branch is what restarts collect for the next iteration.
         if master_process and prover is not None:
             prover.pause_actors()
 
@@ -644,6 +646,12 @@ while True:
 
         if master_process:
             eval_experience.save(eval_dir(output_dir, step))
+
+        # Resume actors only after both prover.evaluate() calls and the
+        # active_barrier. evaluate() always returns in idle, so this is
+        # what actually restarts collect for the next iteration.
+        if master_process and prover is not None:
+            prover.resume_actors()
 
         model.train()
         timer.end("eval")
