@@ -432,6 +432,8 @@ class TrainingStats:
 
     step: int = 0
     loss: float = 0.0
+    loss_positive: float = 0.0
+    loss_negative: float = 0.0
     num_tokens: int = 0
     learning_rate: float = 0.0
 
@@ -858,6 +860,7 @@ class WebMonitor:
         self.step: int = 0
         self.replay_buffer_size: int = 0
         self.replay_buffer_base_size: int = 0  # Size at start of collection
+        self.negative_buffer_size: int = 0
 
         # Collection stats
         self.collection = CollectionStats(num_actors=num_actors)
@@ -1862,11 +1865,14 @@ class WebMonitor:
                     <div class="stat"><div class="stat-value">${s.collection.proofs_successful}</div><div class="stat-label">Proofs Found</div></div>
                     <div class="stat"><div class="stat-value">${(s.collection.success_rate * 100).toFixed(1)}%</div><div class="stat-label">Success Rate</div></div>
                     <div class="stat"><div class="stat-value">${s.replay_buffer_size}</div><div class="stat-label">Buffer Size</div></div>
+                    <div class="stat"><div class="stat-value">${s.negative_buffer_size}</div><div class="stat-label">Negatives</div></div>
                 </div>
-                
+
                 <div class="card">
                     <h3>Training</h3>
                     <div class="stat"><div class="stat-value">${s.training.loss.toFixed(6)}</div><div class="stat-label">Loss</div></div>
+                    <div class="stat"><div class="stat-value">${s.training.loss_positive.toFixed(6)}</div><div class="stat-label">Loss (pos)</div></div>
+                    <div class="stat"><div class="stat-value">${s.training.loss_negative.toFixed(6)}</div><div class="stat-label">Loss (neg)</div></div>
                     <div class="stat"><div class="stat-value">${s.training.num_tokens.toLocaleString()}</div><div class="stat-label">Tokens</div></div>
                 </div>
             `;
@@ -1946,11 +1952,14 @@ class WebMonitor:
                     if self.phase == "collecting"
                     else self.replay_buffer_size
                 ),
+                "negative_buffer_size": self.negative_buffer_size,
                 "output_dir": self.output_dir,
                 "collection": self.collection.to_dict(),
                 "training": {
                     "step": self.training.step,
                     "loss": self.training.loss,
+                    "loss_positive": self.training.loss_positive,
+                    "loss_negative": self.training.loss_negative,
                     "num_tokens": self.training.num_tokens,
                     "learning_rate": self.training.learning_rate,
                 },
@@ -2048,6 +2057,10 @@ class WebMonitor:
         with self._lock:
             self.replay_buffer_size = size
 
+    def set_negative_buffer_size(self, size: int):
+        with self._lock:
+            self.negative_buffer_size = size
+
     def _phase_file(self, subdir: str, filename: str) -> str | None:
         """Resolve a file path under ``output_dir/<subdir>/<filename>``."""
         with self._lock:
@@ -2117,12 +2130,20 @@ class WebMonitor:
                 self.collection.expansions = expansions
 
     def update_training(
-        self, step: int, loss: float, num_tokens: int = 0, lr: float = 0.0
+        self,
+        step: int,
+        loss: float,
+        num_tokens: int = 0,
+        lr: float = 0.0,
+        loss_positive: float = 0.0,
+        loss_negative: float = 0.0,
     ):
         with self._lock:
             self.phase = "training"
             self.training.step = step
             self.training.loss = loss
+            self.training.loss_positive = loss_positive
+            self.training.loss_negative = loss_negative
             self.training.num_tokens = num_tokens
             self.training.learning_rate = lr
 

@@ -45,6 +45,7 @@ from nanoproof.data.sft.leantree import leantree_transitions
 from nanoproof.data.sft.leantree_dataloader import rl_data_generator
 from nanoproof.experience_collection import (
     ReplayBuffer,
+    NegativeBuffer,
     Matchmaker,
     MatchmakerConfig,
     CollectedExperience,
@@ -181,12 +182,30 @@ parser.add_argument("--target-examples-per-step", type=int, default=512)
 parser.add_argument(
     "--num-updates-per-step",
     type=int,
-    default=1,
+    default=2,
     help="number of optimizer updates per training step (i.e. per collection cycle)",
 )
 parser.add_argument("--fraction-sft", type=float, default=0.1)
 parser.add_argument("--augment-data", type=bool, default=True)
 parser.add_argument("--value-weight", type=float, default=0.01)
+parser.add_argument(
+    "--negative-buffer-window-size",
+    type=int,
+    default=250_000,
+    help="FIFO window for failed tactics (status='error') used as unlikelihood targets",
+)
+parser.add_argument(
+    "--negative-fraction",
+    type=float,
+    default=0.3,
+    help="probability that a non-SFT slot in train_generator draws a negative sample",
+)
+parser.add_argument(
+    "--unlikelihood-weight",
+    type=float,
+    default=0.5,
+    help="multiplier on the per-sequence-mean unlikelihood loss term; 0 disables",
+)
 
 # Optimizer
 parser.add_argument("--unembedding-lr", type=float, default=0.004)
@@ -296,6 +315,12 @@ replay_buffer = ReplayBuffer(window_size=args.replay_buffer_window_size, seed=ra
 if args.load_buffer:
     replay_buffer.load_from(args.load_buffer)
 
+negative_buffer = NegativeBuffer(
+    window_size=args.negative_buffer_window_size, seed=rank_seed
+)
+if args.load_buffer:
+    negative_buffer.load_from(args.load_buffer)
+
 matchmaker_config = dataclass_from_args(MatchmakerConfig, args, prefix="mm_")
 search_config = dataclass_from_args(SearchConfig, args, prefix="search_")
 matchmaker = Matchmaker(
@@ -369,6 +394,7 @@ rl_monitor = create_monitor(num_actors=0, enabled=master_process)
 rl_monitor.set_output_dir(output_dir)
 rl_monitor.set_lean_servers(args.lean_servers)
 rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
+rl_monitor.set_negative_buffer_size(len(negative_buffer.buffer))
 rl_monitor.set_matchmaker(matchmaker)
 
 # Register per-rank inference servers so the LLM profiler tab can poll
@@ -420,6 +446,7 @@ def train_generator():
     mathlib_iter = iter(mathlib_train)
     while True:
         assert len(replay_buffer.buffer) >= args.collect_transitions
+        is_negative = False
         if rng.random() < args.fraction_sft:
             try:
                 state, tactic, proof_depth = next(mathlib_iter)
@@ -427,6 +454,17 @@ def train_generator():
                 mathlib_iter = iter(mathlib_train)
                 state, tactic, proof_depth = next(mathlib_iter)
             source = "sft"
+        elif (
+            args.negative_fraction > 0
+            and len(negative_buffer.buffer) > 0
+            and rng.random() < args.negative_fraction
+        ):
+            state, tactic = negative_buffer.sample_transition()
+            proof_depth = None
+            if args.augment_data:
+                state, tactic = augment(state, tactic)
+            source = "rl_neg"
+            is_negative = True
         else:
             state, tactic, value_target = replay_buffer.sample_transition()
             proof_depth = -value_target
@@ -435,7 +473,7 @@ def train_generator():
                 state, tactic = augment(state, tactic)
             source = "rl"
 
-        yield state, tactic, proof_depth, source
+        yield state, tactic, proof_depth, source, is_negative
 
 
 train_loader = rl_data_generator(train_generator(), batch_size=args.device_batch_size)
@@ -685,9 +723,13 @@ while True:
         replay_buffer.extend_and_sync(
             collect_holder.transitions() if master_process else []
         )
+        negative_buffer.extend_and_sync(
+            collect_holder.failed_tactics() if master_process else []
+        )
 
         if master_process:
             rl_monitor.set_replay_buffer_size(len(replay_buffer.buffer))
+            rl_monitor.set_negative_buffer_size(len(negative_buffer.buffer))
         # holder.rotate().save() is deferred until after the train phase so
         # train_subsample.jsonl lands in the same step_<step>/ dir.
 
@@ -727,11 +769,21 @@ while True:
     optimizer_to_gpu(optimizer, device)
 
     total_loss = 0.0
+    total_loss_positive = 0.0
+    total_loss_negative = 0.0
     total_tokens = 0
+    total_negative_tokens = 0
+    total_rows = 0
+    total_negative_rows = 0
     for _ in range(args.num_updates_per_step):
         num_tokens = torch.tensor(0, device=device)
+        num_negative_tokens = torch.tensor(0, device=device)
+        num_rows = torch.tensor(0, device=device)
+        num_negative_rows = torch.tensor(0, device=device)
         for micro_step in range(grad_accum_steps):
-            train_inputs, train_targets, batch_sources = next(train_loader)
+            train_inputs, train_targets, batch_sources, is_negative_row = next(
+                train_loader
+            )
             per_token_loss = model(
                 train_inputs, train_targets, loss_reduction="none"
             )  # (B*T,)
@@ -739,30 +791,64 @@ while True:
 
             if master_process and is_collect_step:
                 collect_holder.record_train_samples(
-                    train_inputs, train_targets, per_token_loss, batch_sources
+                    train_inputs,
+                    train_targets,
+                    per_token_loss,
+                    batch_sources,
+                    is_negative_row,
                 )
 
+            token_mask = train_targets >= 0  # (B, T)
             is_value_sample = (train_inputs == value_delim_tok).any(dim=1)  # (B,)
-            sample_weights = torch.where(
+            is_positive_row = ~is_negative_row
+
+            # Positive loss: existing token-mean over positive rows only
+            pos_sample_weights = torch.where(
                 is_value_sample, args.value_weight, 1.0
             )  # (B,)
+            pos_mask = token_mask & is_positive_row.unsqueeze(1)
+            weighted_pos = (
+                per_token_loss * pos_sample_weights.unsqueeze(1) * pos_mask
+            )
+            positive_loss = weighted_pos.sum() / pos_mask.sum().clamp(min=1)
 
-            token_mask = train_targets >= 0  # (B, T)
-            weighted_token_loss = per_token_loss * sample_weights.unsqueeze(1)  # (B, T)
+            # Negative loss: per-sequence mean of unlikelihood, then mean across neg rows.
+            # Recover p = exp(-CE) and clamp so log1p(-p) stays finite.
+            prob = torch.exp(-per_token_loss).clamp(max=1.0 - 1e-6)
+            unlikelihood = -torch.log1p(-prob)  # (B, T)
+            neg_mask = token_mask & is_negative_row.unsqueeze(1)
+            per_seq_sum = (unlikelihood * neg_mask).sum(dim=1)  # (B,)
+            per_seq_len = neg_mask.sum(dim=1).clamp(min=1)  # (B,)
+            per_seq_mean = per_seq_sum / per_seq_len  # (B,)
+            num_neg = is_negative_row.sum().clamp(min=1)
+            negative_loss = (per_seq_mean * is_negative_row).sum() / num_neg
 
-            loss = (weighted_token_loss * token_mask).sum() / token_mask.sum()
+            loss = positive_loss + args.unlikelihood_weight * negative_loss
             train_loss = loss.detach()
+            train_loss_positive = positive_loss.detach()
+            train_loss_negative = negative_loss.detach()
             loss = loss / grad_accum_steps
             loss.backward()
-            num_tokens += (train_targets >= 0).sum()
+            num_tokens += token_mask.sum()
+            num_negative_tokens += neg_mask.sum()
+            num_rows += is_negative_row.numel()
+            num_negative_rows += is_negative_row.sum()
         if ddp:
             dist.all_reduce(num_tokens, op=dist.ReduceOp.SUM)
+            dist.all_reduce(num_negative_tokens, op=dist.ReduceOp.SUM)
+            dist.all_reduce(num_rows, op=dist.ReduceOp.SUM)
+            dist.all_reduce(num_negative_rows, op=dist.ReduceOp.SUM)
 
         optimizer.step()
         model.zero_grad(set_to_none=True)
 
         total_loss += train_loss.item()
+        total_loss_positive += train_loss_positive.item()
+        total_loss_negative += train_loss_negative.item()
         total_tokens += num_tokens.item()
+        total_negative_tokens += num_negative_tokens.item()
+        total_rows += int(num_rows.item())
+        total_negative_rows += int(num_negative_rows.item())
 
     optimizer_to_cpu(optimizer)
     flush()
@@ -783,17 +869,37 @@ while True:
         balancer.resume()
 
     mean_loss = total_loss / args.num_updates_per_step
-    rl_monitor.update_training(step, mean_loss, total_tokens)
+    mean_loss_positive = total_loss_positive / args.num_updates_per_step
+    mean_loss_negative = total_loss_negative / args.num_updates_per_step
+    rl_monitor.update_training(
+        step,
+        mean_loss,
+        total_tokens,
+        loss_positive=mean_loss_positive,
+        loss_negative=mean_loss_negative,
+    )
     if master_process:
         logger.info(
-            f"Step {step:05d} | Training loss: {mean_loss:.6f} | num_tokens: {total_tokens:,} | replay_buffer_size: {len(replay_buffer.buffer)}"
+            f"Step {step:05d} | Training loss: {mean_loss:.6f} "
+            f"(pos: {mean_loss_positive:.6f}, neg: {mean_loss_negative:.6f}) | "
+            f"num_tokens: {total_tokens:,} | "
+            f"replay_buffer_size: {len(replay_buffer.buffer)} | "
+            f"negative_buffer_size: {len(negative_buffer.buffer)}"
         )
+    negative_rows_fraction = (
+        total_negative_rows / total_rows if total_rows > 0 else 0.0
+    )
     run_log.log(
         {
             "step": step,
             "train_loss": mean_loss,
+            "loss_positive": mean_loss_positive,
+            "loss_negative": mean_loss_negative,
             "num_tokens": total_tokens,
+            "negative_tokens": total_negative_tokens,
+            "negative_rows_fraction": negative_rows_fraction,
             "replay_buffer_size": len(replay_buffer.buffer),
+            "negative_buffer_size": len(negative_buffer.buffer),
             **{f"time/{k}": v for k, v in timer.get_times().items()},
             **rl_monitor.lean_server_metrics(),
             **{

@@ -126,6 +126,55 @@ def load_collected_transitions(run_dir: str) -> list[tuple[str, str, float]]:
     return transitions
 
 
+def _clean_negatives(
+    raw: Iterable[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Strip whitespace, drop entries that exceed the global state/tactic
+    length caps, dedupe (state, tactic) pairs. Mirrors :func:`_clean_transitions`
+    so :class:`NegativeBuffer` never sees over-length rows."""
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str]] = []
+    for state, tactic in raw:
+        state = state.strip()
+        tactic = tactic.strip()
+        if not state or not tactic:
+            continue
+        if (
+            len(state) > GLOBAL_CONFIG.state_max_len
+            or len(tactic) > GLOBAL_CONFIG.tactic_max_len
+        ):
+            continue
+        key = (state, tactic)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+def load_collected_failed_tactics(run_dir: str) -> list[tuple[str, str]]:
+    """Concatenate failed (status=='error') tactics from every
+    ``step_<s>/generated_tactics.jsonl`` in ``run_dir``. Returns deduped
+    (state, tactic) pairs in step + file order. Callers apply FIFO truncation
+    themselves."""
+    pairs: list[tuple[str, str]] = []
+    for _, theorems_path in list_step_shards(run_dir):
+        gen_path = os.path.join(os.path.dirname(theorems_path), "generated_tactics.jsonl")
+        if not os.path.exists(gen_path):
+            continue
+        with open(gen_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                state = obj["state"]
+                for entry in obj.get("tactics", []):
+                    if entry.get("status") == "error":
+                        pairs.append((state, entry["tactic"]))
+    return pairs
+
+
 # -----------------------------------------------------------------------------
 # Matchmaker
 # -----------------------------------------------------------------------------
@@ -405,6 +454,45 @@ class ReplayBuffer:
         return self.rng.choice(self.buffer)
 
 
+class NegativeBuffer:
+    """DDP-aware FIFO buffer of (state, tactic) pairs that the model proposed
+    and that Lean rejected (status == "error"). Used as negative examples in
+    unlikelihood training. Mirrors :class:`ReplayBuffer`: rank 0 collects new
+    failures each phase, ``extend_and_sync`` truncates + broadcasts so all
+    ranks sample from the same buffer."""
+
+    def __init__(self, window_size: int, seed: int):
+        self.window_size = window_size
+        self.buffer: list[tuple[str, str]] = []
+        self.rng = random.Random(seed)
+
+    def extend_and_sync(self, new_pairs: list[tuple[str, str]]) -> None:
+        ddp, _, _, _ = get_dist_info()
+
+        self.buffer.extend(new_pairs)
+        if len(self.buffer) > self.window_size:
+            self.buffer = self.buffer[-self.window_size :]
+
+        if ddp:
+            buffer_list = [self.buffer]
+            dist.broadcast_object_list(buffer_list, src=0)
+            self.buffer = buffer_list[0]
+
+    def load_from(self, run_dir: str) -> None:
+        """Repopulate ``self.buffer`` from every ``step_*/generated_tactics.jsonl``
+        in ``run_dir``. Each rank reads the same files independently, so no
+        broadcast is needed. FIFO-truncates to ``window_size``."""
+        info0(logger, f"Loading negative buffer from {run_dir}")
+        pairs = _clean_negatives(load_collected_failed_tactics(run_dir))
+        if len(pairs) > self.window_size:
+            pairs = pairs[-self.window_size :]
+        self.buffer = pairs
+        info0(logger, f"Loaded {len(self.buffer)} failed tactics from {run_dir}")
+
+    def sample_transition(self) -> tuple[str, str]:
+        return self.rng.choice(self.buffer)
+
+
 # -----------------------------------------------------------------------------
 # CollectedExperience: per-phase artifacts (proofs + generated tactics)
 # -----------------------------------------------------------------------------
@@ -504,7 +592,7 @@ class CollectedExperience:
         Lock-free (``list.append`` is atomic under the GIL)."""
         self.tactics.append(
             {
-                "state": state.replace("\n", "\\n"),
+                "state": state,
                 "tactics": [
                     {"tactic": tactic, "status": status, "count": count}
                     for tactic, status, count in tactics_with_status
@@ -513,16 +601,18 @@ class CollectedExperience:
         )
 
     def record_train_samples(
-        self, inputs, targets, per_token_loss, sources: list
+        self, inputs, targets, per_token_loss, sources: list, is_negative_flags=None
     ) -> None:
         """Reservoir-sample rows of one training micro-batch into ``self.train_samples``.
 
         ``inputs`` / ``targets`` / ``per_token_loss`` are all shape ``(B, T)``
         (with -1 in ``targets`` and 0 in the loss at masked positions).
         ``sources`` is a length-``B`` list of per-row source tags (``"rl"`` /
-        ``"sft"`` / ``None``). Call per micro-step; reservoir sampling (Vitter
-        Algorithm R) keeps the subsample size bounded at
-        :attr:`TRAIN_SUBSAMPLE_K` regardless of total micro-batches.
+        ``"sft"`` / ``"rl_neg"`` / ``None``). ``is_negative_flags`` is a length-``B``
+        bool tensor; the recorded ``per_token_loss`` is CE for both kinds, but
+        ``is_negative=True`` means the loss actually backpropped was unlikelihood
+        (downstream tooling can recompute). Reservoir sampling (Vitter Algorithm R)
+        keeps the subsample size bounded at :attr:`TRAIN_SUBSAMPLE_K`.
         """
         tokenizer = get_tokenizer()
         pad_token_id = tokenizer.encode_special("<|pad|>")
@@ -551,9 +641,15 @@ class CollectedExperience:
                 shifted_losses.append(losses_row[t - 1] if tgts[t - 1] >= 0 else None)
             tokens = [tokenizer.id_to_token(i) for i in ids]
             is_value = value_delim_tok in ids
+            is_negative = bool(
+                is_negative_flags[b].item()
+                if is_negative_flags is not None and b < len(is_negative_flags)
+                else False
+            )
             sample = {
                 "source": sources[b] if b < len(sources) else None,
                 "is_value": is_value,
+                "is_negative": is_negative,
                 "tokens": tokens,
                 "losses": shifted_losses,
             }
@@ -581,6 +677,18 @@ class CollectedExperience:
         with self._lock:
             raw = [t for a in self.attempts for t in a.transitions]
         return _clean_transitions(raw)
+
+    def failed_tactics(self) -> list[tuple[str, str]]:
+        """All (state, tactic) pairs from this phase where Lean returned
+        status='error'. Cleaned + deduped by :func:`_clean_negatives`."""
+        with self._lock:
+            raw = [
+                (entry["state"], t["tactic"])
+                for entry in self.tactics
+                for t in entry["tactics"]
+                if t["status"] == "error"
+            ]
+        return _clean_negatives(raw)
 
     def save(self, phase_dir: str) -> None:
         """Write ``theorems.jsonl``, ``generated_tactics.jsonl`` and
@@ -639,6 +747,10 @@ class CollectExperienceHolder:
     def transitions(self) -> list[tuple[str, str, float]]:
         with self._lock:
             return self._inner.transitions()
+
+    def failed_tactics(self) -> list[tuple[str, str]]:
+        with self._lock:
+            return self._inner.failed_tactics()
 
     def rotate(self) -> CollectedExperience:
         """Atomically replace the inner with a fresh experience; return the old."""

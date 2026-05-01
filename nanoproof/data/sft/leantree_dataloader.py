@@ -21,21 +21,22 @@ from nanoproof.data.sft.leantree import leantree_transitions
 
 
 def rl_data_generator(generator, batch_size, device="cuda"):
-    """Tokenize an iterator of ``(state, tactic, proof_depth)`` triples (or
-    ``(state, tactic, proof_depth, source)`` 4-tuples) into batched
-    ``(inputs, targets, sources)`` tensors. Each triple becomes two rows in
-    the batch (one tactic-prediction sample, one value-prediction sample), so
-    ``batch_size`` must be even.
+    """Tokenize an iterator of ``(state, tactic, proof_depth, source, is_negative)``
+    items into batched ``(inputs, targets, sources, is_negative_flags)`` tensors.
+    Older 3- or 4-tuples are accepted: missing ``source`` defaults to ``None``,
+    missing ``is_negative`` defaults to ``False``.
 
-    Triples whose tactic exceeds ``tactic_max_len`` or whose state+tactic
-    exceeds ``max_seq_len`` are silently dropped. Stops when the upstream
-    generator is exhausted.
+    Each positive item (``is_negative=False``) becomes two rows: a tactic-
+    prediction sample and a value-prediction sample. Each negative item
+    (``is_negative=True``) becomes a single tactic-prediction sample (no value
+    row, no ``proof_depth`` required). Items with too-long state or tactic are
+    silently dropped.
 
-    The ``sources`` element is a length-``batch_size`` list of the optional
-    4th tuple field (``None`` if the upstream yielded 3-tuples). Both the
-    tactic and value rows derived from the same triple share its source.
+    Yields chunks of exactly ``batch_size`` rows; surplus rows from a 2-row
+    item that crosses the boundary roll over into the next chunk. The
+    ``is_negative_flags`` element is a length-``batch_size`` bool tensor on
+    ``device``.
     """
-    assert batch_size % 2 == 0, "batch_size must be even (each triple emits 2 samples)"
     tokenizer = get_tokenizer()
     bos_token = tokenizer.get_bos_token_id()
     eos_token = tokenizer.get_eos_token_id()
@@ -65,23 +66,24 @@ def rl_data_generator(generator, batch_size, device="cuda"):
 
     batch = []
     batch_sources: list = []
+    batch_is_negative: list[bool] = []
     for item in generator:
         state, tactic, proof_depth = item[0], item[1], item[2]
         source = item[3] if len(item) > 3 else None
+        is_negative = bool(item[4]) if len(item) > 4 else False
         state, tactic = state.strip(), tactic.strip()
-        assert len(state) != 0 and len(tactic) != 0 and proof_depth >= 1
+        assert len(state) != 0 and len(tactic) != 0
+        if not is_negative:
+            assert proof_depth is not None and proof_depth >= 1
 
         state_toks = tokenizer.encode(state + "\n", prepend=bos_token)
         tactic_toks = tokenizer.encode(tactic, append=eos_token)
-        proof_depth = min(proof_depth, GLOBAL_CONFIG.num_value_bins)
-        value_toks = value_to_token_ids(tokenizer, proof_depth) + [eos_token]
 
-        # these filtered triples are <0.1% of mathlib
+        # these filtered items are <0.1% of mathlib
         if len(tactic_toks) > GLOBAL_CONFIG.tactic_max_len:
             continue
         if len(state_toks) + 1 + len(tactic_toks) > GLOBAL_CONFIG.max_seq_len:
             continue
-        assert len(state_toks) + 1 + len(value_toks) <= GLOBAL_CONFIG.max_seq_len
 
         batch.append(
             (
@@ -90,19 +92,31 @@ def rl_data_generator(generator, batch_size, device="cuda"):
             )
         )
         batch_sources.append(source)
-        batch.append(
-            (
-                state_toks + [value_delim_tok] + value_toks,
-                [0] * (len(state_toks) + 1) + [1] * len(value_toks),
-            )
-        )
-        batch_sources.append(source)
+        batch_is_negative.append(is_negative)
 
-        if len(batch) == batch_size:
-            inputs, targets = collate(batch)
-            yield inputs, targets, list(batch_sources)
-            batch = []
-            batch_sources = []
+        if not is_negative:
+            proof_depth = min(proof_depth, GLOBAL_CONFIG.num_value_bins)
+            value_toks = value_to_token_ids(tokenizer, proof_depth) + [eos_token]
+            assert len(state_toks) + 1 + len(value_toks) <= GLOBAL_CONFIG.max_seq_len
+            batch.append(
+                (
+                    state_toks + [value_delim_tok] + value_toks,
+                    [0] * (len(state_toks) + 1) + [1] * len(value_toks),
+                )
+            )
+            batch_sources.append(source)
+            batch_is_negative.append(False)
+
+        while len(batch) >= batch_size:
+            chunk = batch[:batch_size]
+            chunk_sources = batch_sources[:batch_size]
+            chunk_neg = batch_is_negative[:batch_size]
+            inputs, targets = collate(chunk)
+            is_negative_flags = torch.tensor(chunk_neg, dtype=torch.bool, device=device)
+            yield inputs, targets, list(chunk_sources), is_negative_flags
+            batch = batch[batch_size:]
+            batch_sources = batch_sources[batch_size:]
+            batch_is_negative = batch_is_negative[batch_size:]
 
 
 def sft_data_generator(dataset, batch_size, device="cuda"):
@@ -127,7 +141,7 @@ def sft_data_generator(dataset, batch_size, device="cuda"):
                 flush=True,
             )
 
-    for inputs, targets, _sources in rl_data_generator(
+    for inputs, targets, _sources, _is_negative in rl_data_generator(
         stream_triples(), batch_size, device
     ):
         yield inputs, targets, progress["approx"], progress["last_step"]
