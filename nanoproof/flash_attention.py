@@ -96,6 +96,15 @@ def _detect_enable_gqa_support():
 _SUPPORTS_ENABLE_GQA = _detect_enable_gqa_support()
 
 
+# ROCm 6.x's EFFICIENT_ATTENTION SDPA backend silently returns 100% NaN when
+# given an explicit attn_mask (reproduced with bf16/fp16/fp32 Q/K/V on MI250X,
+# torch 2.4 ROCm 6.3). The default SDPA dispatcher picks EFFICIENT for the
+# shapes our model uses, so any attn_mask call (sliding window for T > window,
+# heterogeneous decode) silently corrupts the activations. Force MATH for
+# masked SDPA on ROCm. CUDA paths are untouched.
+_FORCE_MATH_FOR_MASK = torch.cuda.is_available() and torch.version.hip is not None
+
+
 def _sdpa(q, k, v, enable_gqa=False, **kwargs):
     """SDPA wrapper that emulates enable_gqa via head expansion when unsupported."""
     if enable_gqa and not _SUPPORTS_ENABLE_GQA:
@@ -106,6 +115,10 @@ def _sdpa(q, k, v, enable_gqa=False, **kwargs):
         v = v.repeat_interleave(repeats, dim=1)
     elif _SUPPORTS_ENABLE_GQA:
         kwargs["enable_gqa"] = enable_gqa
+    if _FORCE_MATH_FOR_MASK and kwargs.get("attn_mask") is not None:
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+        with sdpa_kernel(backends=[SDPBackend.MATH]):
+            return F.scaled_dot_product_attention(q, k, v, **kwargs)
     return F.scaled_dot_product_attention(q, k, v, **kwargs)
 
 
