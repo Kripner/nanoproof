@@ -199,14 +199,14 @@ parser.add_argument("--init-lr-frac", type=float, default=0.02)
 parser.add_argument(
     "--eval-every",
     type=str,
-    default="1:00:00",
+    default="2:00:00",
     help="how often to run eval - 'Nsteps' (e.g. '100steps') or 'H:M:S' (e.g. '2:30:00')",
 )
 parser.add_argument("--eval-start", type=int, default=0)
 parser.add_argument(
     "--save-every",
     type=str,
-    default="1:00:00",
+    default="2:00:00",
     help="how often to save a checkpoint - 'Nsteps' or 'H:M:S'",
 )
 parser.add_argument(
