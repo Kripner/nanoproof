@@ -16,6 +16,7 @@ each (model, dataset) pair.
 
 import argparse
 import atexit
+import collections
 import gc
 import logging
 import math
@@ -87,6 +88,53 @@ def compute_success_rate_by_simulations(results, num_simulations):
     return breakdown
 
 
+def binary_search_order(n: int) -> list[int]:
+    """Indices [0, n) emitted as middle, then midpoints of remaining halves.
+
+    Used to order checkpoint sweeps so an interrupted run still gives even
+    step coverage — first the middle checkpoint, then the 1/4 and 3/4
+    points, then 1/8, 3/8, 5/8, 7/8, etc.
+    """
+    if n <= 0:
+        return []
+    result = []
+    queue = collections.deque([(0, n - 1)])
+    while queue:
+        lo, hi = queue.popleft()
+        mid = (lo + hi) // 2
+        result.append(mid)
+        if lo <= mid - 1:
+            queue.append((lo, mid - 1))
+        if mid + 1 <= hi:
+            queue.append((mid + 1, hi))
+    return result
+
+
+def resolve_run_dir_models(run_dir: str) -> list[str]:
+    """List ``model_*.pt`` checkpoints in ``run_dir``, ordered for sweep.
+
+    Files are sorted by step, then reordered via :func:`binary_search_order`.
+    """
+    if not os.path.isdir(run_dir):
+        raise ValueError(f"--run-dir {run_dir!r} is not a directory")
+    by_step = []
+    for name in os.listdir(run_dir):
+        full = os.path.join(run_dir, name)
+        if not os.path.isfile(full):
+            continue
+        try:
+            _, step = parse_checkpoint_path(full)
+        except ValueError:
+            continue
+        by_step.append((step, full))
+    if not by_step:
+        raise ValueError(f"No model_*.pt checkpoints found in {run_dir}")
+    by_step.sort()
+    sorted_paths = [p for _, p in by_step]
+    order = binary_search_order(len(sorted_paths))
+    return [sorted_paths[i] for i in order]
+
+
 def print_results(results, name, breakdown):
     print0("-" * 80)
     print0(f"Evaluation results for {name}")
@@ -108,7 +156,22 @@ def main():
         allow_abbrev=False,
     )
 
-    parser.add_argument("--model-path", type=str, nargs="+", required=True)
+    model_source = parser.add_mutually_exclusive_group(required=True)
+    model_source.add_argument(
+        "--model-path",
+        type=str,
+        nargs="+",
+        help="one or more model_NNNNNN.pt files (absolute or relative to "
+        "$NANOPROOF_HOME/models/). Multiple paths are evaluated in order.",
+    )
+    model_source.add_argument(
+        "--run-dir",
+        type=str,
+        default=None,
+        help="run directory containing model_*.pt checkpoints; expanded to "
+        "all checkpoints in binary-search order (middle, 1/4, 3/4, 1/8, ...) "
+        "so an interrupted sweep still has even step coverage.",
+    )
     parser.add_argument(
         "--lean-project",
         type=str,
@@ -194,6 +257,13 @@ def main():
         parser, SearchConfig, prefix="search_", overrides={"verify_timeout": 30000}
     )
     args = parser.parse_args()
+
+    if args.run_dir is not None:
+        args.model_path = resolve_run_dir_models(args.run_dir)
+        print0(f"Resolved {len(args.model_path)} checkpoints from {args.run_dir}:")
+        for p in args.model_path:
+            print0(f"  {p}")
+
     args_dict = vars(args).copy()
 
     if args.verbose:
