@@ -135,7 +135,7 @@ parser.add_argument(
 parser.add_argument("--num-sampled-tactics", type=int, default=6)
 parser.add_argument(
     "--first-token-occurrences-cap",
-    type=int,
+    type=lambda s: None if s.lower() == "none" else int(s),
     default=2,
     help="cap on how many sampled tactics may share the same first token "
     "(per state). None disables the cap.",
@@ -149,6 +149,12 @@ parser.add_argument(
 parser.add_argument("--num-simulations-eval", type=int, default=64)
 parser.add_argument("--collect-every", type=int, default=1)
 parser.add_argument("--collect-transitions", type=int, default=100)
+parser.add_argument(
+    "--no-proof-simplification",
+    action="store_true",
+    help="skip prune_redundant_nodes during experience collection; "
+    "transitions reflect the raw MCTS tree. Eval is unaffected.",
+)
 parser.add_argument("--replay-buffer-window-size", type=int, default=250_000)
 parser.add_argument("--batch-time-limit", type=float, default=0.5)
 parser.add_argument(
@@ -197,7 +203,7 @@ parser.add_argument(
 parser.add_argument(
     "--negative-fraction",
     type=float,
-    default=0.3,
+    default=0.0,
     help="probability that a non-SFT slot in train_generator draws a negative sample",
 )
 parser.add_argument(
@@ -337,7 +343,12 @@ balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
 if balancer:
     prover = ProverWorker(balancer, args.lean_servers)
     collect_holder = CollectExperienceHolder()
-    prover.install_collect(matchmaker, collect_holder, search_config)
+    prover.install_collect(
+        matchmaker,
+        collect_holder,
+        search_config,
+        simplify_proofs=not args.no_proof_simplification,
+    )
     # With the busy-aware balancer, actors concentrate on one GPU at a time;
     # that GPU flips busy once its queue hits max_gen_samples, then the
     # pointer moves on. To actually spread load across GPUs we size this

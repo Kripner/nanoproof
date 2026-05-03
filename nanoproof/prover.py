@@ -108,9 +108,15 @@ def _outcome_kind(*, game, error, interrupted) -> str | None:
 class Prover:
     """Runs proof search on a single theorem. Stateless and thread-safe."""
 
-    def __init__(self, config: SearchConfig, tactic_model: InferenceBalancer):
+    def __init__(
+        self,
+        config: SearchConfig,
+        tactic_model: InferenceBalancer,
+        simplify_proofs: bool = True,
+    ):
         self.config = config
         self.tactic_model = tactic_model
+        self.simplify_proofs = simplify_proofs
 
     def prove(
         self,
@@ -181,17 +187,19 @@ class Prover:
                     game.root.is_solved = False
                     return game
 
-                game.unsimplified_root = game.root.clone()
-                prune_redundant_nodes(game.root)
+                if self.simplify_proofs:
+                    game.unsimplified_root = game.root.clone()
+                    prune_redundant_nodes(game.root)
                 compute_value_target(game.root)
 
-                verify_err = verify_node(game.root, timeout=self.config.verify_timeout)
-                if verify_err:
-                    logger.warning(
-                        f"FAILED: Post-prune verification failed after {game.num_iterations} iterations: '{verify_err}'\nTheorem: '{theorem.source}'\nProof tree:\n{game.root.pp_tree()}"
-                    )
-                    game.root.is_solved = False
-                    return game
+                if self.simplify_proofs:
+                    verify_err = verify_node(game.root, timeout=self.config.verify_timeout)
+                    if verify_err:
+                        logger.warning(
+                            f"FAILED: Post-prune verification failed after {game.num_iterations} iterations: '{verify_err}'\nTheorem: '{theorem.source}'\nProof tree:\n{game.root.pp_tree()}"
+                        )
+                        game.root.is_solved = False
+                        return game
 
                 # Verify the linearized proof compiles correctly
                 tactics = linearize_proof(game.root)
@@ -351,12 +359,13 @@ class ProverWorker:
         matchmaker: Matchmaker,
         holder: CollectExperienceHolder,
         search_config: SearchConfig,
+        simplify_proofs: bool = True,
     ) -> None:
         """Configure persistent collect mode. Must be called once before
         the first :meth:`collect`. Actors begin sampling from the matchmaker
         and writing into ``holder`` immediately; ``collect()`` is just a
         wait-for-target barrier on top of that."""
-        prover = Prover(search_config, self.tactic_model)
+        prover = Prover(search_config, self.tactic_model, simplify_proofs=simplify_proofs)
         with self._mode_cv:
             assert self._matchmaker is None, "install_collect called twice"
             self._matchmaker = matchmaker
