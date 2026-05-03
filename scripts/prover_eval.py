@@ -8,10 +8,15 @@ Usage:
         --model-path sft/.../model_005000.pt \\
         --lean-servers 10.10.25.33:8000 \\
         --datasets minif2f,proofnet
+
+Multiple --model-path values are evaluated sequentially, sharing the
+distributed compute init and dataset loading; results are saved after
+each (model, dataset) pair.
 """
 
 import argparse
 import atexit
+import gc
 import logging
 import math
 import os
@@ -103,7 +108,7 @@ def main():
         allow_abbrev=False,
     )
 
-    parser.add_argument("--model-path", type=str, required=True)
+    parser.add_argument("--model-path", type=str, nargs="+", required=True)
     parser.add_argument(
         "--lean-project",
         type=str,
@@ -216,238 +221,306 @@ def main():
     ddp, ddp_rank, _, ddp_world_size, device = compute_init(device_type)
     master_process = ddp_rank == 0
 
-    # Check for existing results early (before loading model)
-    checkpoint_info = CheckpointInfo(
-        *parse_checkpoint_path(args.model_path), seed=args.seed
-    )
-
-    should_exit = False
-    continue_data = {}
-
-    if master_process:
-        existing_results = []
-        for dataset_name in datasets:
-            eval_dir = checkpoint_info.get_eval_dir(
-                dataset_name + split_suffix + output_suffix
-            )
-            theorems_path = os.path.join(eval_dir, "theorems.jsonl")
-            if os.path.exists(theorems_path):
-                if os.path.getsize(theorems_path) == 0:
-                    os.remove(theorems_path)
-                else:
-                    existing_results.append((dataset_name, eval_dir, theorems_path))
-
-        if args.continue_eval:
-            if not existing_results:
-                print0("Error: --continue requires existing results")
-                should_exit = True
-            else:
-                for dataset_name, _, theorems_path in existing_results:
-                    successful, errors = load_existing_eval_results(theorems_path)
-                    error_theorems = [
-                        BenchTheorem(
-                            source=e["theorem"],
-                            dataset=e["dataset"],
-                            id=e["id"],
-                        )
-                        for e in errors
-                    ]
-                    continue_data[dataset_name] = (successful, error_theorems)
-                    if error_theorems:
-                        print0(
-                            f"Found {len(errors)} error entries to retry in {dataset_name}"
-                        )
-        elif existing_results and not args.force:
-            print0("Evaluation results already exist:")
-            for _, eval_dir, _ in existing_results:
-                print0(f"  {eval_dir}")
-            print0("\nUse --force to overwrite, or --continue to retry errors.")
-            should_exit = True
-
-    if ddp:
-        exit_tensor = torch.tensor([1 if should_exit else 0], device=device)
-        dist.broadcast(exit_tensor, src=0)
-        should_exit = exit_tensor.item() == 1
-
-    if should_exit:
-        compute_cleanup()
-        sys.exit(1)
-
-    # Enable memory profiling before model load so model weight allocations are captured.
+    # Enable memory profiling before any model load so weight allocations are captured.
     if args.memory_profile:
         enable_memory_profiling(args.memory_profile)
 
-    # Load model + set up inference
-    print0(
-        f"Loading checkpoint: {checkpoint_info.checkpoint_dir}, step={checkpoint_info.step}"
-    )
-    inner_tactic_model = TacticModel.create(
-        num_samples=args.num_sampled_tactics,
-        model_path=args.model_path,
-        first_token_occurrences_cap=args.first_token_occurrences_cap,
-        max_gen_tokens=args.max_gen_tokens,
-    )
-    # Defer max_gen_samples default until we know num_actors
-    tactic_model = BlockingTacticModel(
-        inner_model=inner_tactic_model,
-        timeout_seconds=args.batch_time_limit,
-        max_gen_samples=None,
-    )
-
-    balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
-    if balancer:
-        prover = ProverWorker(balancer, args.lean_servers)
-        # Per-GPU capacity: the busy-aware balancer funnels actors onto one
-        # GPU until it flips busy, so sizing aggregate would starve the rest.
-        max_gen_samples = args.batch_max_gen_samples or math.ceil(
-            prover.num_actors * args.num_sampled_tactics / ddp_world_size
-        )
-        tactic_model.max_gen_samples = max_gen_samples
-        print0(
-            f"Batch max gen samples: {max_gen_samples} ({prover.num_actors} actors * {args.num_sampled_tactics} samples / {ddp_world_size} ranks)"
-        )
-    else:
-        prover = None
-
-    # Prompt token limit for inference batches (prevents OOM on long prompts)
-    max_prompt_tokens = args.batch_max_prompt_tokens
-    if max_prompt_tokens is None:
-        max_prompt_tokens = compute_max_batch_prompt_tokens(
-            inner_tactic_model.network.config, args.num_sampled_tactics, device
-        )
-        print0(
-            f"Batch max prompt tokens: {max_prompt_tokens} (auto from {torch.cuda.get_device_properties(device).total_memory / 1024**3:.1f} GiB VRAM, {torch.cuda.memory_allocated(device) / 1024**3:.1f} GiB used)"
-        )
-    else:
-        print0(f"Batch max prompt tokens: {max_prompt_tokens} (manual)")
-    tactic_model.max_batch_prompt_tokens = max_prompt_tokens
-
-    # Broadcast from master to worker ranks so their Flask servers can batch correctly.
-    if ddp:
-        tactic_model.max_gen_samples = broadcast_value(tactic_model.max_gen_samples)
-        tactic_model.max_batch_prompt_tokens = broadcast_value(
-            tactic_model.max_batch_prompt_tokens
-        )
-
-    active_barrier("inference_ready")
-
-    def _cleanup():
-        # Shutdown inference first so sample_tactic waiters unblock before
-        # prover.close() tries to join actor threads.
-        tactic_model.shutdown()
-        if prover is not None:
-            prover.close()
-
-    atexit.register(_cleanup)
-
-    # Load theorems
-    dataset_theorems = {}
-    if args.continue_eval:
-        for dataset_name, (successful, error_theorems) in continue_data.items():
-            if error_theorems:
-                dataset_theorems[dataset_name] = error_theorems
-    else:
+    # Resolve lean project + load full dataset theorem lists once; reused
+    # across all model evaluations (continue mode rebuilds these per-model
+    # from the existing results files instead).
+    full_dataset_theorems = {}
+    if not args.continue_eval:
         args.lean_project = resolve_lean_project(args.lean_project)
         lean_version = read_lean_version(args.lean_project)
         print0(
             f"Lean version: {lean_version} (from {args.lean_project}/lean-toolchain)"
         )
         if "minif2f" in datasets:
-            dataset_theorems["minif2f"] = minif2f.list_theorems(split=args.split)
+            full_dataset_theorems["minif2f"] = minif2f.list_theorems(split=args.split)
         if "leanworkbook" in datasets:
-            dataset_theorems["leanworkbook"] = leanworkbook.list_theorems(
+            full_dataset_theorems["leanworkbook"] = leanworkbook.list_theorems(
                 split="valid", lean_version=lean_version
             )
         if "proofnet" in datasets:
-            dataset_theorems["proofnet"] = proofnet.list_theorems(split=args.split)
+            full_dataset_theorems["proofnet"] = proofnet.list_theorems(
+                split=args.split
+            )
         if args.max_theorems:
-            for name in dataset_theorems:
-                dataset_theorems[name] = dataset_theorems[name][: args.max_theorems]
+            for name in full_dataset_theorems:
+                full_dataset_theorems[name] = full_dataset_theorems[name][
+                    : args.max_theorems
+                ]
 
     print0(f"Evaluating with {args.num_simulations} MCTS simulations")
 
-    # Evaluate (rank 0 only; worker ranks serve inference via their daemon threads)
-    all_results = {}
-    if master_process:
-        eval_start = time.monotonic()
-        for dataset_name, theorems in dataset_theorems.items():
-            print0(f"\nEvaluating on {len(theorems)} theorems from {dataset_name}")
-            total = len(theorems)
-            latest = [0, 0, 0, 0]  # started, finished, solved, errors
-            printed = list(latest)
-            lock = threading.Lock()
-            done = threading.Event()
+    # Mutable holder so a single atexit handler can shut down whichever
+    # model's resources are live when the process exits.
+    current = {"tactic_model": None, "prover": None}
 
-            def progress_callback(started, finished, solved, errors):
-                with lock:
-                    latest[:] = [started, finished, solved, errors]
+    def _cleanup_current():
+        # Shutdown inference first so sample_tactic waiters unblock before
+        # prover.close() tries to join actor threads.
+        tm = current["tactic_model"]
+        pr = current["prover"]
+        if tm is not None:
+            tm.shutdown()
+        if pr is not None:
+            pr.close()
+        current["tactic_model"] = None
+        current["prover"] = None
 
-            def printer_loop():
-                while not done.wait(timeout=1.0):
-                    with lock:
-                        snap = list(latest)
-                    if snap != printed:
-                        printed[:] = snap
-                        s, f, ok, err = snap
-                        print0(
-                            f"  started={s}/{total}  finished={f}/{total}  solved={ok}  errors={err}"
+    atexit.register(_cleanup_current)
+
+    all_results_by_model = {}
+    n_models = len(args.model_path)
+    any_evaluated = False
+
+    for model_idx, model_path in enumerate(args.model_path):
+        # Per-iteration unique tag so distributed-store barrier counters
+        # from previous iterations don't get reused.
+        tag = f"m{model_idx}"
+
+        # Each iteration's Flask servers bind fresh ports — daemon threads
+        # from prior iterations stay running but receive no traffic.
+        port_base = args.inference_server_port + model_idx * ddp_world_size
+
+        if n_models > 1:
+            print0(
+                f"\n{'=' * 80}\n"
+                f"Model {model_idx + 1}/{n_models}: {model_path}\n"
+                f"{'=' * 80}"
+            )
+
+        # Per-model copy so saved results attribute to this checkpoint, not
+        # the full --model-path list.
+        model_args_dict = dict(args_dict, model_path=model_path)
+
+        # Check for existing results early (before loading the model)
+        checkpoint_info = CheckpointInfo(
+            *parse_checkpoint_path(model_path), seed=args.seed
+        )
+
+        should_skip = False
+        continue_data = {}
+
+        if master_process:
+            existing_results = []
+            for dataset_name in datasets:
+                eval_dir = checkpoint_info.get_eval_dir(
+                    dataset_name + split_suffix + output_suffix
+                )
+                theorems_path = os.path.join(eval_dir, "theorems.jsonl")
+                if os.path.exists(theorems_path):
+                    if os.path.getsize(theorems_path) == 0:
+                        os.remove(theorems_path)
+                    else:
+                        existing_results.append(
+                            (dataset_name, eval_dir, theorems_path)
                         )
 
-            printer = threading.Thread(target=printer_loop, daemon=True)
-            printer.start()
+            if args.continue_eval:
+                if not existing_results:
+                    print0(
+                        f"Skipping {model_path}: --continue requires existing results"
+                    )
+                    should_skip = True
+                else:
+                    for dataset_name, _, theorems_path in existing_results:
+                        successful, errors = load_existing_eval_results(theorems_path)
+                        error_theorems = [
+                            BenchTheorem(
+                                source=e["theorem"],
+                                dataset=e["dataset"],
+                                id=e["id"],
+                            )
+                            for e in errors
+                        ]
+                        continue_data[dataset_name] = (successful, error_theorems)
+                        if error_theorems:
+                            print0(
+                                f"Found {len(errors)} error entries to retry in {dataset_name}"
+                            )
+            elif existing_results and not args.force:
+                print0("Evaluation results already exist:")
+                for _, eval_dir, _ in existing_results:
+                    print0(f"  {eval_dir}")
+                print0(
+                    f"Skipping {model_path}. Use --force to overwrite, or --continue to retry errors."
+                )
+                should_skip = True
 
-            dataset_start = time.monotonic()
-            results = prover.evaluate(
-                theorems,
-                dataset_name=dataset_name,
-                num_simulations=args.num_simulations,
-                search_config=search_config,
-                progress_callback=progress_callback,
-            )
-            dataset_elapsed = time.monotonic() - dataset_start
-            done.set()
-            printer.join()
-            all_results[dataset_name] = results
-            breakdown = compute_success_rate_by_simulations(
-                results, args.num_simulations
-            )
-            print_results(results, dataset_name, breakdown)
-            print0(f"Time for {dataset_name}: {dataset_elapsed:.1f}s")
+        if ddp:
+            skip_tensor = torch.tensor([1 if should_skip else 0], device=device)
+            dist.broadcast(skip_tensor, src=0)
+            should_skip = skip_tensor.item() == 1
 
-            prepend = (
-                continue_data.get(dataset_name, (None, None))[0]
-                if args.continue_eval
-                else None
+        if should_skip:
+            # All ranks must hit the per-iteration barriers in lockstep,
+            # otherwise the next model's barriers see leftover counts.
+            active_barrier(f"inference_ready_{tag}")
+            active_barrier(f"prover_eval_done_{tag}", timeout=None)
+            continue
+
+        any_evaluated = True
+
+        # Load model + set up inference
+        print0(
+            f"Loading checkpoint: {checkpoint_info.checkpoint_dir}, step={checkpoint_info.step}"
+        )
+        inner_tactic_model = TacticModel.create(
+            num_samples=args.num_sampled_tactics,
+            model_path=model_path,
+            first_token_occurrences_cap=args.first_token_occurrences_cap,
+            max_gen_tokens=args.max_gen_tokens,
+        )
+        # Defer max_gen_samples default until we know num_actors
+        tactic_model = BlockingTacticModel(
+            inner_model=inner_tactic_model,
+            timeout_seconds=args.batch_time_limit,
+            max_gen_samples=None,
+        )
+        current["tactic_model"] = tactic_model
+
+        balancer = setup_distributed_inference(tactic_model, port_base)
+        if balancer:
+            prover = ProverWorker(balancer, args.lean_servers)
+            # Per-GPU capacity: the busy-aware balancer funnels actors onto one
+            # GPU until it flips busy, so sizing aggregate would starve the rest.
+            max_gen_samples = args.batch_max_gen_samples or math.ceil(
+                prover.num_actors * args.num_sampled_tactics / ddp_world_size
             )
-            summary = {
-                "dataset": dataset_name,
-                "split": args.split,
-                "num_simulations": args.num_simulations,
-                "total": results["total"],
-                "solved": results["solved"],
-                "errors": results["errors"],
-                "success_rate": results["success_rate"],
-                "elapsed_seconds": dataset_elapsed,
-                "success_rate_by_simulations": breakdown,
-            }
-            save_eval_results(
-                checkpoint_info,
-                dataset_name + split_suffix + output_suffix,
-                results,
-                summary,
-                args_dict,
-                prepend_entries=prepend,
+            tactic_model.max_gen_samples = max_gen_samples
+            print0(
+                f"Batch max gen samples: {max_gen_samples} ({prover.num_actors} actors * {args.num_sampled_tactics} samples / {ddp_world_size} ranks)"
+            )
+        else:
+            prover = None
+        current["prover"] = prover
+
+        # Prompt token limit for inference batches (prevents OOM on long prompts)
+        max_prompt_tokens = args.batch_max_prompt_tokens
+        if max_prompt_tokens is None:
+            max_prompt_tokens = compute_max_batch_prompt_tokens(
+                inner_tactic_model.network.config, args.num_sampled_tactics, device
+            )
+            print0(
+                f"Batch max prompt tokens: {max_prompt_tokens} (auto from {torch.cuda.get_device_properties(device).total_memory / 1024**3:.1f} GiB VRAM, {torch.cuda.memory_allocated(device) / 1024**3:.1f} GiB used)"
+            )
+        else:
+            print0(f"Batch max prompt tokens: {max_prompt_tokens} (manual)")
+        tactic_model.max_batch_prompt_tokens = max_prompt_tokens
+
+        # Broadcast from master to worker ranks so their Flask servers can batch correctly.
+        if ddp:
+            tactic_model.max_gen_samples = broadcast_value(tactic_model.max_gen_samples)
+            tactic_model.max_batch_prompt_tokens = broadcast_value(
+                tactic_model.max_batch_prompt_tokens
             )
 
-        total_elapsed = time.monotonic() - eval_start
-        print0(f"\nTotal evaluation time: {total_elapsed:.1f}s")
+        active_barrier(f"inference_ready_{tag}")
 
-    # Workers are blocked here for the entire master-side evaluation, which
-    # can take many minutes; no timeout (use SIGUSR1 to debug).
-    active_barrier("prover_eval_done", timeout=None)
+        # Build per-model dataset list (continue mode filters to errors only)
+        if args.continue_eval:
+            dataset_theorems = {}
+            for dataset_name, (_, error_theorems) in continue_data.items():
+                if error_theorems:
+                    dataset_theorems[dataset_name] = error_theorems
+        else:
+            dataset_theorems = full_dataset_theorems
+
+        # Evaluate (rank 0 only; worker ranks serve inference via daemon threads)
+        all_results = {}
+        if master_process:
+            eval_start = time.monotonic()
+            for dataset_name, theorems in dataset_theorems.items():
+                print0(f"\nEvaluating on {len(theorems)} theorems from {dataset_name}")
+                total = len(theorems)
+                latest = [0, 0, 0, 0]  # started, finished, solved, errors
+                printed = list(latest)
+                lock = threading.Lock()
+                done = threading.Event()
+
+                def progress_callback(started, finished, solved, errors):
+                    with lock:
+                        latest[:] = [started, finished, solved, errors]
+
+                def printer_loop():
+                    while not done.wait(timeout=1.0):
+                        with lock:
+                            snap = list(latest)
+                        if snap != printed:
+                            printed[:] = snap
+                            s, f, ok, err = snap
+                            print0(
+                                f"  started={s}/{total}  finished={f}/{total}  solved={ok}  errors={err}"
+                            )
+
+                printer = threading.Thread(target=printer_loop, daemon=True)
+                printer.start()
+
+                dataset_start = time.monotonic()
+                results = prover.evaluate(
+                    theorems,
+                    dataset_name=dataset_name,
+                    num_simulations=args.num_simulations,
+                    search_config=search_config,
+                    progress_callback=progress_callback,
+                )
+                dataset_elapsed = time.monotonic() - dataset_start
+                done.set()
+                printer.join()
+                all_results[dataset_name] = results
+                breakdown = compute_success_rate_by_simulations(
+                    results, args.num_simulations
+                )
+                print_results(results, dataset_name, breakdown)
+                print0(f"Time for {dataset_name}: {dataset_elapsed:.1f}s")
+
+                prepend = (
+                    continue_data.get(dataset_name, (None, None))[0]
+                    if args.continue_eval
+                    else None
+                )
+                summary = {
+                    "dataset": dataset_name,
+                    "split": args.split,
+                    "num_simulations": args.num_simulations,
+                    "total": results["total"],
+                    "solved": results["solved"],
+                    "errors": results["errors"],
+                    "success_rate": results["success_rate"],
+                    "elapsed_seconds": dataset_elapsed,
+                    "success_rate_by_simulations": breakdown,
+                }
+                save_eval_results(
+                    checkpoint_info,
+                    dataset_name + split_suffix + output_suffix,
+                    results,
+                    summary,
+                    model_args_dict,
+                    prepend_entries=prepend,
+                )
+
+            total_elapsed = time.monotonic() - eval_start
+            print0(f"\nTotal evaluation time for {model_path}: {total_elapsed:.1f}s")
+
+        all_results_by_model[model_path] = all_results
+
+        # Workers are blocked here for the entire master-side evaluation,
+        # which can take many minutes; no timeout (use SIGUSR1 to debug).
+        active_barrier(f"prover_eval_done_{tag}", timeout=None)
+
+        # Tear down this model's inference + actors before loading the next.
+        _cleanup_current()
+        del inner_tactic_model, tactic_model, balancer, prover
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     compute_cleanup()
-    return all_results
+    if not any_evaluated:
+        sys.exit(1)
+    return all_results_by_model
 
 
 if __name__ == "__main__":
