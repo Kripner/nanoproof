@@ -79,7 +79,7 @@ elif MODE == "tactic_model":
         result = tactic_model.sample_tactic_from_str(inp_.strip())
         if not result.is_success():
             raise RuntimeError(f"Tactic generation failed: {result.error}")
-        tactics, value = result.value
+        tactics, _, value = result.value
         _cached_value = value
         return tactics
 
@@ -92,7 +92,7 @@ elif MODE == "tactic_model":
         result = tactic_model.sample_tactic_from_str(inp_.strip())
         if not result.is_success():
             raise RuntimeError(f"Value prediction failed: {result.error}")
-        _, value = result.value
+        _, _, value = result.value
         return value
 
     generate = generate_

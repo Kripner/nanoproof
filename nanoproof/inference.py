@@ -53,7 +53,7 @@ class BusyError(Exception):
 State = list  # list[LeanProofBranch]
 
 # Result type for combined tactic + value prediction
-TacticAndValue = tuple[list[str], float]  # (tactics, value)
+TacticAndValue = tuple[list[str], list[float], float]  # (tactics, tactic_logprobs, value)
 
 
 @dataclass
@@ -79,14 +79,14 @@ class TacticModel:
         self.rng.manual_seed(self.seed)
 
     def sample_tactic(self, state: State) -> ValueOrError[TacticAndValue]:
-        """Sample tactics and predict value for a state. Returns (tactics, value)."""
+        """Sample tactics and predict value for a state. Returns (tactics, tactic_logprobs, value)."""
         assert len(state) == 1, (
             f"expected single branch in state when generating tactic, got {len(state)} - choose one goal first"
         )
         return self.sample_tactic_from_str(str(state[0].state).strip())
 
     def sample_tactic_from_str(self, state_str: str) -> ValueOrError[TacticAndValue]:
-        """Sample tactics and predict value for a state string. Returns (tactics, value)."""
+        """Sample tactics and predict value for a state string. Returns (tactics, tactic_logprobs, value)."""
         return self.sample_tactic_from_str_batch([state_str])[0]
 
     def prepare_tactic_prompt(self, state_str: str) -> list[int]:
@@ -122,7 +122,7 @@ class TacticModel:
         """
         Batched tactic generation and value prediction from state strings.
 
-        Returns list of (tactics, value) tuples for each state.
+        Returns list of (tactics, tactic_logprobs, value) tuples for each state.
         """
         device = self.network.get_device()
         assert device.type == "cuda"
@@ -134,19 +134,22 @@ class TacticModel:
         seed = torch.randint(
             torch.iinfo(torch.int32).max, (1,), device=device, generator=self.rng
         ).item()
-        sample_toks_batch, masks_batch = self.engine.generate_batch(
+        sample_toks_batch, masks_batch, logprobs_batch = self.engine.generate_batch(
             tactic_prompts,
             num_samples=self.num_samples,
             min_tokens=1,
             max_tokens=self.max_gen_tokens,
             first_token_occurrences_cap=self.first_token_occurrences_cap,
             seed=seed,
+            return_logprobs=True,
         )
 
         # Decode tactics
         tactics_results = []
+        tactic_logprobs_results = []
         for prompt_idx in range(len(state_strs)):
             tactics = []
+            tactic_logprobs = []
             for sample_idx in range(self.num_samples):
                 tactic_toks = [
                     token
@@ -166,10 +169,12 @@ class TacticModel:
                     # Seems unnecessary and sometimes messes with the linearized proof.
                     continue
                 tactics.append(tactic)
+                tactic_logprobs.append(logprobs_batch[prompt_idx][sample_idx])
             tactics_results.append(tactics)
+            tactic_logprobs_results.append(tactic_logprobs)
 
         # Free tactic generation intermediates before value prediction
-        del sample_toks_batch, masks_batch
+        del sample_toks_batch, masks_batch, logprobs_batch
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -198,7 +203,9 @@ class TacticModel:
 
         # Combine results
         return [
-            ValueOrError.from_success((tactics_results[idx], values_list[idx]))
+            ValueOrError.from_success(
+                (tactics_results[idx], tactic_logprobs_results[idx], values_list[idx])
+            )
             for idx in range(len(state_strs))
         ]
 
@@ -407,7 +414,7 @@ class BlockingTacticModel:
     def sample_tactic(self, state: State) -> ValueOrError[TacticAndValue]:
         """Thread-safe sample_tactic that batches calls from multiple threads.
 
-        Returns (tactics, value) tuple on success.
+        Returns (tactics, tactic_logprobs, value) tuple on success.
         """
         assert len(state) == 1
         return self.sample_tactic_from_str(str(state[0].state).strip())
@@ -424,7 +431,7 @@ class BlockingTacticModel:
         Thread-safe batch tactic+value generation. All states are queued together
         and will be processed in the same or consecutive GPU batches.
 
-        Returns list of (tactics, value) tuples. Raises ``BusyError`` if a batch
+        Returns list of (tactics, tactic_logprobs, value) tuples. Raises ``BusyError`` if a batch
         is already in progress or the model is paused; the HTTP layer translates
         this to 503 so the balancer can route to another backend.
         """
@@ -775,8 +782,11 @@ class RemoteTacticModel:
                     results.append(ValueOrError.from_error(item["error"]))
                 else:
                     tactics = item["tactics"]
+                    logprobs = [float(lp) for lp in item["logprobs"]]
                     value = float(item["value"])
-                    results.append(ValueOrError.from_success((tactics, value)))
+                    results.append(
+                        ValueOrError.from_success((tactics, logprobs, value))
+                    )
             return results
         except http_requests.exceptions.Timeout:
             self._record_failure(
@@ -944,7 +954,11 @@ def create_blocking_model_app(model: BlockingTacticModel, server_id: str = ""):
         return jsonify(
             {
                 "results": [
-                    {"tactics": r.value[0], "value": r.value[1]}
+                    {
+                        "tactics": r.value[0],
+                        "logprobs": r.value[1],
+                        "value": r.value[2],
+                    }
                     if r.is_success()
                     else {"error": r.error}
                     for r in results
@@ -1085,9 +1099,9 @@ def _main():
         print("Generating tactics...")
         result = tactic_model.sample_tactic_from_str(inp.strip())
         if result.is_success():
-            tactics, value = result.value
-            for i, tactic in enumerate(tactics):
-                print(f"  [{i + 1}] {tactic}")
+            tactics, logprobs, value = result.value
+            for i, (tactic, lp) in enumerate(zip(tactics, logprobs)):
+                print(f"  [{i + 1}] (logp={lp:.2f}) {tactic}")
             print(f"  Value: {value:.2f}")
         else:
             print(f"  Error: {result.error}")

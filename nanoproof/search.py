@@ -491,10 +491,7 @@ def run_mcts(
             if "State too long for model's rotary cache" in str(result.error):
                 continue
             raise RuntimeError(f"Tactic/value prediction failed: {result.error}")
-        tactics, value = result.value
-        tactic_logprobs = [1.0] * len(
-            tactics
-        )  # TODO (!): use the actual action logprobs
+        tactics, tactic_logprobs, value = result.value
         value = -value  # convert to MCTS value scale (negative proof depth)
 
         tactic_results = expand_node(
@@ -727,8 +724,6 @@ def _trace_format_path(
     return "".join(parts)
 
 
-# At the end of a simulation, we propagate the evaluation all the way up the
-# tree to the root.
 def backpropagate(
     search_path: list[Node],
     value: float,

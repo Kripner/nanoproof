@@ -183,6 +183,7 @@ class Engine:
         temperature=1.0,
         top_k=None,
         return_logits=False,
+        return_token_logprobs=False,
         first_token_occurrences_cap=None,
         seed=0,
     ):
@@ -193,11 +194,11 @@ class Engine:
         For variable-length batched prompts, each prompt is prefilled individually
         (no padding/masking needed), then decode proceeds in a single batch.
 
-        Yields:
-            If return_logits=False:
-                (token_column, token_masks) tuples
-            If return_logits=True:
-                (token_column, token_masks, logits_column) triples
+        Yields tuples in the order: (token_column, token_masks[, logits[, token_logprobs]]).
+        Optional trailing elements appear in this order when their flags are set:
+            - logits (return_logits=True): the (per-row) logits used for sampling
+            - token_logprobs (return_token_logprobs=True): log_softmax(logits)[sampled_token]
+              over the same logits used for sampling (post min_tokens masking).
         """
         assert isinstance(tokens, list), "tokens must be a list"
 
@@ -341,6 +342,15 @@ class Engine:
                     next_ids = sample_next_token(logits, rng, temperature, top_k)
                 sampled_tokens = next_ids[:, 0].tolist()
 
+                if return_token_logprobs:
+                    token_logprobs = (
+                        torch.log_softmax(logits, dim=-1)
+                        .gather(1, next_ids)[:, 0]
+                        .tolist()
+                    )
+                else:
+                    token_logprobs = None
+
                 token_column = []
                 token_masks = []
                 for i, state in enumerate(row_states):
@@ -367,6 +377,16 @@ class Engine:
 
                 if return_logits:
                     result = result + (logits,)
+                if return_token_logprobs:
+                    if is_batched:
+                        result = result + (
+                            [
+                                token_logprobs[i * num_samples : (i + 1) * num_samples]
+                                for i in range(num_prompts)
+                            ],
+                        )
+                    else:
+                        result = result + (token_logprobs,)
                 yield result
                 num_generated += 1
 
@@ -401,10 +421,23 @@ class Engine:
                 del kv_cache_decode.k_cache, kv_cache_decode.v_cache
                 del kv_cache_decode
 
-    def generate_batch(self, tokens, num_samples=1, return_logits=False, **kwargs):
+    def generate_batch(
+        self,
+        tokens,
+        num_samples=1,
+        return_logits=False,
+        return_logprobs=False,
+        **kwargs,
+    ):
         """
         Non-streaming batch generation that returns the final token sequences.
         Terminal tokens (eos, bos) are not included in the results.
+
+        Return tuple is (results, masks) plus, in order, ``all_logits`` (when
+        ``return_logits``) and ``logprob_sums`` (when ``return_logprobs``).
+        ``logprob_sums`` is the per-row sum of model log-probs (under the same
+        logits used for sampling) over the kept tokens, mirroring the ``masks``
+        / ``results`` shape.
         """
         eos = self.tokenizer.get_eos_token_id()
         bos = self.tokenizer.get_bos_token_id()
@@ -419,19 +452,39 @@ class Engine:
             if return_logits
             else None
         )
+        logprob_sums = (
+            [0.0] * (len(prompts) * num_samples) if return_logprobs else None
+        )
         completed = [False] * len(results)
 
-        gen = self.generate(tokens, num_samples, return_logits=return_logits, **kwargs)
+        gen = self.generate(
+            tokens,
+            num_samples,
+            return_logits=return_logits,
+            return_token_logprobs=return_logprobs,
+            **kwargs,
+        )
         for gen_output in gen:
+            token_column, token_masks = gen_output[0], gen_output[1]
+            idx = 2
             if return_logits:
-                token_column, token_masks, logits_batch = gen_output
+                logits_batch = gen_output[idx]
+                idx += 1
             else:
-                token_column, token_masks = gen_output
                 logits_batch = None
+            if return_logprobs:
+                token_logprobs_batch = gen_output[idx]
+                idx += 1
+            else:
+                token_logprobs_batch = None
 
             if is_batched:
                 token_column = [t for row in token_column for t in row]
                 token_masks = [m for row in token_masks for m in row]
+                if return_logprobs:
+                    token_logprobs_batch = [
+                        lp for row in token_logprobs_batch for lp in row
+                    ]
 
             for i, (token, mask) in enumerate(zip(token_column, token_masks)):
                 if not completed[i]:
@@ -442,6 +495,8 @@ class Engine:
                         masks[i].append(mask)
                         if return_logits:
                             all_logits[i].append(logits_batch[i])
+                        if return_logprobs:
+                            logprob_sums[i] += token_logprobs_batch[i]
             if all(completed):
                 break
         # Explicitly close the generator to free the KV cache tensors immediately,
@@ -462,7 +517,15 @@ class Engine:
                     all_logits[i * num_samples : (i + 1) * num_samples]
                     for i in range(len(prompts))
                 ]
+            if return_logprobs:
+                logprob_sums = [
+                    logprob_sums[i * num_samples : (i + 1) * num_samples]
+                    for i in range(len(prompts))
+                ]
 
+        out = (results, masks)
         if return_logits:
-            return results, masks, all_logits
-        return results, masks
+            out = out + (all_logits,)
+        if return_logprobs:
+            out = out + (logprob_sums,)
+        return out
