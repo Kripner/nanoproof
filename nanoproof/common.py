@@ -494,7 +494,9 @@ class MetricsLogger:
                 kwargs["dir"] = log_dir
             if save_code:
                 kwargs["save_code"] = True
-            self._wandb_run = wandb.init(**kwargs)
+            self._wandb_run = wandb.init(
+                **kwargs, settings=wandb.Settings(x_service_wait=120)
+            )
 
         if "goodseed" in loggers:
             self._goodseed_run = goodseed.Run(
