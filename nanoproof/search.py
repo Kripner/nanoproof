@@ -1,7 +1,7 @@
 from collections import Counter
 from dataclasses import dataclass
 import logging
-from typing import Callable, Self
+from typing import Callable, Self, TYPE_CHECKING
 import math
 import uuid
 
@@ -17,9 +17,31 @@ from nanoproof.common import (
     TimelineRecorder,
 )
 from nanoproof.cli import get_monitor
-from nanoproof.inference import TacticModel, BlockingTacticModel
+
+if TYPE_CHECKING:
+    from nanoproof.inference import TacticModel, BlockingTacticModel
 
 logger = logging.getLogger(__name__)
+
+
+SOLVER_TACTIC_NAMES = ("grind", "lia", "grobner", "aesop")
+
+
+def is_solver_tactic(action) -> bool:
+    """True iff `action` is one of the disabled solver tactics, matched on its
+    first identifier. Matches `grind`, `grind +arith`, `grind?`, but rejects
+    `grindy_lemma` / `grinder`."""
+    if not isinstance(action, str):
+        return False
+    s = action.strip()
+    for name in SOLVER_TACTIC_NAMES:
+        if s == name:
+            return True
+        if s.startswith(name):
+            tail = s[len(name)]
+            if not tail.isalnum() and tail != "_":
+                return True
+    return False
 
 
 @dataclass
@@ -436,6 +458,7 @@ def run_mcts(
     abort_check=None,
     timeline: TimelineRecorder | None = None,
     tactic_sink: Callable[[str, list[tuple[str, str, int]]], None] | None = None,
+    inject_grind: bool = False,
 ) -> int:
     """
     Run MCTS to find a proof.
@@ -452,6 +475,9 @@ def run_mcts(
                      fired once per node expansion with the full batch of
                      attempted tactics. ``status`` is one of ``"error"`` /
                      ``"cycle"`` / ``"success"``.
+        inject_grind: If True, append ``"grind"`` to the model's tactic
+                     candidates at every node expansion (used during eval
+                     under ``--disable-solvers``).
 
     Returns:
         The number of iterations (simulations) that were run.
@@ -502,6 +528,7 @@ def run_mcts(
             timeline=timeline,
             abort_check=abort_check,
             tactic_sink=tactic_sink,
+            inject_grind=inject_grind,
         )
 
         # Record expansion for monitoring
@@ -614,7 +641,11 @@ def expand_node(
     timeline: TimelineRecorder | None = None,
     abort_check=None,
     tactic_sink: "Callable[[str, list[tuple[str, str, int]]], None] | None" = None,
+    inject_grind: bool = False,
 ) -> list[tuple[str, str, int]]:
+    if inject_grind and "grind" not in actions:
+        actions = list(actions) + ["grind"]
+        action_logprobs = list(action_logprobs) + [max(action_logprobs, default=0.0)]
     node.evaluations += 1
     counts = Counter(actions)
     policy = {
@@ -699,6 +730,72 @@ def expand_node(
         if tactic_sink is not None and tactic_results:
             tactic_sink(state_str, tactic_results)
     return tactic_results
+
+
+def close_leaves_with_grind(root: Node, timeout: int = 5000) -> int:
+    """Try ``grind`` on every unexpanded OR leaf in BFS (shallow-first) order.
+
+    Used during experience collection under ``--disable-solvers`` after MCTS
+    runs out of budget without a proof. For each leaf whose grind closes the
+    goal (returns no residual branches), attaches a single terminal ``grind``
+    child mimicking the structure produced by ``expand_node`` and marks the
+    leaf solved. Re-checks ``root.is_solved`` after each successful close so
+    we stop as soon as the theorem is proven.
+
+    Returns the number of leaves closed. Caller should consult
+    ``root.is_solved`` to decide whether the proof is complete.
+    """
+    leaves: list[Node] = []
+    q: list[Node] = [root]
+    while q:
+        n = q.pop(0)
+        if n.children is None:
+            if (
+                n.to_play == Player.OR
+                and not n.is_terminal
+                and not n.is_solved
+                and len(n.state) == 1
+            ):
+                leaves.append(n)
+        else:
+            q.extend(n.children.values())
+
+    closed = 0
+    for leaf in leaves:
+        branch = leaf.state[0]
+        try:
+            result = branch.try_apply_tactic("grind", timeout=timeout)
+        except (
+            RemoteException,
+            LeanProcessException,
+            ConnectionError,
+            TimeoutError,
+        ) as e:
+            short_err = str(e).split("\n", 1)[0]
+            logger.warning(f"close_leaves_with_grind: Lean crash on grind: {short_err}")
+            continue
+        if not result.is_success():
+            continue
+        new_branches = result.value
+        if len(new_branches) != 0:
+            # grind didn't close the goal entirely; treat as failure.
+            continue
+        child = Node(
+            parent=leaf,
+            action="grind",
+            prior=1.0,
+            state=[],
+            to_play=Player.OR,
+            reward=-1.0,
+        )
+        child.is_solved = True
+        leaf.children = {"grind": child}
+        leaf.is_solved = True
+        closed += 1
+        root.calculate_solved()
+        if root.is_solved:
+            return closed
+    return closed
 
 
 def _trace_format_path(

@@ -38,7 +38,7 @@ from nanoproof.common import get_dist_info, Player, GLOBAL_CONFIG, info0
 logger = logging.getLogger(__name__)
 from nanoproof.data.bench.common import BenchTheorem
 from nanoproof.data.rl import deepseek_prover, leanworkbook, numinamath
-from nanoproof.search import Node, execute_tree
+from nanoproof.search import Node, execute_tree, is_solver_tactic
 from nanoproof.tokenizer import get_tokenizer
 
 
@@ -551,11 +551,18 @@ class CollectedExperience:
         game,
         error: str | None,
         proof_size: int | None = None,
+        filter_grind: bool = False,
     ) -> None:
-        """Snapshot one prove attempt and append it to ``self.attempts``."""
+        """Snapshot one prove attempt and append it to ``self.attempts``.
+
+        ``filter_grind``: when True, transitions whose tactic is a disabled
+        solver tactic (e.g. ``grind`` injected by post-search leaf closure)
+        are excluded from the recorded attempt. The full proof tree is still
+        saved verbatim — only the replay-buffer feed is filtered.
+        """
         if outcome == "proven":
             assert game is not None and game.root is not None
-            transitions = extract_transitions(game.root)
+            transitions = extract_transitions(game.root, filter_grind=filter_grind)
             full_tree = (
                 game.unsimplified_root.serialize()
                 if getattr(game, "unsimplified_root", None)
@@ -857,22 +864,31 @@ def prune_redundant_node(root: Node) -> bool:
     return False
 
 
-def extract_transitions(node: Node) -> list[tuple[str, str, float]]:
+def extract_transitions(
+    node: Node, filter_grind: bool = False
+) -> list[tuple[str, str, float]]:
     """
     Extract (context, tactic, value_target) transitions from a solved proof tree.
 
     Walks the solved path, extracting (state, action, value) for each OR node.
     Works with both live LeanProofBranch states and deserialized MockProofBranch states.
+
+    ``filter_grind``: when True, transitions whose tactic is one of the
+    disabled solver tactics (``grind``/``lia``/``grobner``/``aesop``) are
+    skipped — used under ``--disable-solvers`` so the replay buffer never
+    sees the grind that closed a leaf.
     """
     if not node.is_solved:
         return []
 
     transitions = []
-    _extract_transitions_recursive(node, transitions)
+    _extract_transitions_recursive(node, transitions, filter_grind=filter_grind)
     return transitions
 
 
-def _extract_transitions_recursive(node: Node, transitions: list):
+def _extract_transitions_recursive(
+    node: Node, transitions: list, filter_grind: bool = False
+):
     """Recursively extract transitions from solved paths."""
     # if not node.is_solved:
     #     return
@@ -893,12 +909,15 @@ def _extract_transitions_recursive(node: Node, transitions: list):
         action = min(solved_actions, key=lambda a: len(a))
 
         # Extract transition: (context, tactic, value_target)
-        context = str(node.state[0].state).strip()
-        transitions.append((context, action.strip(), node.value_target))
+        if not (filter_grind and is_solver_tactic(action)):
+            context = str(node.state[0].state).strip()
+            transitions.append((context, action.strip(), node.value_target))
 
         node = node.children[action]
 
     # Handle AND nodes (multiple subgoals)
     if node.to_play == Player.AND and node.children:
         for child in node.children.values():
-            _extract_transitions_recursive(child, transitions)
+            _extract_transitions_recursive(
+                child, transitions, filter_grind=filter_grind
+            )

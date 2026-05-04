@@ -35,6 +35,7 @@ from nanoproof.common import ValueOrError, GLOBAL_CONFIG, get_dist_info, info0
 from nanoproof.engine import Engine
 from nanoproof.tokenizer import HuggingFaceTokenizer
 from nanoproof.model import Transformer
+from nanoproof.search import is_solver_tactic
 
 
 class BusyError(Exception):
@@ -73,6 +74,7 @@ class TacticModel:
     first_token_occurrences_cap: int | None = None
     max_prompt_len: int = 512
     max_gen_tokens: int = 24
+    disable_solvers: bool = False
 
     def __post_init__(self):
         self.rng = torch.Generator(device=self.network.get_device())
@@ -168,6 +170,8 @@ class TacticModel:
                 if tactic.strip().startswith("replace"):
                     # Seems unnecessary and sometimes messes with the linearized proof.
                     continue
+                if self.disable_solvers and is_solver_tactic(tactic):
+                    continue
                 tactics.append(tactic)
                 tactic_logprobs.append(logprobs_batch[prompt_idx][sample_idx])
             tactics_results.append(tactics)
@@ -230,6 +234,7 @@ class TacticModel:
         first_token_occurrences_cap: int | None = None,
         max_prompt_len: int = 512,
         max_gen_tokens: int = 24,
+        disable_solvers: bool = False,
     ) -> Self:
         model, tokenizer, _ = load_model(model_path, torch.device("cuda"), phase="eval")
         engine = Engine(model, tokenizer)
@@ -242,6 +247,7 @@ class TacticModel:
             first_token_occurrences_cap=first_token_occurrences_cap,
             max_prompt_len=max_prompt_len,
             max_gen_tokens=max_gen_tokens,
+            disable_solvers=disable_solvers,
         )
 
 

@@ -42,6 +42,7 @@ from nanoproof.search import (
     MCTSAbortedError,
     Node,
     SearchConfig,
+    close_leaves_with_grind,
     run_mcts,
     verify_node,
 )
@@ -113,10 +114,14 @@ class Prover:
         config: SearchConfig,
         tactic_model: InferenceBalancer,
         simplify_proofs: bool = True,
+        post_search_grind: bool = False,
+        expand_inject_grind: bool = False,
     ):
         self.config = config
         self.tactic_model = tactic_model
         self.simplify_proofs = simplify_proofs
+        self.post_search_grind = post_search_grind
+        self.expand_inject_grind = expand_inject_grind
 
     def prove(
         self,
@@ -177,7 +182,12 @@ class Prover:
                 abort_check=abort_check,
                 timeline=timeline,
                 tactic_sink=tactic_sink,
+                inject_grind=self.expand_inject_grind,
             )
+            if not game.root.is_solved and self.post_search_grind:
+                close_leaves_with_grind(
+                    game.root, timeout=self.config.verify_timeout
+                )
             if game.root.is_solved:
                 verify_err = verify_node(game.root, timeout=self.config.verify_timeout)
                 if verify_err:
@@ -292,6 +302,7 @@ class ProverWorker:
             Callable[[str, list[tuple[str, str, int]]], None]
         ] = None
         self._collect_theorem_counter = 0
+        self._collect_disable_solvers: bool = False
 
         # Per-call eval state. Set/cleared inside evaluate().
         self._eval_get_theorem: Optional[
@@ -360,18 +371,31 @@ class ProverWorker:
         holder: CollectExperienceHolder,
         search_config: SearchConfig,
         simplify_proofs: bool = True,
+        disable_solvers: bool = False,
     ) -> None:
         """Configure persistent collect mode. Must be called once before
         the first :meth:`collect`. Actors begin sampling from the matchmaker
         and writing into ``holder`` immediately; ``collect()`` is just a
-        wait-for-target barrier on top of that."""
-        prover = Prover(search_config, self.tactic_model, simplify_proofs=simplify_proofs)
+        wait-for-target barrier on top of that.
+
+        ``disable_solvers``: when True, the collect Prover runs ``grind`` on
+        each unexpanded OR leaf after MCTS exhausts its budget without a
+        proof; successful grinds are kept in the proof tree (and verified)
+        but filtered out of the replay buffer.
+        """
+        prover = Prover(
+            search_config,
+            self.tactic_model,
+            simplify_proofs=simplify_proofs,
+            post_search_grind=disable_solvers,
+        )
         with self._mode_cv:
             assert self._matchmaker is None, "install_collect called twice"
             self._matchmaker = matchmaker
             self._collect_holder = holder
             self._collect_prover = prover
             self._collect_tactic_sink = holder.record_tactic
+            self._collect_disable_solvers = disable_solvers
             self._mode = "collect"
             self._release_event.clear()
             self._mode_cv.notify_all()
@@ -448,6 +472,7 @@ class ProverWorker:
         search_config: SearchConfig,
         progress_callback: Callable[[int, int, int, int], None] | None = None,
         tactic_sink: Callable[[str, list[tuple[str, str, int]]], None] | None = None,
+        disable_solvers: bool = False,
     ) -> dict:
         """Evaluate theorems using MCTS. Drains in-flight collect actors at
         entry and exit so eval state cannot leak into collect (or vice
@@ -527,7 +552,11 @@ class ProverWorker:
                         started = index[0]
                     progress_callback(started, n, solved, errors)
 
-        eval_prover = Prover(search_config, self.tactic_model)
+        eval_prover = Prover(
+            search_config,
+            self.tactic_model,
+            expand_inject_grind=disable_solvers,
+        )
         self._switch_to_eval(get_theorem, on_result, eval_prover, tactic_sink)
         try:
             while not self._shutdown_event.is_set():
@@ -844,7 +873,13 @@ class ProverWorker:
         )
         transitions_before = holder.num_transitions()
         holder.record_attempt(
-            theorem, outcome, num_simulations, game, error, proof_size
+            theorem,
+            outcome,
+            num_simulations,
+            game,
+            error,
+            proof_size,
+            filter_grind=self._collect_disable_solvers,
         )
         matchmaker.send_result(theorem, outcome, proof_size)
         monitor = get_monitor()

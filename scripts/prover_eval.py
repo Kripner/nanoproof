@@ -295,6 +295,13 @@ def main():
         action="store_true",
         help="enable debug logging for inference and proving",
     )
+    parser.add_argument(
+        "--disable-solvers",
+        action="store_true",
+        help="Filter {grind, lia, grobner, aesop} from model generation; "
+        "during eval, `grind` is still tried at every node expansion via "
+        "synthetic injection.",
+    )
     # Search hyperparameters. Eval theorems are harder to verify than
     # collection theorems, so we override verify_timeout to 30s here.
     add_dataclass_args(
@@ -514,6 +521,7 @@ def main():
             model_path=model_path,
             first_token_occurrences_cap=args.first_token_occurrences_cap,
             max_gen_tokens=args.max_gen_tokens,
+            disable_solvers=args.disable_solvers,
         )
         # Defer max_gen_samples default until we know num_actors
         tactic_model = BlockingTacticModel(
@@ -610,6 +618,7 @@ def main():
                     num_simulations=args.num_simulations,
                     search_config=search_config,
                     progress_callback=progress_callback,
+                    disable_solvers=args.disable_solvers,
                 )
                 dataset_elapsed = time.monotonic() - dataset_start
                 done.set()

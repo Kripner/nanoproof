@@ -155,6 +155,16 @@ parser.add_argument(
     help="skip prune_redundant_nodes during experience collection; "
     "transitions reflect the raw MCTS tree. Eval is unaffected.",
 )
+parser.add_argument(
+    "--disable-solvers",
+    action="store_true",
+    help="Disable {grind, lia, grobner, aesop} from model generation. "
+    "During collection, after MCTS budget is exhausted, try `grind` on each "
+    "unexpanded OR leaf (shallowest-first); successful grinds are kept in "
+    "the proof tree (and verified) but filtered out of the replay buffer. "
+    "During eval, `grind` is artificially injected as an extra candidate at "
+    "every node expansion.",
+)
 parser.add_argument("--replay-buffer-window-size", type=int, default=250_000)
 parser.add_argument("--batch-time-limit", type=float, default=0.5)
 parser.add_argument(
@@ -283,6 +293,7 @@ inner_tactic_model = TacticModel.create(
     model_path=args.model_path,
     first_token_occurrences_cap=args.first_token_occurrences_cap,
     max_gen_tokens=args.max_gen_tokens,
+    disable_solvers=args.disable_solvers,
 )
 tactic_model = BlockingTacticModel(
     inner_model=inner_tactic_model,
@@ -348,6 +359,7 @@ if balancer:
         collect_holder,
         search_config,
         simplify_proofs=not args.no_proof_simplification,
+        disable_solvers=args.disable_solvers,
     )
     # With the busy-aware balancer, actors concentrate on one GPU at a time;
     # that GPU flips busy once its queue hits max_gen_samples, then the
@@ -610,6 +622,7 @@ while True:
                 num_simulations=args.num_simulations_eval,
                 search_config=search_config,
                 tactic_sink=eval_experience.record_tactic,
+                disable_solvers=args.disable_solvers,
             )
             logger.info(
                 f"Evaluating on {len(proofnet_theorems)} theorems from ProofNet"
@@ -620,6 +633,7 @@ while True:
                 num_simulations=args.num_simulations_eval,
                 search_config=search_config,
                 tactic_sink=eval_experience.record_tactic,
+                disable_solvers=args.disable_solvers,
             )
 
             rl_monitor.record_eval(
