@@ -241,10 +241,10 @@ def main():
     parser.add_argument("--num-sampled-tactics", type=int, default=6)
     parser.add_argument(
         "--first-token-occurrences-cap",
-        type=int,
+        type=lambda s: None if s.lower() == "none" else int(s),
         default=2,
         help="cap on how many sampled tactics may share the same first token "
-        "(per state). None disables the cap.",
+        "(per state). Pass 'none' to disable the cap.",
     )
     parser.add_argument(
         "--max-gen-tokens",
