@@ -334,6 +334,11 @@ def main():
         pr = current["prover"]
         if tm is not None:
             tm.shutdown()
+            # Flask daemon threads from start_inference_server still hold a
+            # closure on tm. Drop the inner TacticModel reference so the GPU
+            # network/Engine become collectible once the surrounding scope
+            # releases its locals; otherwise the next model loads on top.
+            tm.inner_model = None
         if pr is not None:
             pr.close()
         current["tactic_model"] = None
@@ -411,13 +416,36 @@ def main():
                                 f"Found {len(errors)} error entries to retry in {dataset_name}"
                             )
             elif existing_results and not args.force:
-                print0("Evaluation results already exist:")
-                for _, eval_dir, _ in existing_results:
-                    print0(f"  {eval_dir}")
-                print0(
-                    f"Skipping {model_path}. Use --force to overwrite, or --continue to retry errors."
-                )
-                should_skip = True
+                # In --run-dir sweep mode, treat existing-with-errors as an
+                # implicit --continue: retry just the errored theorems and
+                # merge with the prior successes. Skip only if all clean.
+                if args.run_dir is not None:
+                    for dataset_name, _, theorems_path in existing_results:
+                        successful, errors = load_existing_eval_results(theorems_path)
+                        if not errors:
+                            continue
+                        error_theorems = [
+                            BenchTheorem(
+                                source=e["theorem"],
+                                dataset=e["dataset"],
+                                id=e["id"],
+                            )
+                            for e in errors
+                        ]
+                        continue_data[dataset_name] = (successful, error_theorems)
+                        print0(
+                            f"Found {len(errors)} error entries to retry in {dataset_name}"
+                        )
+                if continue_data:
+                    print0(f"Retrying errored entries in {model_path}")
+                else:
+                    print0("Evaluation results already exist:")
+                    for _, eval_dir, _ in existing_results:
+                        print0(f"  {eval_dir}")
+                    print0(
+                        f"Skipping {model_path}. Use --force to overwrite, or --continue to retry errors."
+                    )
+                    should_skip = True
 
         if ddp:
             skip_tensor = torch.tensor([1 if should_skip else 0], device=device)
@@ -489,8 +517,11 @@ def main():
 
         active_barrier(f"inference_ready_{tag}")
 
-        # Build per-model dataset list (continue mode filters to errors only)
-        if args.continue_eval:
+        # Build per-model dataset list. Continue mode (explicit --continue or
+        # auto-continue from --run-dir) filters to errored theorems only;
+        # continue_data is populated only on master, so workers fall through
+        # to full_dataset_theorems but never iterate it.
+        if args.continue_eval or continue_data:
             dataset_theorems = {}
             for dataset_name, (_, error_theorems) in continue_data.items():
                 if error_theorems:
@@ -548,7 +579,7 @@ def main():
 
                 prepend = (
                     continue_data.get(dataset_name, (None, None))[0]
-                    if args.continue_eval
+                    if (args.continue_eval or continue_data)
                     else None
                 )
                 summary = {
