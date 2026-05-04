@@ -541,9 +541,14 @@ while True:
 
     # Always eval at step 0; time-based triggers don't fire on the first call
     # since no time has elapsed since construction.
+    # Compute do_eval and do_save back-to-back here (rather than checking
+    # save_trigger later in the iteration) so that with equal time-based
+    # intervals the two fire on the same step — both .fire() calls see
+    # essentially the same `now`, so the threshold-crossing is identical.
     do_eval = master_process and step >= args.eval_start and (
         step == 0 or eval_trigger.fire(step)
     )
+    do_save = master_process and step > 0 and save_trigger.fire(step)
     if ddp:
         do_eval = broadcast_value(do_eval)
     if do_eval:
@@ -744,7 +749,7 @@ while True:
         # holder.rotate().save() is deferred until after the train phase so
         # train_subsample.jsonl lands in the same step_<step>/ dir.
 
-    if master_process and step > 0 and save_trigger.fire(step):
+    if do_save:
         checkpoint_meta = {
             "step": step,
             "model_config": asdict(model.config),
