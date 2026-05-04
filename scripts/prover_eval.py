@@ -113,7 +113,10 @@ def binary_search_order(n: int) -> list[int]:
 def resolve_run_dir_models(run_dir: str) -> list[str]:
     """List ``model_*.pt`` checkpoints in ``run_dir``, ordered for sweep.
 
-    Files are sorted by step, then reordered via :func:`binary_search_order`.
+    Order is: last checkpoint first (most-trained, the headline number),
+    then the first (untrained baseline), then the interior checkpoints in
+    binary-search order (middle, quarters, eighths, ...). An interrupted
+    sweep still pins both endpoints and progressively fills the interior.
     """
     if not os.path.isdir(run_dir):
         raise ValueError(f"--run-dir {run_dir!r} is not a directory")
@@ -131,8 +134,11 @@ def resolve_run_dir_models(run_dir: str) -> list[str]:
         raise ValueError(f"No model_*.pt checkpoints found in {run_dir}")
     by_step.sort()
     sorted_paths = [p for _, p in by_step]
-    order = binary_search_order(len(sorted_paths))
-    return [sorted_paths[i] for i in order]
+    n = len(sorted_paths)
+    if n <= 2:
+        return list(reversed(sorted_paths))
+    interior = [sorted_paths[i + 1] for i in binary_search_order(n - 2)]
+    return [sorted_paths[-1], sorted_paths[0], *interior]
 
 
 def print_results(results, name, breakdown):
