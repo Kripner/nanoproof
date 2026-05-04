@@ -63,6 +63,44 @@ from nanoproof.inference import setup_distributed_inference
 # TODO: during verification, maybe set 'set_option maxHeartbeats 0\nset_option maxRecDepth 100000'
 
 
+def merge_continue_results(results: dict, prepend_entries: list[dict] | None) -> dict:
+    """Fold previously-successful (--continue) entries back into the retry results.
+
+    The live evaluator only saw the retried (formerly errored) theorems, so
+    its summary reflects just that subset. To produce a summary over the full
+    benchmark we materialize the prepended successes into the same shape that
+    ``compute_success_rate_by_simulations`` and ``print_results`` consume —
+    notably normalizing the on-disk ``proof`` key to the live ``proof_tree``
+    key so the threshold breakdown picks them up.
+
+    Returns the original ``results`` unchanged when there are no prepend
+    entries (non-continue runs and continue runs with no past successes).
+    """
+    if not prepend_entries:
+        return results
+    detailed = list(results.get("detailed_results", []))
+    for e in prepend_entries:
+        detailed.append(
+            {
+                "proof_tree": e.get("proof"),
+                "num_iterations": e.get("num_iterations", 0),
+                "error": e.get("error"),
+            }
+        )
+    total = len(detailed)
+    solved = sum(
+        1 for r in detailed if r.get("proof_tree") is not None and not r.get("error")
+    )
+    errors = sum(1 for r in detailed if r.get("error"))
+    return {
+        "success_rate": solved / total if total > 0 else 0.0,
+        "solved": solved,
+        "total": total,
+        "errors": errors,
+        "detailed_results": detailed,
+    }
+
+
 def compute_success_rate_by_simulations(results, num_simulations):
     """Return ``{threshold: success_rate}`` for thresholds <= num_simulations.
 
@@ -576,29 +614,37 @@ def main():
                 dataset_elapsed = time.monotonic() - dataset_start
                 done.set()
                 printer.join()
-                all_results[dataset_name] = results
-                breakdown = compute_success_rate_by_simulations(
-                    results, args.num_simulations
-                )
-                print_results(results, dataset_name, breakdown)
-                print0(f"Time for {dataset_name}: {dataset_elapsed:.1f}s")
 
                 prepend = (
                     continue_data.get(dataset_name, (None, None))[0]
                     if (args.continue_eval or continue_data)
                     else None
                 )
+                # Fold previously-successful entries into the metrics so the
+                # printed numbers and summary.toml reflect the full benchmark,
+                # not just the retry batch.
+                merged = merge_continue_results(results, prepend)
+                all_results[dataset_name] = merged
+                breakdown = compute_success_rate_by_simulations(
+                    merged, args.num_simulations
+                )
+                print_results(merged, dataset_name, breakdown)
+                print0(f"Time for {dataset_name}: {dataset_elapsed:.1f}s")
+
                 summary = {
                     "dataset": dataset_name,
                     "split": args.split,
                     "num_simulations": args.num_simulations,
-                    "total": results["total"],
-                    "solved": results["solved"],
-                    "errors": results["errors"],
-                    "success_rate": results["success_rate"],
+                    "total": merged["total"],
+                    "solved": merged["solved"],
+                    "errors": merged["errors"],
+                    "success_rate": merged["success_rate"],
                     "elapsed_seconds": dataset_elapsed,
                     "success_rate_by_simulations": breakdown,
                 }
+                # Pass the live (retry-only) results to the JSONL writer; it
+                # prepends the saved successes itself, so passing `merged`
+                # would duplicate those entries.
                 save_eval_results(
                     checkpoint_info,
                     dataset_name + split_suffix + output_suffix,
