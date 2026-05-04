@@ -762,6 +762,20 @@ def close_leaves_with_grind(root: Node, timeout: int = 5000) -> int:
 
     closed = 0
     for leaf in leaves:
+        # Skip if some ancestor is already solved (e.g. a sibling leaf was
+        # just closed by grind in this same pass). Without this guard we'd
+        # add a second solved child to an interior OR, which violates the
+        # "exactly one solved action" invariant that prune_redundant_node
+        # asserts.
+        p = leaf.parent
+        ancestor_solved = False
+        while p is not None:
+            if p.is_solved:
+                ancestor_solved = True
+                break
+            p = p.parent
+        if ancestor_solved:
+            continue
         branch = leaf.state[0]
         try:
             result = branch.try_apply_tactic("grind", timeout=timeout)

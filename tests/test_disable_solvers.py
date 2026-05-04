@@ -271,6 +271,69 @@ def test_close_leaves_with_grind_handles_failure():
     assert failing_branch.calls == ["grind"]
 
 
+def test_close_leaves_with_grind_skips_when_ancestor_already_solved():
+    # Regression: if an interior OR becomes solved after a sibling leaf is
+    # closed, subsequent leaves under that same OR must be skipped — otherwise
+    # the OR ends up with multiple solved actions and prune_redundant_node
+    # asserts. Construct a tree where root needs both branches of an AND
+    # solved, so the first close does NOT trigger the early-exit.
+    #
+    #   root (OR)
+    #   └── tac → AND
+    #       ├── 0 → orA (OR)
+    #       │   ├── a1 → leafA1   (closes)
+    #       │   └── a2 → leafA2   (must be skipped: orA already solved)
+    #       └── 1 → orB
+    #           └── b  → leafB    (closes, finishes root)
+    branchA1 = FakeBranch("leafA1", {"grind": ValueOrError.from_success([])})
+    branchA2 = FakeBranch("leafA2", {"grind": ValueOrError.from_success([])})
+    branchB = FakeBranch("leafB", {"grind": ValueOrError.from_success([])})
+
+    def or_node(parent, action, branch=None):
+        n = Node(
+            parent=parent, action=action,
+            prior=None if action is None else 1.0,
+            state=[branch] if branch is not None else [FakeBranch("interior")],
+            reward=None if action is None else -1.0,
+            to_play=Player.OR,
+        )
+        return n
+
+    root = or_node(None, None)
+    and_node = Node(
+        parent=root, action="tac", prior=1.0,
+        state=[FakeBranch("and_state"), FakeBranch("and_state2")],
+        reward=-1.0, to_play=Player.AND,
+    )
+    root.children = {"tac": and_node}
+
+    orA = or_node(and_node, 0)
+    orB = or_node(and_node, 1)
+    and_node.children = {0: orA, 1: orB}
+
+    leafA1 = or_node(orA, "a1", branch=branchA1)
+    leafA2 = or_node(orA, "a2", branch=branchA2)
+    orA.children = {"a1": leafA1, "a2": leafA2}
+
+    leafB = or_node(orB, "b", branch=branchB)
+    orB.children = {"b": leafB}
+
+    closed = close_leaves_with_grind(root, timeout=1000)
+
+    # Both proof-relevant leaves closed (one in each AND branch); the redundant
+    # sibling leafA2 was skipped.
+    assert closed == 2
+    assert root.is_solved
+    assert orA.is_solved
+    # orA must end up with exactly one solved action — the invariant
+    # prune_redundant_node relies on.
+    solved_actions_at_orA = [a for a, c in orA.children.items() if c.is_solved]
+    assert solved_actions_at_orA == ["a1"]
+    assert branchA1.calls == ["grind"]
+    assert branchA2.calls == []  # skipped
+    assert branchB.calls == ["grind"]
+
+
 def test_close_leaves_with_grind_rejects_partial_close():
     # grind "succeeds" but leaves a residual branch; we don't count it as a
     # solve since it didn't close the goal entirely.
