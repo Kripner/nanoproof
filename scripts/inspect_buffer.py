@@ -127,6 +127,13 @@ def fmt_value(v):
     return str(iv) if iv == v else f"{v:.2f}"
 
 
+def count_edges(node):
+    if not node:
+        return 0
+    children = node.get("children") or {}
+    return len(children) + sum(count_edges(c) for c in children.values())
+
+
 def cmd_stats(args):
     by_step = defaultdict(Counter)
     by_dataset = defaultdict(Counter)
@@ -135,6 +142,7 @@ def cmd_stats(args):
     n_attempts = 0
     n_transitions = 0
     error_counts = Counter()
+    tree_edge_pairs = []
 
     for shard_step, a in iter_attempts(
         args.path, step=args.step, steps=args.steps, dataset=args.dataset
@@ -149,6 +157,13 @@ def cmd_stats(args):
             error_counts[a["error"].splitlines()[0][:80]] += 1
         if a.get("proof_size") is not None:
             proof_sizes.append(a["proof_size"])
+        ft, st = a.get("full_tree"), a.get("simplified_tree")
+        if ft is not None or st is not None:
+            tree_edge_pairs.append(
+                (count_edges(ft) if ft is not None else None,
+                 count_edges(st) if st is not None else None,
+                 a.get("proof_size"))
+            )
         for ctx, tac, val in a.get("transitions") or []:
             n_transitions += 1
             state_lens.append(len(ctx))
@@ -186,6 +201,50 @@ def cmd_stats(args):
     if outcomes_total.get("proven", 0):
         print(f"  per proven attempt:   {n_transitions / outcomes_total['proven']:.2f}")
     print()
+
+    if tree_edge_pairs:
+        full_only = [f for f, _, _ in tree_edge_pairs if f is not None]
+        simp_only = [s for _, s, _ in tree_edge_pairs if s is not None]
+        both = [(f, s, ps) for f, s, ps in tree_edge_pairs if f is not None and s is not None]
+        n_full = sum(full_only)
+        n_simp = sum(simp_only)
+        print("Tree edges (proven attempts):")
+        if full_only:
+            print(
+                f"  full:       total={n_full:>10,}  "
+                f"mean/attempt={n_full / len(full_only):.2f}  "
+                f"(n={len(full_only):,})"
+            )
+        if simp_only:
+            print(
+                f"  simplified: total={n_simp:>10,}  "
+                f"mean/attempt={n_simp / len(simp_only):.2f}  "
+                f"(n={len(simp_only):,})"
+            )
+        if both:
+            n_full_b = sum(f for f, _, _ in both)
+            n_simp_b = sum(s for _, s, _ in both)
+            removed = n_full_b - n_simp_b
+            n_pruned = sum(1 for f, s, _ in both if s < f)
+            pct_removed = 100 * removed / n_full_b if n_full_b else 0
+            pct_pruned = 100 * n_pruned / len(both)
+            print(
+                f"  removed:    total={removed:>10,}  "
+                f"({pct_removed:.1f}% of full, paired n={len(both):,})"
+            )
+            print(
+                f"  trees pruned (simplified < full): "
+                f"{n_pruned:,}/{len(both):,} ({pct_pruned:.1f}%)"
+            )
+            multi = [(f, s) for f, s, ps in both if ps is not None and ps >= 2]
+            if multi:
+                n_pruned_multi = sum(1 for f, s in multi if s < f)
+                print(
+                    f"    among proof_size>=2:           "
+                    f"{n_pruned_multi:,}/{len(multi):,} "
+                    f"({100 * n_pruned_multi / len(multi):.1f}%)"
+                )
+        print()
 
     if proof_sizes:
         ps_counts = Counter(proof_sizes)
