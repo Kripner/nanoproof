@@ -16,7 +16,6 @@ each (model, dataset) pair.
 
 import argparse
 import atexit
-import collections
 import gc
 import logging
 import math
@@ -126,35 +125,12 @@ def compute_success_rate_by_simulations(results, num_simulations):
     return breakdown
 
 
-def binary_search_order(n: int) -> list[int]:
-    """Indices [0, n) emitted as middle, then midpoints of remaining halves.
-
-    Used to order checkpoint sweeps so an interrupted run still gives even
-    step coverage — first the middle checkpoint, then the 1/4 and 3/4
-    points, then 1/8, 3/8, 5/8, 7/8, etc.
-    """
-    if n <= 0:
-        return []
-    result = []
-    queue = collections.deque([(0, n - 1)])
-    while queue:
-        lo, hi = queue.popleft()
-        mid = (lo + hi) // 2
-        result.append(mid)
-        if lo <= mid - 1:
-            queue.append((lo, mid - 1))
-        if mid + 1 <= hi:
-            queue.append((mid + 1, hi))
-    return result
-
-
 def resolve_run_dir_models(run_dir: str) -> list[str]:
     """List ``model_*.pt`` checkpoints in ``run_dir``, ordered for sweep.
 
-    Order is: last checkpoint first (most-trained, the headline number),
-    then the first (untrained baseline), then the interior checkpoints in
-    binary-search order (middle, quarters, eighths, ...). An interrupted
-    sweep still pins both endpoints and progressively fills the interior.
+    Order: last, first, indices that are multiples of 4, then multiples of
+    2, then the rest. An interrupted sweep still pins both endpoints and
+    progressively fills the interior at decreasing step granularity.
     """
     if not os.path.isdir(run_dir):
         raise ValueError(f"--run-dir {run_dir!r} is not a directory")
@@ -173,10 +149,21 @@ def resolve_run_dir_models(run_dir: str) -> list[str]:
     by_step.sort()
     sorted_paths = [p for _, p in by_step]
     n = len(sorted_paths)
-    if n <= 2:
-        return list(reversed(sorted_paths))
-    interior = [sorted_paths[i + 1] for i in binary_search_order(n - 2)]
-    return [sorted_paths[-1], sorted_paths[0], *interior]
+
+    seen: set[int] = set()
+    order: list[str] = []
+
+    def add(i: int) -> None:
+        if 0 <= i < n and i not in seen:
+            seen.add(i)
+            order.append(sorted_paths[i])
+
+    add(n - 1)
+    add(0)
+    for stride in (4, 2, 1):
+        for i in range(0, n, stride):
+            add(i)
+    return order
 
 
 def print_results(results, name, breakdown):
