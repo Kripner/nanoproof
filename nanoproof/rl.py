@@ -1,4 +1,5 @@
 import atexit
+import json
 import math
 import os
 import logging
@@ -35,6 +36,7 @@ from nanoproof.common import (
     enable_memory_profiling,
 )
 from nanoproof.checkpoints import (
+    load_checkpoint,
     load_model,
     save_checkpoint,
     save_eval_results_to_run_dir,
@@ -90,17 +92,21 @@ parser.add_argument("--seed", type=int, default=0)
 parser.add_argument(
     "--model-path",
     type=str,
-    required=True,
-    help="path to model_NNNNNN.pt to load from (relative to models/ or absolute)",
+    default=None,
+    help="path to model_NNNNNN.pt to load from (relative to models/ or absolute). "
+    "Required unless --resume-from is given. Mutually exclusive with --resume-from.",
 )
 parser.add_argument(
     "--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)"
 )
 parser.add_argument(
-    "--load-buffer",
+    "--resume-from",
     type=str,
-    default="",
-    help="path to a previous RL run dir; at startup, seed the replay buffer with every transition found in its step_*/theorems.jsonl shards (FIFO-truncated to --replay-buffer-window-size) and replay every attempt through the matchmaker. Independent of training resumption - does not affect the step counter or model checkpoint.",
+    default=None,
+    help="path to a previous RL run's log directory. Loads the latest checkpoint "
+    "(model + optimizer + step) from the matching model directory, seeds the "
+    "replay/negative buffers from its step_*/ shards, and replays matchmaker "
+    "stats. Mutually exclusive with --model-path.",
 )
 
 # Infrastructure
@@ -252,6 +258,13 @@ parser.add_argument(
     help="log level for the nanoproof package logger",
 )
 args = parser.parse_args()
+
+if (args.model_path is None) == (args.resume_from is None):
+    parser.error(
+        "exactly one of --model-path / --resume-from must be given (got "
+        f"model_path={args.model_path!r}, resume_from={args.resume_from!r})"
+    )
+
 user_config = vars(args).copy()
 
 logging.getLogger("nanoproof").setLevel(args.log_level.upper())
@@ -269,6 +282,101 @@ set_ddp_info(rank=ddp_rank)
 
 # `kill -USR1 <pid>` on any rank dumps all-thread Python tracebacks to stderr.
 faulthandler.register(signal.SIGUSR1, all_threads=True)
+
+
+def _resolve_resume(prior_log_dir: str, world_size: int) -> tuple[str, int, str]:
+    """Resolve a --resume-from log dir to (prior_model_dir, latest_step, model_path).
+
+    Picks the largest N for which model_NNNNNN.pt, meta_NNNNNN.json, and
+    optim_NNNNNN_rank{r}.pt for every r in [0, world_size) all exist in the
+    matching model dir.
+    """
+    if "/logs/" not in prior_log_dir:
+        raise ValueError(
+            f"--resume-from path must contain '/logs/' so the model dir can be "
+            f"derived (got {prior_log_dir!r})"
+        )
+    prior_model_dir = prior_log_dir.replace("/logs/", "/models/", 1)
+    if not os.path.isdir(prior_model_dir):
+        raise FileNotFoundError(
+            f"--resume-from: derived model dir does not exist: {prior_model_dir}"
+        )
+    candidates = []
+    for fn in os.listdir(prior_model_dir):
+        if fn.startswith("model_") and fn.endswith(".pt"):
+            try:
+                candidates.append(int(fn.removeprefix("model_").removesuffix(".pt")))
+            except ValueError:
+                pass
+    if not candidates:
+        raise FileNotFoundError(
+            f"--resume-from: no model_NNNNNN.pt files in {prior_model_dir}"
+        )
+    for step_n in sorted(candidates, reverse=True):
+        meta_path = os.path.join(prior_model_dir, f"meta_{step_n:06d}.json")
+        if not os.path.exists(meta_path):
+            continue
+        optim_paths = [
+            os.path.join(prior_model_dir, f"optim_{step_n:06d}_rank{r}.pt")
+            for r in range(world_size)
+        ]
+        if all(os.path.exists(p) for p in optim_paths):
+            model_path = os.path.join(prior_model_dir, f"model_{step_n:06d}.pt")
+            return prior_model_dir, step_n, model_path
+        missing = [p for p in optim_paths if not os.path.exists(p)]
+        info0(
+            logger,
+            f"--resume-from: skipping step {step_n} (missing {missing}); "
+            "this happens if world_size differs from the prior run.",
+        )
+    raise FileNotFoundError(
+        f"--resume-from: no checkpoint in {prior_model_dir} has all of "
+        f"model+meta+optim files for world_size={world_size}"
+    )
+
+
+def _log_resume_arg_diff(prior_log_dir: str, current_args: dict) -> None:
+    """Log every arg whose value differs from the prior run's args.json."""
+    prior_args_path = os.path.join(prior_log_dir, "args.json")
+    if not os.path.exists(prior_args_path):
+        info0(
+            logger,
+            f"--resume-from: no args.json at {prior_args_path}; skipping arg diff",
+        )
+        return
+    with open(prior_args_path, "r") as f:
+        prior_args = json.load(f)
+    skip = {"run", "model_path", "resume_from", "load_buffer", "log_dir", "model_dir"}
+    keys = (set(prior_args.keys()) | set(current_args.keys())) - skip
+    sentinel = object()
+    diffs = []
+    for key in sorted(keys):
+        old = prior_args.get(key, sentinel)
+        new = current_args.get(key, sentinel)
+        if old != new:
+            old_repr = "<not set>" if old is sentinel else repr(old)
+            new_repr = "<not set>" if new is sentinel else repr(new)
+            diffs.append((key, old_repr, new_repr))
+    if not diffs:
+        info0(logger, "--resume-from: all args match the prior run")
+        return
+    info0(logger, f"--resume-from: {len(diffs)} arg(s) differ from prior run:")
+    for key, old_repr, new_repr in diffs:
+        info0(logger, f"  {key}: {old_repr} -> {new_repr}")
+
+
+prior_model_dir = None
+resume_step_value = 0
+if args.resume_from is not None:
+    prior_model_dir, resume_step_value, resolved_model_path = _resolve_resume(
+        args.resume_from, ddp_world_size
+    )
+    args.model_path = resolved_model_path
+    info0(
+        logger,
+        f"--resume-from: resuming step {resume_step_value} from {prior_model_dir}",
+    )
+    _log_resume_arg_diff(args.resume_from, user_config)
 
 # Output directory init
 log_dir, model_dir = create_run_dirs("rl", args.run, args_dict=user_config)
@@ -329,14 +437,14 @@ info0(
 )
 
 replay_buffer = ReplayBuffer(window_size=args.replay_buffer_window_size, seed=rank_seed)
-if args.load_buffer:
-    replay_buffer.load_from(args.load_buffer)
+if args.resume_from:
+    replay_buffer.load_from(args.resume_from)
 
 negative_buffer = NegativeBuffer(
     window_size=args.negative_buffer_window_size, seed=rank_seed
 )
-if args.load_buffer:
-    negative_buffer.load_from(args.load_buffer)
+if args.resume_from:
+    negative_buffer.load_from(args.resume_from)
 
 matchmaker_config = dataclass_from_args(MatchmakerConfig, args, prefix="mm_")
 search_config = dataclass_from_args(SearchConfig, args, prefix="search_")
@@ -346,8 +454,8 @@ matchmaker = Matchmaker(
     config=matchmaker_config,
     seed=rank_seed,
 )
-if args.load_buffer:
-    matchmaker.reconstruct_from_run_dir(args.load_buffer)
+if args.resume_from:
+    matchmaker.reconstruct_from_run_dir(args.resume_from)
 
 # Set up distributed inference (starts servers on worker ranks, builds balancer on master)
 balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
@@ -511,8 +619,29 @@ optimizer = model.setup_optimizer(
     matrix_lr=args.matrix_lr,
     weight_decay=args.weight_decay,
 )
-for group in optimizer.param_groups:
-    group["lr"] = group["lr"] * args.init_lr_frac
+if args.resume_from:
+    # Load to CPU: model weights were already loaded onto GPU by TacticModel.create
+    # above (load_checkpoint also loads the model_data, which we discard); putting
+    # the discarded copy on CPU avoids 2x peak GPU usage at startup. The optimizer
+    # state lives on CPU between training steps anyway (optimizer_to_cpu is the
+    # last thing the train phase does), and optimizer_to_gpu moves it for step().
+    _, optimizer_data, meta_data = load_checkpoint(
+        prior_model_dir,
+        resume_step_value,
+        torch.device("cpu"),
+        load_optimizer=True,
+        rank=ddp_rank,
+    )
+    optimizer.load_state_dict(optimizer_data)
+    resume_step_value = meta_data["step"]
+    info0(
+        logger,
+        f"--resume-from: loaded optimizer state at step {resume_step_value} "
+        f"(rank {ddp_rank})",
+    )
+else:
+    for group in optimizer.param_groups:
+        group["lr"] = group["lr"] * args.init_lr_frac
 
 # Note: optimizer state is lazy-initialized by PyTorch on the first step().
 # optimizer_to_cpu is called after the first step to offload it.
@@ -527,7 +656,8 @@ info0(logger, f"Eval interval: {eval_trigger.description} (from --eval-every {ar
 info0(logger, f"Save interval: {save_trigger.description} (from --save-every {args.save_every!r})")
 
 # Go!
-step = 0
+step = resume_step_value
+is_first_iter = True
 minif2f_results = None
 proofnet_results = None
 
@@ -551,16 +681,18 @@ while True:
     rl_monitor.set_step(step)
     rl_monitor.set_phase("idle")
 
-    # Always eval at step 0; time-based triggers don't fire on the first call
-    # since no time has elapsed since construction.
+    # Always eval on the first iteration of a run (fresh or resumed); on
+    # resume, this acts as a sanity check that the loaded state matches the
+    # prior run's last eval. Time-based triggers don't fire on the first
+    # call anyway, since no time has elapsed since construction.
     # Compute do_eval and do_save back-to-back here (rather than checking
     # save_trigger later in the iteration) so that with equal time-based
-    # intervals the two fire on the same step — both .fire() calls see
+    # intervals the two fire on the same step - both .fire() calls see
     # essentially the same `now`, so the threshold-crossing is identical.
     do_eval = master_process and step >= args.eval_start and (
-        step == 0 or eval_trigger.fire(step)
+        is_first_iter or eval_trigger.fire(step)
     )
-    do_save = master_process and step > 0 and save_trigger.fire(step)
+    do_save = master_process and not is_first_iter and save_trigger.fire(step)
     if ddp:
         do_eval = broadcast_value(do_eval)
     if do_eval:
@@ -943,3 +1075,4 @@ while True:
         collect_holder.rotate().save(step_dir(output_dir, step))
 
     step += 1
+    is_first_iter = False
