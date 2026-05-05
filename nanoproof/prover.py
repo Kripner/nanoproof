@@ -659,7 +659,7 @@ class ProverWorker:
 
         consecutive_errors = 0
         max_consecutive_errors = 5
-        max_retries = 3
+        max_retries = 5
 
         while not self._shutdown_event.is_set():
             # Snapshot mode and the mode-specific dispatch state under the
