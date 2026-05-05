@@ -63,7 +63,7 @@ def download_dataset():
     download_file(HF_URL, jsonl_path, desc="leantree_mathlib.jsonl")
 
 
-def __print_stats():
+def _print_stats():
     tokenizer = get_tokenizer()
     bos_token = tokenizer.get_bos_token_id()
     assert bos_token is not None
@@ -71,7 +71,7 @@ def __print_stats():
     assert eos_token is not None
     for split in ("train", "valid"):
         print(f"Loading {split=}...")
-        dataset = list(iter_data(split=split))
+        dataset = list(leantree_transitions(split=split))
         print(f"Calculating {split=}...")
         lens = {"state": [], "tactic": []}
         depths = []
@@ -144,7 +144,7 @@ def main():
         os.makedirs(DATA_DIR, exist_ok=True)
         download_dataset()
     elif args.action == "show":
-        for state, tactic in islice(leantree_transitions(split=args.split), 10):
+        for state, tactic, _ in islice(leantree_transitions(split=args.split), 10):
             print(state)
             print("\n->\n")
             print(tactic)
@@ -152,7 +152,7 @@ def main():
     elif args.action == "stats":
         _print_stats()
     else:
-        raise f"Unknown action {args.action}"
+        raise ValueError(f"Unknown action {args.action}")
 
 
 if __name__ == "__main__":
