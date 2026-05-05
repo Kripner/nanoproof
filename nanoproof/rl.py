@@ -116,6 +116,15 @@ parser.add_argument(
     "run). Use this if the prior run's per-rank optim shards are incomplete "
     "(e.g. only rank 0 was saved by an older buggy version of rl.py).",
 )
+parser.add_argument(
+    "--load-buffer",
+    type=str,
+    default=None,
+    help="path to a previous RL run's log directory; seed the replay buffer, "
+    "negative buffer, and matchmaker from its step_*/ shards without loading "
+    "the model, optimizer, or step counter. Composes with --model-path; "
+    "mutually exclusive with --resume-from.",
+)
 
 # Infrastructure
 parser.add_argument(
@@ -271,6 +280,11 @@ if (args.model_path is None) == (args.resume_from is None):
     parser.error(
         "exactly one of --model-path / --resume-from must be given (got "
         f"model_path={args.model_path!r}, resume_from={args.resume_from!r})"
+    )
+if args.load_buffer is not None and args.resume_from is not None:
+    parser.error(
+        "--load-buffer and --resume-from are mutually exclusive (--resume-from "
+        "already loads buffers)"
     )
 
 user_config = vars(args).copy()
@@ -465,15 +479,17 @@ info0(
     f"Lean version: {lean_version} (from {args.lean_project}/lean-toolchain)",
 )
 
+buffer_source = args.resume_from or args.load_buffer
+
 replay_buffer = ReplayBuffer(window_size=args.replay_buffer_window_size, seed=rank_seed)
-if args.resume_from:
-    replay_buffer.load_from(args.resume_from)
+if buffer_source:
+    replay_buffer.load_from(buffer_source)
 
 negative_buffer = NegativeBuffer(
     window_size=args.negative_buffer_window_size, seed=rank_seed
 )
-if args.resume_from:
-    negative_buffer.load_from(args.resume_from)
+if buffer_source:
+    negative_buffer.load_from(buffer_source)
 
 matchmaker_config = dataclass_from_args(MatchmakerConfig, args, prefix="mm_")
 search_config = dataclass_from_args(SearchConfig, args, prefix="search_")
@@ -483,8 +499,8 @@ matchmaker = Matchmaker(
     config=matchmaker_config,
     seed=rank_seed,
 )
-if args.resume_from:
-    matchmaker.reconstruct_from_run_dir(args.resume_from)
+if buffer_source:
+    matchmaker.reconstruct_from_run_dir(buffer_source)
 
 # Set up distributed inference (starts servers on worker ranks, builds balancer on master)
 balancer = setup_distributed_inference(tactic_model, args.inference_server_port)
