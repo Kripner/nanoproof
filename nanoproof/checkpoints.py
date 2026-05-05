@@ -209,12 +209,16 @@ def save_eval_results(
     summary: dict,
     args_dict: dict,
     prepend_entries: list[dict] = None,
+    eval_dir: str | None = None,
 ):
     """Save evaluation results alongside the checkpoint.
 
     Writes a directory containing theorems.jsonl, summary.toml, and args.json.
+    Pass ``eval_dir`` to override the default ``<checkpoint_dir>/eval_...``
+    location; otherwise the dir is derived from ``checkpoint_info``.
     """
-    eval_dir = checkpoint_info.get_eval_dir(dataset_name)
+    if eval_dir is None:
+        eval_dir = checkpoint_info.get_eval_dir(dataset_name)
     os.makedirs(eval_dir, exist_ok=True)
     write_eval_results_jsonl(
         os.path.join(eval_dir, "theorems.jsonl"),

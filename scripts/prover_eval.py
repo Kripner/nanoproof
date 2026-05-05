@@ -365,6 +365,15 @@ def main():
         "runs from colliding with the baseline directory.",
     )
     parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="write the eval directory at this exact path instead of the "
+        "default <checkpoint_dir>/eval_<step>_<dataset>/ location. Requires a "
+        "single --model-path and a single --datasets entry; incompatible with "
+        "--run-dir and --output-suffix.",
+    )
+    parser.add_argument(
         "--force", action="store_true", help="overwrite existing results"
     )
     parser.add_argument(
@@ -434,6 +443,16 @@ def main():
 
     if "leanworkbook" in datasets and args.split == "test":
         raise ValueError("leanworkbook does not have a test split")
+
+    if args.output_dir is not None:
+        if args.run_dir is not None:
+            parser.error("--output-dir is incompatible with --run-dir")
+        if len(args.model_path) > 1:
+            parser.error("--output-dir requires a single --model-path")
+        if len(datasets) > 1:
+            parser.error("--output-dir requires a single dataset")
+        if args.output_suffix:
+            parser.error("--output-dir is incompatible with --output-suffix")
 
     split_suffix = "-test" if args.split == "test" else ""
     output_suffix = args.output_suffix
@@ -530,12 +549,17 @@ def main():
         should_skip = False
         continue_data = {}
 
+        def resolve_eval_dir(dataset_name: str) -> str:
+            if args.output_dir is not None:
+                return args.output_dir
+            return checkpoint_info.get_eval_dir(
+                dataset_name + split_suffix + output_suffix
+            )
+
         if master_process:
             existing_results = []
             for dataset_name in datasets:
-                eval_dir = checkpoint_info.get_eval_dir(
-                    dataset_name + split_suffix + output_suffix
-                )
+                eval_dir = resolve_eval_dir(dataset_name)
                 theorems_path = os.path.join(eval_dir, "theorems.jsonl")
                 if os.path.exists(theorems_path):
                     if os.path.getsize(theorems_path) == 0:
@@ -774,6 +798,7 @@ def main():
                     summary,
                     model_args_dict,
                     prepend_entries=prepend,
+                    eval_dir=resolve_eval_dir(dataset_name),
                 )
 
             total_elapsed = time.monotonic() - eval_start
