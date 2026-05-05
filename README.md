@@ -2,21 +2,22 @@
 
 ![minif2f plots](dev/combined_plots.png)
 
-This is an attempt to replicate AlphaProof / HyperTree Proof Search. It is based on [nanochat](https://github.com/karpathy/nanochat) and the
-official AlphaProof pseudocode (together with several open-source datasets and tools). We have:
+An attempt to replicate AlphaProof / HyperTree Proof Search. Built on top of
+[nanochat](https://github.com/karpathy/nanochat) and the official AlphaProof
+pseudocode, with several open-source datasets and tools wired in. The pipeline
+covers:
+
 - pretraining on Nemotron-CC-Math (~20B tokens)
 - midtraining on Lean code from GitHub (~65M tokens)
-- supervised fine-tuning on LeanTree (~260k transitions extracted from Mathlib) - https://github.com/kripner/leantree
-- tokenizer based on GPT-2, adapted for Lean
-- interaction with Lean using LeanTree server
-- MCTS-based prover
-- evaluation on MiniF2F and Lean-Workbook
-- fully distributed RL training
-  - a GPU node for inference + DDP training + coordination
-  - CPU nodes for actors (provers)
-  - CPU nodes for the LeanTree servers
+- supervised fine-tuning on LeanTree (~260k transitions extracted from Mathlib, see https://github.com/kripner/leantree)
+- a GPT-2 BPE tokenizer with extra Lean / math special tokens
+- interaction with Lean via the LeanTree server
+- an MCTS-based prover with a learned policy and value head
+- evaluation on MiniF2F, Lean-Workbook, and ProofNet
+- multi-GPU RL training with DDP and a pool of actor threads driving a fleet of
+  remote Lean servers
 
-The best score achieved so far is **38.5% on MiniF2F**.
+Best score so far: **52.7% on MiniF2F (valid, 512 simulations)**.
 
 
 # Setup
@@ -27,9 +28,16 @@ uv sync --extra cpu --group dev
 source .venv/bin/activate
 ```
 
+For GPU hosts swap `--extra cpu` for `--extra gpu`.
+
+Runs (logs, checkpoints, eval results) land under `$NANOPROOF_HOME` (default
+`~/.nanoproof/`). Set the env var if you want them somewhere else.
+
+
 ## Datasets
 
-nanoproof uses several datasets across pretraining, midtraining, SFT, RL, and evaluation. They all live under [nanoproof/data/](nanoproof/data/):
+nanoproof uses several datasets across pretraining, midtraining, SFT, RL, and
+evaluation. They all live under [nanoproof/data/](nanoproof/data/):
 
 | Name | Stage | Source |
 | --- | --- | --- |
@@ -50,85 +58,78 @@ Download them all with a single command:
 python -m nanoproof.data.download
 ```
 
-Or pick a subset (individual datasets or stage aliases `pretrain`, `midtrain`, `sft`, `rl`, `bench`):
+Or pick a subset (individual datasets or stage aliases `pretrain`, `midtrain`,
+`sft`, `rl`, `bench`):
 
 ```
 python -m nanoproof.data.download minif2f proofnet leantree
 python -m nanoproof.data.download sft rl
 ```
 
-`leangithubraw` is not published to HuggingFace; build it locally from the source repos listed in [nanoproof/data/midtrain/leangithub_urls.txt](nanoproof/data/midtrain/leangithub_urls.txt):
+`leangithubraw` is not published to HuggingFace; build it locally from the
+source repos listed in [nanoproof/data/midtrain/leangithub_urls.txt](nanoproof/data/midtrain/leangithub_urls.txt):
 
 ```
 python -m nanoproof.data.midtrain.leangithubraw build
 ```
 
-The RL datasets (`leanworkbook`, `numinamath`, `deepseek_prover`) also pull a pre-computed whitelist from [data/whitelists/](data/whitelists/) alongside the source file, which `list_theorems(split, lean_version=...)` uses to skip theorems that don't initialize under the given Lean toolchain. Currently shipped for Lean `v4.27.0`; regenerate for other versions with each module's `check-init` CLI action (requires a running Lean server).
+The RL datasets (`leanworkbook`, `numinamath`, `deepseek_prover`) also pull a
+pre-computed whitelist from [data/whitelists/](data/whitelists/) alongside the
+source file. `list_theorems(split, lean_version=...)` uses it to skip theorems
+that don't initialize under the given Lean toolchain. Whitelists currently ship
+for Lean `v4.27.0`; regenerate for other versions with each module's
+`check-init` CLI action (which needs a running Lean server).
 
-Build the tokenizer (GPT-2 BPE with extra Lean/math special tokens):
+
+## Tokenizer
+
+Build the tokenizer (GPT-2 BPE plus extra Lean / math special tokens):
 
 ```
 python -m scripts.tok_build
 ```
 
-Pretrain:
+
+# Training
+
+The three pre-RL stages share the same launch shape. Run on a single GPU:
 
 ```
 python -m nanoproof.pretrain
 ```
 
-or
+Or with DDP across N GPUs:
 
 ```
-torchrun --standalone --nproc_per_node=2 -m nanoproof.pretrain
+torchrun --standalone --nproc_per_node=N -m nanoproof.pretrain
 ```
 
-Similarly with `nanoproof.midtrain` and `nanoproof.sft`.
+The same applies to `nanoproof.midtrain` and `nanoproof.sft`. Each stage writes
+its outputs under `$NANOPROOF_HOME/{stage}/` with a timestamped run directory
+that holds logs, args, and checkpoints.
 
-# Running the RL Loop
 
-The RL loop alternates between collecting proof transitions using MCTS and training the model.
+# RL Loop
 
-## Web Monitor
+The RL loop alternates between collecting MCTS rollouts and training the
+policy / value model. It runs as a single multi-GPU process (typically launched
+via `torchrun`) that talks to one or more remote LeanTree servers. There is no
+separate prover worker process; actor threads live inside the RL process.
 
-When the RL loop starts, it launches a web monitor on port 5050. Open `http://localhost:5050` in your browser to see:
-- Training stats (loss, step, samples collected)
-- Prover server status with thread-level indicators
-- GPU utilization and memory
-- Evaluation history
-- Live log stream
+## Prerequisite: Lean project
 
-To build the React frontend:
+The LeanTree server needs a Lean project with dependencies built. For MiniF2F
+evaluation you need both `mathlib` and `formal_conjectures` (which contains the
+MiniF2F formalizations).
 
-```bash
-cd nanoproof/web
-npm install
-npm run build
-```
-
-To test the monitor without running actual training:
-
-```bash
-python tests/test_cli.py
-```
-
-## Prerequisites
-
-Before running RL, you need LeanTree server(s) running (provides proof verification).
-
-### Lean Project Setup
-
-The LeanTree server requires a Lean project with dependencies built. For MiniF2F evaluation,
-you need both mathlib and `formal_conjectures` (which contains the MiniF2F formalizations).
-
-Create the project using leantree's API:
+Create the project with leantree:
 
 ```python
 from leantree import LeanProject
 LeanProject.create("my_project", lean_version="v4.27.0", libraries=["mathlib"])
 ```
 
-Then add `formal_conjectures` to `my_project/lakefile.toml`:
+Add `formal_conjectures` to `my_project/lakefile.toml`:
 
 ```toml
 [[require]]
@@ -138,23 +139,23 @@ git = "https://github.com/google-deepmind/formal-conjectures"
 rev = "89c6801f9f05cf63105d66843ed70b1e4ceb0c69"
 ```
 
-Then add an import in the root module (e.g. `my_project/MyProject.lean`) so that `lake build`
-actually builds the dependency:
+Then add an import in the root module (e.g. `my_project/MyProject.lean`) so
+that `lake build` actually builds the dependency:
 
 ```lean
 import FormalConjecturesForMathlib.Analysis.SpecialFunctions.NthRoot
 import FormalConjectures.Util.Answer
 ```
 
-Finally, run `lake update && lake build` in the project directory. The `lake update` step
-fetches dependencies and downloads the mathlib cache (pre-built `.olean` files).
+Finally, run `lake update && lake build` in the project directory. `lake
+update` fetches dependencies and downloads the prebuilt `.olean` cache.
 
-Note: the `formal_conjectures` revision must be compatible with your Lean version. The rev above
-works with Lean v4.27.0.
+The `formal_conjectures` revision must be compatible with your Lean version.
+The rev above is known to work with Lean v4.27.0.
 
-### Starting the LeanTree Server
+## Prerequisite: LeanTree server(s)
 
-For Mathlib-only (e.g. training data extraction):
+For Mathlib-only setups (e.g. SFT data extraction):
 
 ```bash
 leanserver --project-path /path/to/leantree_project/ \
@@ -165,7 +166,7 @@ leanserver --project-path /path/to/leantree_project/ \
     --port=8000
 ```
 
-For MiniF2F evaluation (requires `formal_conjectures`):
+For MiniF2F evaluation (also needs `formal_conjectures`):
 
 ```bash
 leanserver --project-path /path/to/leantree_project/ \
@@ -177,153 +178,144 @@ leanserver --project-path /path/to/leantree_project/ \
     --warmup
 ```
 
-## Local Mode (Single Node)
+`--max-processes` controls how many concurrent Lean REPLs the server can serve.
+The RL process queries each server's `/status` endpoint at startup and spawns
+exactly one actor thread per process slot, fanning across all listed servers.
+Wait for the server's imports to finish before launching RL; `/status` reports
+ready before the imports actually settle.
 
-For single-node training, simply run:
+## Launch
 
-```bash
-# Single GPU
-python -m nanoproof.rl lean_server=10.10.25.35:8000
-
-# Multi-GPU
-torchrun --standalone --nproc_per_node=2 -m nanoproof.rl lean_server=10.10.25.35:8000
-```
-
-## Distributed Mode (Multiple Nodes)
-
-For scaling across multiple nodes, the system is split into:
-- RL server (GPU nodes): handles inference, training, and coordination
-- Prover servers (CPU nodes): running MCTS proof search
-
-Prover servers automatically register with the RL server on startup and unregister on shutdown.
-
-### Infrastructure Configuration
-
-Create an `infra.toml` file to define the distributed setup:
-
-```toml
-# RL server (coordinator) - runs on GPU nodes
-[rl_server]
-address = "10.10.25.30"
-port = 5000
-
-# List of lean servers (for monitoring in the web UI)
-[[lean_servers]]
-address = "10.10.25.31"
-port = 8000
-
-[[lean_servers]]
-address = "10.10.25.32"
-port = 8000
-
-# Mapping from prover server IP addresses to lean server addresses.
-# Each prover auto-detects its IP and looks up which lean server to use.
-[prover_to_lean]
-"10.10.25.40" = "10.10.25.31:8000"
-"10.10.25.41" = "10.10.25.31:8000"
-"10.10.25.42" = "10.10.25.32:8000"
-"10.10.25.43" = "10.10.25.32:8000"
-```
-
-### Step 1: Start RL Training (on GPU node)
+Single GPU:
 
 ```bash
-torchrun --standalone --nproc_per_node=2 -m nanoproof.rl infra_file=infra.toml
+python -m nanoproof.rl \
+    --model-path sft/<run>/model_<step>.pt \
+    --lean-servers 10.10.25.31:8000 \
+    --lean-project /path/to/leantree_project
 ```
 
-The RL server will wait for prover agents to register before starting collection.
-
-### Step 2: Start Prover Servers (on CPU nodes)
-
-On each CPU node, start a prover server pointing to the infra config:
+Multi-GPU with DDP:
 
 ```bash
-python -m nanoproof.prover_server --infra-file infra.toml --num-actors 32
+torchrun --standalone --nproc_per_node=2 -m nanoproof.rl \
+    --model-path sft/<run>/model_<step>.pt \
+    --lean-servers 10.10.25.31:8000 10.10.25.32:8000 \
+    --lean-project /path/to/leantree_project
 ```
 
-Each prover automatically detects its IP address and looks up the corresponding lean server from the `[prover_to_lean]` mapping.
+`--model-path` is resolved relative to `$NANOPROOF_HOME/models/` if not
+absolute. `--lean-project` falls back to `$LEAN_PROJECT_PATH` if unset; the
+Lean version is read from its `lean-toolchain` file and used to pick the
+matching dataset whitelists.
 
-Alternatively, you can specify servers explicitly:
+To resume a crashed run, point at the prior log directory instead of supplying
+a model:
 
 ```bash
-python -m nanoproof.prover_server \
-    --rl-server 10.10.25.30:5000 \
-    --lean-server 10.10.25.31:8000 \
-    --num-actors 32
+torchrun --standalone --nproc_per_node=2 -m nanoproof.rl \
+    --resume-from rl/<prior_run> \
+    --lean-servers ... --lean-project ...
 ```
 
-The prover will automatically register itself with the RL server. You can start/stop prover servers at any time - collection will continue with available provers.
+This loads the latest checkpoint (model, optimizer, step, replay and negative
+buffer shards, matchmaker stats). If the prior run only saved partial optimizer
+state, add `--resume-fresh-optimizer` to start the optimizer from scratch.
 
-### Architecture Overview
+Useful collection / training flags:
 
-```
-GPU Node (torchrun with DDP)
-┌─────────────────────────────────────────────────────────────┐
-│                                                             │
-│  ┌─────────────┐  ┌─────────────┐       ┌─────────────┐     │
-│  │ Rank 0      │  │ Rank 1      │  ...  │ Rank N      │     │
-│  │ - Training  │  │ - Training  │       │ - Training  │     │
-│  │ - Inference │  │ - Inference │       │ - Inference │     │
-│  │   :5001     │  │   :5002     │       │   :500N+1   │     │
-│  └──────┬──────┘  └──────┬──────┘       └──────┬──────┘     │
-│         │                │                     │            │
-│         └────────────────┼─────────────────────┘            │
-│                          ▼                                  │
-│              ┌───────────────────────┐                      │
-│              │  Coordinator (:5000)  │ (master only)        │
-│              │  - Registry           │                      │
-│              │  - Dispatcher         │                      │
-│              │  - Load balancer      │                      │
-│              │  - Web monitor (:5050)│                      │
-│              └───────────┬───────────┘                      │
-└──────────────────────────┼──────────────────────────────────┘
-                           │
-           ┌───────────────┼───────────────┐
-           ▼               ▼               ▼
-┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
-│ Prover Server 1 │ │ Prover Server 2 │ │ Prover Server N │
-│ (CPU Node)      │ │ (CPU Node)      │ │ (CPU Node)      │
-│ - MCTS actors   │ │ - MCTS actors   │ │ - MCTS actors   │
-│ - :5001         │ │ - :5001         │ │ - :5001         │
-└────────┬────────┘ └────────┬────────┘ └────────┬────────┘
-         │                   │                   │
-         └───────────────────┼───────────────────┘
-                             ▼
-              ┌─────────────────────────┐
-              │  Lean Server(s) (:8000) │
-              │  - Proof verification   │
-              └─────────────────────────┘
+- `--datasets numinamath leanworkbook deepseek_prover` chooses the theorem mix.
+- `--num-sampled-tactics`, `--num-simulations-eval`, `--first-token-occurrences-cap`,
+  `--max-gen-tokens` tune the search.
+- `--disable-solvers` filters `{grind, lia, grobner, aesop}` from model output.
+  Collection still tries `grind` on unexpanded leaves as a free finisher (kept
+  in the proof tree but excluded from the replay buffer); eval injects `grind`
+  as a synthetic candidate at every node.
+- `--no-proof-simplification` skips the redundant-node prune during collection.
+- `--unlikelihood-weight`, `--negative-fraction`, `--negative-buffer-window-size`
+  control unlikelihood training on failed tactics.
+- `--value-weight`, `--fraction-sft`, `--device-batch-size`,
+  `--target-examples-per-step`, `--num-updates-per-step` shape the training
+  step.
+- `--eval-every`, `--save-every`, `--eval-start` accept either `Nsteps` or a
+  `H:M:S` interval.
+- `--memory-profile DIR` dumps a CUDA memory snapshot on first OOM.
+
+Run `python -m nanoproof.rl --help` for the full list.
+
+## Web monitor
+
+When the RL loop starts on the master rank, it launches a Flask monitor on
+`http://localhost:5050`. The page shows training stats, prover thread states,
+GPU and Lean server health, evaluation history, and a live log stream.
+
+The React frontend lives in [nanoproof/web/](nanoproof/web/):
+
+```bash
+cd nanoproof/web
+npm install
+npm run build
 ```
 
-**Coordinator** (master process, port 5000):
-- Maintains registry of prover servers (`/register`, `/unregister`)
-- Dispatches theorems to provers (`/get_theorem`)
-- Receives back proof results (`/submit_result`)
-- Load-balances inference requests across GPUs
-- Hosts web monitor at port 5050
+To poke at the UI without running real training:
 
-**Inference servers** (one per GPU rank, ports 5001+):
-- Batches tactic generation requests (until enough are collected or timeout runs out)
+```bash
+python tests/test_cli.py
+```
 
-**Prover servers** (CPU nodes):
-- Registers on startup, unregisters on shutdown
-- Runs multiple MCTS actors in parallel
-- Requests theorems from coordinator
-- Submits results (proofs and stats) back to coordinator
 
-**Training loop** (all GPU ranks via DDP):
-1. Collection: provers search for proofs, submit transitions
-2. Training: pause inference, gradient step, resume inference
-3. Evaluation (once in a while): provers evaluate on MiniF2F/LeanWorkbook
-4. Repeat
+# Evaluation
+
+Use `scripts/prover_eval.py` to score a checkpoint on a benchmark:
+
+```bash
+python scripts/prover_eval.py \
+    --model-path rl/<run>/model_<step>.pt \
+    --lean-servers 10.10.25.31:8000 10.10.25.32:8000 \
+    --datasets minif2f \
+    --split valid \
+    --num-simulations 512
+```
+
+Pass `--run-dir rl/<run>` instead of `--model-path` to sweep every checkpoint
+in the run; the order is bisected (middle, quartiles, eighths) so an
+interrupted sweep still has even step coverage. `--datasets` accepts a
+comma-separated subset of `minif2f,leanworkbook,proofnet`. `--continue` retries
+only theorems that previously errored, `--force` overwrites prior results, and
+`--output-dir` overrides the default `<checkpoint_dir>/eval_<step>_<dataset>/`
+location (single model + single dataset only). Most of the search and
+inference flags from `nanoproof.rl` are also available here.
+
+For a quick repeat-runs estimate of MiniF2F-test variance:
+
+```bash
+python scripts/test_eval.py \
+    --model-path rl/<run>/model_<step>.pt \
+    --lean-servers ... \
+    --num-runs 8
+```
+
+
+# Other scripts
+
+A handful of small utilities under `scripts/`:
+
+- `scripts/prove.py` runs the prover against a single theorem (or REPL).
+- `scripts/interact.py` is an interactive prover REPL (raw engine or tactic model).
+- `scripts/bench_inference.py` benchmarks tactic-generation throughput.
+- `scripts/inspect_buffer.py`, `inspect_parquet.py`, `inspect_problems.py`,
+  `inspect_proofs.py` print the contents of replay buffers, parquet shards,
+  and proof artifacts.
+- `scripts/tok_eval.py`, `scripts/tok_show.py` inspect the tokenizer.
 
 
 # Ideas
 
-- try training on state_after as well, just to give the model more training signal (it was done in some paper, maybe GPT-f)
+- try training on `state_after` as well, just to give the model more training
+  signal (it was done in some paper, maybe GPT-f)
 - let tokens attend bi-directionally inside the fixed-size state (a la PrefixLM)
-- try proving the negation in each node (if critic deems it likely to succeed)
-- critic training: samplig ratio based on proof length (a la https://leandojo.org/leanprogress.html)
+- try proving the negation in each node (if the critic deems it likely to succeed)
+- critic training: sampling ratio based on proof length (a la https://leandojo.org/leanprogress.html)
 - tactic logprob filtering and retraining (akin to BFS-Prover-2)
 
 
@@ -333,7 +325,7 @@ If you find nanoproof helpful in your research cite simply as:
 
 ```
 @misc{nanoproof,
-  author = {Matěj Kripner},
+  author = {Matej Kripner},
   title = {nanoproof},
   year = {2025},
   publisher = {GitHub},
