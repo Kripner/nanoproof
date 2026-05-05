@@ -108,6 +108,14 @@ parser.add_argument(
     "replay/negative buffers from its step_*/ shards, and replays matchmaker "
     "stats. Mutually exclusive with --model-path.",
 )
+parser.add_argument(
+    "--resume-fresh-optimizer",
+    action="store_true",
+    help="when used with --resume-from, skip loading the prior optimizer state "
+    "and start with a fresh optimizer (init_lr_frac is applied as in a fresh "
+    "run). Use this if the prior run's per-rank optim shards are incomplete "
+    "(e.g. only rank 0 was saved by an older buggy version of rl.py).",
+)
 
 # Infrastructure
 parser.add_argument(
@@ -284,12 +292,15 @@ set_ddp_info(rank=ddp_rank)
 faulthandler.register(signal.SIGUSR1, all_threads=True)
 
 
-def _resolve_resume(prior_log_dir: str, world_size: int) -> tuple[str, int, str]:
+def _resolve_resume(
+    prior_log_dir: str, world_size: int, require_optim: bool
+) -> tuple[str, int, str]:
     """Resolve a --resume-from log dir to (prior_model_dir, latest_step, model_path).
 
-    Picks the largest N for which model_NNNNNN.pt, meta_NNNNNN.json, and
-    optim_NNNNNN_rank{r}.pt for every r in [0, world_size) all exist in the
-    matching model dir.
+    Picks the largest N for which model_NNNNNN.pt and meta_NNNNNN.json exist
+    in the matching model dir. When ``require_optim`` is True, also requires
+    optim_NNNNNN_rank{r}.pt for every r in [0, world_size) - skip with
+    --resume-fresh-optimizer if the prior shards are incomplete.
     """
     if "/logs/" not in prior_log_dir:
         raise ValueError(
@@ -316,22 +327,29 @@ def _resolve_resume(prior_log_dir: str, world_size: int) -> tuple[str, int, str]
         meta_path = os.path.join(prior_model_dir, f"meta_{step_n:06d}.json")
         if not os.path.exists(meta_path):
             continue
-        optim_paths = [
-            os.path.join(prior_model_dir, f"optim_{step_n:06d}_rank{r}.pt")
-            for r in range(world_size)
-        ]
-        if all(os.path.exists(p) for p in optim_paths):
-            model_path = os.path.join(prior_model_dir, f"model_{step_n:06d}.pt")
-            return prior_model_dir, step_n, model_path
-        missing = [p for p in optim_paths if not os.path.exists(p)]
-        info0(
-            logger,
-            f"--resume-from: skipping step {step_n} (missing {missing}); "
-            "this happens if world_size differs from the prior run.",
-        )
+        if require_optim:
+            optim_paths = [
+                os.path.join(prior_model_dir, f"optim_{step_n:06d}_rank{r}.pt")
+                for r in range(world_size)
+            ]
+            missing = [p for p in optim_paths if not os.path.exists(p)]
+            if missing:
+                info0(
+                    logger,
+                    f"--resume-from: skipping step {step_n} (missing {missing}); "
+                    "rerun with --resume-fresh-optimizer to ignore optim shards.",
+                )
+                continue
+        model_path = os.path.join(prior_model_dir, f"model_{step_n:06d}.pt")
+        return prior_model_dir, step_n, model_path
+    suffix = (
+        f" with all optim_*_rank<r>.pt files for world_size={world_size}"
+        if require_optim
+        else ""
+    )
     raise FileNotFoundError(
-        f"--resume-from: no checkpoint in {prior_model_dir} has all of "
-        f"model+meta+optim files for world_size={world_size}"
+        f"--resume-from: no checkpoint in {prior_model_dir} has model+meta files"
+        + suffix
     )
 
 
@@ -367,15 +385,26 @@ def _log_resume_arg_diff(prior_log_dir: str, current_args: dict) -> None:
 
 prior_model_dir = None
 resume_step_value = 0
+if args.resume_from is None and args.resume_fresh_optimizer:
+    parser.error("--resume-fresh-optimizer requires --resume-from")
 if args.resume_from is not None:
     prior_model_dir, resume_step_value, resolved_model_path = _resolve_resume(
-        args.resume_from, ddp_world_size
+        args.resume_from,
+        ddp_world_size,
+        require_optim=not args.resume_fresh_optimizer,
     )
     args.model_path = resolved_model_path
-    info0(
-        logger,
-        f"--resume-from: resuming step {resume_step_value} from {prior_model_dir}",
-    )
+    if args.resume_fresh_optimizer:
+        info0(
+            logger,
+            f"--resume-from: resuming step {resume_step_value} from {prior_model_dir} "
+            "(fresh optimizer; init_lr_frac will be applied)",
+        )
+    else:
+        info0(
+            logger,
+            f"--resume-from: resuming step {resume_step_value} from {prior_model_dir}",
+        )
     _log_resume_arg_diff(args.resume_from, user_config)
 
 # Output directory init
@@ -619,7 +648,7 @@ optimizer = model.setup_optimizer(
     matrix_lr=args.matrix_lr,
     weight_decay=args.weight_decay,
 )
-if args.resume_from:
+if args.resume_from and not args.resume_fresh_optimizer:
     # Load to CPU: model weights were already loaded onto GPU by TacticModel.create
     # above (load_checkpoint also loads the model_data, which we discard); putting
     # the discarded copy on CPU avoids 2x peak GPU usage at startup. The optimizer
@@ -695,6 +724,11 @@ while True:
     do_save = master_process and not is_first_iter and save_trigger.fire(step)
     if ddp:
         do_eval = broadcast_value(do_eval)
+        # All ranks must enter the save block: each saves its own optim shard
+        # via save_checkpoint(rank=ddp_rank). Without this broadcast only rank
+        # 0's optim file is written and the run cannot be resumed at the
+        # original world_size.
+        do_save = broadcast_value(do_save)
     if do_eval:
         timer.start("eval")
         rl_monitor.record_phase_event("eval", "start")
