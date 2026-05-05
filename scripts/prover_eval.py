@@ -101,6 +101,90 @@ def merge_continue_results(results: dict, prepend_entries: list[dict] | None) ->
     }
 
 
+def retry_errored_theorems(
+    prover,
+    results: dict,
+    *,
+    dataset_name: str,
+    num_simulations: int,
+    search_config: SearchConfig,
+    disable_solvers: bool,
+    max_retries_per_theorem: int,
+    max_retried_theorems: int,
+) -> dict:
+    """Re-run errored entries in ``results`` up to ``max_retries_per_theorem`` times.
+
+    Skips retries when the initial pass produced more than
+    ``max_retried_theorems`` errors: at that scale the failure is almost
+    always systemic (server crash, OOM) and re-running burns budget on
+    something a human needs to diagnose.
+
+    Replaces errored entries in-place by id; returns a refreshed results dict
+    with updated solved/errors counts.
+    """
+    if max_retries_per_theorem <= 0:
+        return results
+    detailed = list(results.get("detailed_results", []))
+    initial_errors = sum(1 for r in detailed if r.get("error"))
+    if initial_errors == 0:
+        return results
+    if initial_errors > max_retried_theorems:
+        print0(
+            f"  retry: {initial_errors} errored theorems exceeds "
+            f"--max-retried-theorems={max_retried_theorems}, skipping retries"
+        )
+        return results
+
+    for attempt in range(1, max_retries_per_theorem + 1):
+        error_indices = [i for i, r in enumerate(detailed) if r.get("error")]
+        if not error_indices:
+            break
+        retry_theorems = [
+            BenchTheorem(
+                source=detailed[i]["theorem"],
+                dataset=detailed[i]["dataset"],
+                id=detailed[i]["id"],
+            )
+            for i in error_indices
+        ]
+        print0(
+            f"  retry attempt {attempt}/{max_retries_per_theorem}: "
+            f"re-running {len(retry_theorems)} errored theorems"
+        )
+        retry_start = time.monotonic()
+        retry_results = prover.evaluate(
+            retry_theorems,
+            dataset_name=dataset_name,
+            num_simulations=num_simulations,
+            search_config=search_config,
+            disable_solvers=disable_solvers,
+        )
+        retry_elapsed = time.monotonic() - retry_start
+        retry_by_id = {
+            r["id"]: r for r in retry_results.get("detailed_results", [])
+        }
+        for i in error_indices:
+            replacement = retry_by_id.get(detailed[i]["id"])
+            if replacement is not None:
+                detailed[i] = replacement
+        remaining = sum(1 for r in detailed if r.get("error"))
+        print0(
+            f"  retry attempt {attempt} done in {retry_elapsed:.1f}s: "
+            f"errors {len(error_indices)} -> {remaining}"
+        )
+
+    total = len(detailed)
+    solved = sum(1 for r in detailed if r["is_solved"])
+    errors = sum(1 for r in detailed if r.get("error"))
+    return {
+        "success_rate": solved / total if total > 0 else 0.0,
+        "solved": solved,
+        "total": total,
+        "errors": errors,
+        "detailed_results": detailed,
+    }
+
+
 def compute_success_rate_by_simulations(results, num_simulations):
     """Return ``{threshold: success_rate}`` for thresholds <= num_simulations.
 
@@ -288,6 +372,23 @@ def main():
         dest="continue_eval",
         action="store_true",
         help="retry only theorems that failed with errors",
+    )
+    parser.add_argument(
+        "--max-retries-per-theorem",
+        type=int,
+        default=2,
+        help="after the initial pass, re-run any errored theorems up to this "
+        "many times (set 0 to disable). Most errors here are transient "
+        "(leanserver hiccups), so a small budget recovers them in-process "
+        "instead of forcing a separate --continue run.",
+    )
+    parser.add_argument(
+        "--max-retried-theorems",
+        type=int,
+        default=8,
+        help="cap on how many errored theorems are eligible for retry. If "
+        "the initial pass produced more errors than this, skip retries: at "
+        "that scale the failure is almost certainly systemic.",
     )
     parser.add_argument("--inference-server-port", type=int, default=5000)
     parser.add_argument(
@@ -519,6 +620,7 @@ def main():
         inner_tactic_model = TacticModel.create(
             num_samples=args.num_sampled_tactics,
             model_path=model_path,
+            seed=args.seed,
             first_token_occurrences_cap=args.first_token_occurrences_cap,
             max_gen_tokens=args.max_gen_tokens,
             disable_solvers=args.disable_solvers,
@@ -623,6 +725,17 @@ def main():
                 dataset_elapsed = time.monotonic() - dataset_start
                 done.set()
                 printer.join()
+
+                results = retry_errored_theorems(
+                    prover,
+                    results,
+                    dataset_name=dataset_name,
+                    num_simulations=args.num_simulations,
+                    search_config=search_config,
+                    disable_solvers=args.disable_solvers,
+                    max_retries_per_theorem=args.max_retries_per_theorem,
+                    max_retried_theorems=args.max_retried_theorems,
+                )
 
                 prepend = (
                     continue_data.get(dataset_name, (None, None))[0]
