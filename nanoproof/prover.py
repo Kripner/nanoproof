@@ -774,24 +774,29 @@ class ProverWorker:
                         RemoteException,
                         TimeoutError,
                     ) as e:
+                        crash_tactic = getattr(e, "lean_crash_tactic", None)
+                        tactic_info = (
+                            f" tactic={crash_tactic!r}" if crash_tactic is not None else ""
+                        )
                         if attempt < max_retries - 1:
                             self._set_thread_state(actor_id, "retry")
                             short_err = str(e).split("\n", 1)[0]
                             logger.warning(
-                                f"[Actor {actor_id}] Connection error (attempt {attempt + 1}/{max_retries}): '{short_err}', reconnecting..."
+                                f"[Actor {actor_id}] Connection error (attempt {attempt + 1}/{max_retries}){tactic_info}: '{short_err}', reconnecting..."
                             )
                             time.sleep(1.0 * (attempt + 1))
                         else:
                             error = str(e)
                             consecutive_errors += 1
                             logger.error(
-                                f"[Actor {actor_id}] Error (lean={lean_address}:{lean_port}): {e}"
+                                f"[Actor {actor_id}] Error (lean={lean_address}:{lean_port}){tactic_info}: {e}"
                             )
                             log_actionable_error(
                                 "Prover",
                                 str(e),
                                 actor=actor_id,
                                 lean=f"{lean_address}:{lean_port}",
+                                tactic=crash_tactic,
                                 retries_exhausted=True,
                             )
                     except MCTSAbortedError:

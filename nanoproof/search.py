@@ -337,7 +337,18 @@ def verify_node(node: Node, timeout: int = 5000):
             for action in solved_actions:
                 child = node.children[action]
 
-                result = branch.try_apply_tactic(action, timeout=timeout)
+                try:
+                    result = branch.try_apply_tactic(action, timeout=timeout)
+                except (
+                    RemoteException,
+                    LeanProcessException,
+                    ConnectionError,
+                    TimeoutError,
+                ) as e:
+                    short_err = str(e).split("\n", 1)[0]
+                    logger.warning(f"verify_node: Lean crash on tactic {action!r}: {short_err}")
+                    e.lean_crash_tactic = action
+                    raise
                 if not result.is_success():
                     return f"verify_node: Tactic application error: '{result.error}'; state: '{branch.state}'; action: `{action}`"
 
@@ -397,7 +408,18 @@ def execute_tree(
             for action in solved_actions:
                 child = node.children[action]
 
-                result = branch.try_apply_tactic(action, timeout=5000)
+                try:
+                    result = branch.try_apply_tactic(action, timeout=5000)
+                except (
+                    RemoteException,
+                    LeanProcessException,
+                    ConnectionError,
+                    TimeoutError,
+                ) as e:
+                    short_err = str(e).split("\n", 1)[0]
+                    logger.warning(f"execute_tree: Lean crash on tactic {action!r}: {short_err}")
+                    e.lean_crash_tactic = action
+                    raise
                 assert result.is_success(), (
                     f"execute_tree (OR): Tactic application error: '{result.error}'; state: '{branch.state}'; action: `{action}`"
                 )
@@ -689,6 +711,7 @@ def expand_node(
             ) as e:
                 short_err = str(e).split("\n", 1)[0]
                 logger.warning(f"Lean crash on tactic {action!r}: {short_err}")
+                e.lean_crash_tactic = action
                 raise
             if not new_branches.is_success():
                 # Invalid action encountered.
