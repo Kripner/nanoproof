@@ -2,7 +2,7 @@
 
 ![minif2f plots](dev/combined_plots.png)
 
-An attempt to replicate AlphaProof / HyperTree Proof Search. Built on top of
+Open and efficient automated theorem prover. Built on top of
 [nanochat](https://github.com/karpathy/nanochat) and the official AlphaProof
 pseudocode, with several open-source datasets and tools wired in. The pipeline
 covers:
