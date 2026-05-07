@@ -67,7 +67,6 @@ from nanoproof.inference import (
 from nanoproof.optim import optimizer_to_cpu, optimizer_to_gpu
 from nanoproof.data.bench import minif2f
 from nanoproof.data.check_init import read_lean_version, resolve_lean_project
-from nanoproof.data.bench import proofnet
 from nanoproof.cli import create_monitor, configure_logging, set_ddp_info
 from nanoproof.common import info0
 
@@ -704,7 +703,6 @@ info0(logger, f"Save interval: {save_trigger.description} (from --save-every {ar
 step = resume_step_value
 is_first_iter = True
 minif2f_results = None
-proofnet_results = None
 
 
 def cleanup():
@@ -793,7 +791,6 @@ while True:
         # Worker ranks poll via active_barrier so their inference servers stay responsive.
         if master_process:
             minif2f_theorems = minif2f.list_theorems(split="valid")
-            proofnet_theorems = proofnet.list_theorems(split="valid")
 
             logger.info(
                 f"Evaluating on {len(minif2f_theorems)} theorems from MiniF2F"
@@ -801,17 +798,6 @@ while True:
             minif2f_results = prover.evaluate(
                 minif2f_theorems,
                 dataset_name="MiniF2F",
-                num_simulations=args.num_simulations_eval,
-                search_config=search_config,
-                tactic_sink=eval_experience.record_tactic,
-                disable_solvers=args.disable_solvers,
-            )
-            logger.info(
-                f"Evaluating on {len(proofnet_theorems)} theorems from ProofNet"
-            )
-            proofnet_results = prover.evaluate(
-                proofnet_theorems,
-                dataset_name="ProofNet",
                 num_simulations=args.num_simulations_eval,
                 search_config=search_config,
                 tactic_sink=eval_experience.record_tactic,
@@ -826,18 +812,9 @@ while True:
                 minif2f_results["total"],
                 minif2f_results["errors"],
             )
-            rl_monitor.record_eval(
-                step,
-                "ProofNet",
-                proofnet_results["success_rate"],
-                proofnet_results["solved"],
-                proofnet_results["total"],
-                proofnet_results["errors"],
-            )
 
             minif2f_status = f"minif2f: {minif2f_results['success_rate']:.4%} ({minif2f_results['solved']}/{minif2f_results['total']}, errors={minif2f_results['errors']})"
-            proofnet_status = f"proofnet: {proofnet_results['success_rate']:.4%} ({proofnet_results['solved']}/{proofnet_results['total']}, errors={proofnet_results['errors']})"
-            logger.info(f"Step {step:05d} | {minif2f_status} | {proofnet_status}")
+            logger.info(f"Step {step:05d} | {minif2f_status}")
 
             wandb_data = {
                 "step": step,
@@ -849,16 +826,12 @@ while True:
                 "val_critic_soft_mse": critic_results["soft_mse"],
                 "val_critic_entropy": critic_results["entropy"],
                 "minif2f_val": minif2f_results["success_rate"],
-                "proofnet_val": proofnet_results["success_rate"],
             }
             if minif2f_results["errors"] > 0:
                 wandb_data["minif2f_errors"] = minif2f_results["errors"]
-            if proofnet_results["errors"] > 0:
-                wandb_data["proofnet_errors"] = proofnet_results["errors"]
             run_log.log(wandb_data)
 
             save_eval_results_to_run_dir(output_dir, step, "minif2f", minif2f_results)
-            save_eval_results_to_run_dir(output_dir, step, "proofnet", proofnet_results)
 
             save_eval_summary_to_run_dir(
                 output_dir,
@@ -870,12 +843,6 @@ while True:
                         "solved": minif2f_results["solved"],
                         "total": minif2f_results["total"],
                         "errors": minif2f_results["errors"],
-                    },
-                    "proofnet": {
-                        "success_rate": proofnet_results["success_rate"],
-                        "solved": proofnet_results["solved"],
-                        "total": proofnet_results["total"],
-                        "errors": proofnet_results["errors"],
                     },
                     "tactic": {
                         "full_acc": tactic_results["full_acc"],
@@ -952,8 +919,6 @@ while True:
         }
         if minif2f_results:
             checkpoint_meta["minif2f_val"] = minif2f_results["success_rate"]
-        if proofnet_results:
-            checkpoint_meta["proofnet_val"] = proofnet_results["success_rate"]
         save_checkpoint(
             model_dir,
             step,
