@@ -13,11 +13,10 @@ covers:
 - a GPT-2 BPE tokenizer with extra Lean / math special tokens
 - interaction with Lean via the LeanTree server
 - an MCTS-based prover with a learned policy and value head
-- evaluation on MiniF2F, Lean-Workbook, and ProofNet
 - multi-GPU RL training with DDP and a pool of actor threads driving a fleet of
   remote Lean servers
 
-Best score so far: **52.7% on MiniF2F (valid, 512 simulations)**.
+Best score so far: **52.7% on MiniF2F-Valid (512 simulations)**.
 
 
 # Setup
