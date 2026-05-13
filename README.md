@@ -316,6 +316,11 @@ A handful of small utilities under `scripts/`:
 - try proving the negation in each node (if the critic deems it likely to succeed)
 - critic training: sampling ratio based on proof length (a la https://leandojo.org/leanprogress.html)
 - tactic logprob filtering and retraining (akin to BFS-Prover-2)
+- critic: predict relative change (state before -> state after) instead of absolute distance
+- train with per-edge policy gradient; maybe use the n generated tactics as a GRPO group
+- weighted sampling from replay buffer - maybe based on norm of past gradients, how many times they
+  were already used, the "off-policiness", or how many times the tactic is present in the replay
+  buffer (https://arxiv.org/pdf/2604.08706)
 
 
 # Cite

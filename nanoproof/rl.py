@@ -74,10 +74,10 @@ logger = logging.getLogger(__name__)
 from scripts.policy_eval import eval_tactic_accuracy, eval_critic_errors
 from nanoproof.data.sft.leantree_dataloader import sft_data_generator
 
+
 # TODO: maybe log numbers of OR and AND nodes in the proof searches
-
 # TODO: the eval is now a bit unfair, since when the prover finds an invalid (e.g. self-referential) proof, it's not allowed to continue
-
+# TODO: use https://github.com/leanprover/comparator
 
 # -----------------------------------------------------------------------------
 # RL Hyperparameters
@@ -226,6 +226,9 @@ parser.add_argument(
 parser.add_argument("--fraction-sft", type=float, default=0.1)
 parser.add_argument("--augment-data", type=bool, default=True)
 parser.add_argument("--value-weight", type=float, default=0.01)
+# Truncation happens much more often than in the positive replay buffer, since much more negative
+# samples are generated. This is good because the more off-policy, the more we'd like to focus only
+# on positive samples and disregard negative samples: https://arxiv.org/abs/2506.20520
 parser.add_argument(
     "--negative-buffer-window-size",
     type=int,
