@@ -320,14 +320,14 @@ A handful of small utilities under `scripts/`:
 
 # Cite
 
-If you find nanoproof helpful in your research cite simply as:
+If you find nanoproof helpful in your research cite as:
 
 ```
-@misc{nanoproof,
-  author = {Matej Kripner},
-  title = {nanoproof},
-  year = {2025},
-  publisher = {GitHub},
-  url = {https://github.com/kripner/nanoproof}
+@article{nanoproof,
+  title={NanoProof: Open and Efficient Automated Theorem Proving in Lean 4},
+  author={Matěj Kripner and Milan Straka},
+  journal={arXiv preprint arXiv:2610.11605},
+  year={2026},
+  url={https://arxiv.org/abs/2610.11605}
 }
 ```
